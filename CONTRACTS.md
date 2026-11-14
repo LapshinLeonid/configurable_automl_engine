@@ -305,7 +305,7 @@ guard-а, которое остаётся в движке.
 
 | Символ | Тип | Решение | Где остаётся |
 |---|---|---|---|
-| `check_custom_metric_names` | функция | move в контракт | чистая проверка имён; runtime-проверка callable — в движке |
+| `check_custom_metric_names` | функция | split | в контракте — только проверка формата имени (`ERR_CUSTOM_NAME_INVALID`); проверка коллизий (`reserved_metric_names()`, `ERR_CUSTOM_NAME_COLLISION`) и проверка callable — в движке |
 | `check_metric_references` | функция | move в контракт | использует контрактный набор встроенных метрик + имена `custom_metrics` |
 | `deduplicate_additional_metrics` | функция | move в контракт | чистая функция |
 | `exclude_comparison_from_additional` | функция | move в контракт | нужен контрактный alias-map `to_sklearn_name` |
@@ -446,7 +446,7 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 | `user_direction`, `is_error_metric`, `is_greater_better`, `get_scorer_object` | функции | движок, тесты | `...common.metrics` | остаются в движке | internal | internal | internal |
 | `reserved_metric_names` | функция | runtime-валидация custom metrics | `...common.metrics` | остаётся в движке | internal | internal | internal |
 | `CustomMetricKind` | `Literal` | `CustomMetricSpec` | `...common.custom_metrics.CustomMetricKind` | `automl_contracts.custom_metrics.CustomMetricKind` | public | move + re-export | beta |
-| `CustomMetricSpec` | Pydantic-модель | корневой `__init__`, `GeneralCfg`, `optimize`, API_REFERENCE | `...common.custom_metrics.CustomMetricSpec`, `configurable_automl_engine.CustomMetricSpec` | `automl_contracts.custom_metrics.CustomMetricSpec` | public | needs-decision: рекомендуется move полей/структуры + runtime-валидация в движке | beta |
+| `CustomMetricSpec` | Pydantic-модель | корневой `__init__`, `GeneralCfg`, `optimize`, API_REFERENCE | `...common.custom_metrics.CustomMetricSpec`, `configurable_automl_engine.CustomMetricSpec` | `automl_contracts.custom_metrics.CustomMetricSpec` | public | move полей/структуры + `cache_key`; runtime-валидация callable в движке (решение C2) | beta |
 | `ERR_IMPORT`, `ERR_NOT_CALLABLE`, `ERR_BAD_SIGNATURE`, `ERR_DIRECTION_REQUIRED`, `ERR_DIRECTION_CONFLICT`, `ERR_KWARGS_UNSUPPORTED` | коды ошибок | pydantic-ошибки custom metrics | `...common.custom_metrics` | остаются в движке | internal | internal | internal |
 | `ERR_CUSTOM_NAME_INVALID` | `str` (код ошибки) | структурная проверка имени custom metric | `...common.metrics.ERR_CUSTOM_NAME_INVALID` | `automl_contracts.custom_metrics.ERR_CUSTOM_NAME_INVALID` | public | move + re-export | stable |
 | `ERR_CUSTOM_NAME_COLLISION` | `str` (код ошибки) | runtime-проверка коллизий со sklearn | `...common.metrics.ERR_CUSTOM_NAME_COLLISION` | остаётся в движке | internal | internal | internal |
@@ -465,11 +465,19 @@ automl_contracts.feature_selection.FeatureSelectionCfg` обязательна.
 `sklearn.metrics.get_scorer_names()`.
 
 `CustomMetricSpec` — публичная декларация (корневой экспорт). В контракте
-остаются поля `path`, `kind`, `greater_is_better`, `additive`, `kwargs` и
-структурные проверки. Импорт callable, проверка сигнатуры, разрешение
-направления по sklearn scorer-у и проверка коллизий имён со sklearn — runtime-
-валидация движка. Старый `CustomMetricSpec` должен продолжать проверять
-callable при создании в движке; в контракте эта проверка недоступна.
+остаются поля `path`, `kind`, `greater_is_better`, `additive`, `kwargs`,
+свойство `cache_key` и структурные проверки. Импорт callable, проверка
+сигнатуры, разрешение направления по sklearn scorer-у и проверка коллизий имён
+со sklearn — runtime-валидация движка. Решение C2 (ADR
+`docs/adr/0001-contracts-package.md`, §10.3/§11.3): старый путь
+`configurable_automl_engine.CustomMetricSpec` — реэкспорт той же контрактной
+модели (`is`), поэтому конструктор выполняет только структурные проверки; он
+больше не импортирует callable и не проверяет сигнатуру. Runtime-проверка
+выполняется движком на входе в публичные entry point: `train_best_model` и
+`AutoMLExperiment` — в конфигурационном пути (`read_config`/`load_config` →
+`validate_runtime_config`), `optimize` и `ModelTrainer` — в
+`validate_custom_metrics`. Свойство `natural_greater_is_better` в контракт не
+переносится; движок предоставляет функцию `natural_greater_is_better(spec)`.
 
 ### 4.9. DTO результатов
 
@@ -567,10 +575,14 @@ DTO/enum-ы и на старые пути из таблицы 5.1.
 * `ExperimentResult(...)` принимает стандартные числа; numpy-скаляры
   нормализуются движком до передачи в модель.
 
-Если C2 решит сохранить старый конструктор `CustomMetricSpec` с немедленной
-проверкой callable, это потребует отдельного engine-класса/обёртки и явного
-решения о том, что именно реэкспортируется. Нельзя одновременно обещать
-идентичность класса и разное поведение конструктора без такого решения.
+Решение C2 по `CustomMetricSpec`: идентичность класса сохраняется (старый путь
+— реэкспорт `is`), поэтому прямой конструктор, включая старый engine-путь,
+выполняет только структурные проверки. Импорт callable и проверка сигнатуры
+переносятся на entry point движка (`validate_runtime_config` для
+`train_best_model`/`AutoMLExperiment`, `validate_custom_metrics` для
+`optimize`/`ModelTrainer`); это согласованное изменение поведения конструктора,
+зафиксированное в ADR §11.3 и проверяемое в C5. Отдельный engine-класс с
+немедленной проверкой не создаётся: он нарушил бы `is`-идентичность.
 
 ## 5. Матрица обратной совместимости путей импорта
 
@@ -596,7 +608,7 @@ enum-ов и исключений. Для type aliases и констант пр�
 | `configurable_automl_engine.experiment` | `AlgorithmRun`, `ExperimentResult`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, reporters/store/leaderboard/export/explain | DTO/enum-ы public; остальное — engine API | DTO/enum-ы реэкспортировать; остальное сохранить | `is` для DTO/enum-ов |
 | `configurable_automl_engine.models` | `AVAILABLE_ALGORITHMS`, `create_model`; также runtime-функции HPO | `AVAILABLE_ALGORITHMS` public beta; `create_model` public engine API | `AVAILABLE_ALGORITHMS` — реэкспорт из контракта; `create_model` и runtime — оставить | значение/тип списка; импорт `create_model` |
 | `configurable_automl_engine.common.metrics` | `AVAILABLE_METRICS`, `to_sklearn_name`, `ERR_CUSTOM_NAME_INVALID`, `ERR_CUSTOM_NAME_COLLISION`, `get_scorer_object`, `oof_rmse`, `user_direction`, `to_user_value` и др. | `AVAILABLE_METRICS`/`to_sklearn_name`/`ERR_CUSTOM_NAME_INVALID` — контрактные; остальное — engine/internal | контрактные имена реэкспортировать; runtime-метрики оставить | равенство значений `AVAILABLE_METRICS`; импорт runtime-функций и кодов |
-| `configurable_automl_engine.common.custom_metrics` | `CustomMetricSpec`, `CustomMetricKind`, helpers | `CustomMetricSpec` public; runtime helpers internal | модель/kind реэкспортировать из контракта; runtime-валидацию оставить в движке | `is` для `CustomMetricSpec`; проверка callable в движке |
+| `configurable_automl_engine.common.custom_metrics` | `CustomMetricSpec`, `CustomMetricKind`, helpers | `CustomMetricSpec` public; runtime helpers internal | модель/kind реэкспортировать из контракта; runtime-валидацию оставить в движке | `is` для `CustomMetricSpec`; прямой конструктор — только структурная валидация; callable проверяется entry point движка |
 | `configurable_automl_engine.trainer` | `ModelTrainer`, `TrainingError`, `train_model` | public engine API | `TrainingError` реэкспортировать из контракта; остальное сохранить | `is` для `TrainingError` |
 | `configurable_automl_engine.tuner` | `optimize`, `HPO_WORST_SCORE`, `WORST_SCORE_THRESHOLD`, `HyperoptError`, `InvalidAlgorithmError`, `InvalidDataError`, `HPOHistoryError`, `OptimizeResult`, `TrialStats` | public engine API | `WORST_SCORE_THRESHOLD` реэкспортировать из контракта; остальное сохранить | импорт; значение threshold |
 | `configurable_automl_engine.preprocessing` | `EncodingStrategy`, runtime-трансформеры | `EncodingStrategy` public; runtime — internal | `EncodingStrategy` реэкспортировать из контракта | `is` для enum/alias |
@@ -983,9 +995,12 @@ preprocessing-пакет. После этого цикл устраняется,
 10. **Пограничные DTO** (`RunSummary`, `LeaderboardEntry`, `FeatureImportance`,
     `EnsembleMember`, `ReporterArtifact`): включать ли в контракт в C3 или
     отложить до C6.
-11. **`CustomMetricSpec`**: как сохранить проверку callable при создании и при
-    этом не тянуть runtime в контракт; допустима ли смена поведения прямого
-    конструктора при сохранении поведения `train_best_model`/`optimize`.
+11. **`CustomMetricSpec`** — решено в C2 (ADR `docs/adr/0001-contracts-package.md`
+    §10.3/§11.3): идентичность класса сохраняется (`is`), прямой конструктор
+    выполняет только структурные проверки, импорт callable/сигнатура и
+    коллизии имён проверяются движком на входе в `train_best_model`,
+    `AutoMLExperiment`, `optimize` и `ModelTrainer`. Смена поведения прямого
+    конструктора согласована и проверяется в C5.
 
 ## 14. Проверочный список приёмки C1
 

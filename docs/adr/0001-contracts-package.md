@@ -863,22 +863,34 @@ errors, definitions, protocols
 ### 11.3. Осознанные изменения поведения
 
 Перенос в контракт меняет место некоторых проверок. Эти изменения должны быть
-описаны в `CHANGELOG.md` контракта и проверены в C5:
+описаны в `CHANGELOG.md` контракта и в миграционной заметке движка (для
+движка — `API_REFERENCE.md`/release notes в C6) и проверены в C5:
 
 - `CustomMetricSpec` в контракте валидирует структуру полей (`path`, `kind`,
-  `greater_is_better`, `additive`, `kwargs`), но не импортирует callable и не
-  проверяет его сигнатуру. Runtime-проверка остаётся в движке, но владельцы
-  разные: у `train_best_model`/`AutoMLExperiment` нет отдельного аргумента
+  `greater_is_better`, `additive`, `kwargs`) и сохраняет свойство `cache_key`
+  (нужен только stdlib `json`; `build_custom_scorer` использует его как ключ
+  scorer-кэша), но не импортирует callable и не проверяет его сигнатуру.
+  Runtime-проверка остаётся в движке, но владельцы разные: у
+  `train_best_model`/`AutoMLExperiment` нет отдельного аргумента
   custom-метрик — их callable проверяется в конфигурационном пути
   (`read_config` для файла, `load_config` для `dict`/`Config`) внутри
   `validate_runtime_config(cfg)` по `cfg.general.custom_metrics`; у `optimize`
   и `ModelTrainer`, которые не принимают `Config`, — собственными валидаторами
-  аргументов (`validate_custom_metrics`). Прямой конструктор контрактного
-  класса может принять некорректный callable, но публичные entry point движка
-  по-прежнему отвергают его до обучения. Проверка коллизии имён с встроенными
-  и sklearn-метриками (`ERR_CUSTOM_NAME_COLLISION`, `reserved_metric_names()`)
-  остаётся в движке: контрактная `check_custom_metric_names` проверяет только
-  формат имени (`ERR_CUSTOM_NAME_INVALID`), а коллизия проверяется в
+  аргументов (`validate_custom_metrics`). Прямой конструктор и контрактного
+  класса, и реэкспортированного `configurable_automl_engine.CustomMetricSpec`
+  может принять некорректный callable, но публичные entry point движка
+  по-прежнему отвергают его до обучения. Это осознанно меняет прежнее
+  поведение конструктора старого пути (раньше `CustomMetricSpec(path=...)`
+  импортировал callable), поэтому `CONTRACTS.md` обновлён в этом PR (§4.3.7,
+  §4.8, §4.11, §5.1 и открытый вопрос §13):
+  старый путь остаётся тем же классом (`is`) и даёт только структурную
+  валидацию. C5 добавляет тест: прямое конструирование с некорректным callable
+  проходит, а `train_best_model`/`optimize`/`ModelTrainer` отвергают его до
+  обучения; `is`-идентичность при этом сохраняется. Проверка коллизии имён с
+  встроенными и sklearn-метриками (`ERR_CUSTOM_NAME_COLLISION`,
+  `reserved_metric_names()`) остаётся в движке: контрактная
+  `check_custom_metric_names` проверяет только формат имени
+  (`ERR_CUSTOM_NAME_INVALID`), а коллизия проверяется в
   `validate_runtime_config(cfg)`/`validate_custom_metrics`.
 - `CustomMetricSpec.natural_greater_is_better` в контракт не переносится: это
   свойство импортирует callable по `path` и разрешает направление
@@ -887,10 +899,12 @@ errors, definitions, protocols
   `natural_greater_is_better(spec)` в `common.custom_metrics` с прежней
   семантикой: явный `greater_is_better`, иначе знак sklearn-scorer-а, иначе
   `True`. Поведение движка (`build_custom_scorer`, `is_greater_better`) не
-  меняется; внешний код, читавший свойство у контрактного класса, получает
-  `AttributeError` — изменение относится к 0.x MINOR, фиксируется в
-  `CHANGELOG.md` контракта, а `tests/test_custom_metrics.py` в C3 переводится
-  на функцию.
+  меняется; внешний код, читавший свойство у контрактного класса или через
+  реэкспорт `configurable_automl_engine.CustomMetricSpec`, получает
+  `AttributeError` — изменение относится к 0.x MINOR. Оно фиксируется в
+  `CHANGELOG.md` контракта и в миграционной заметке движка (C6:
+  `API_REFERENCE.md`/release notes), а `tests/test_custom_metrics.py` в C3
+  переводится на функцию.
 - Проверки `check_start_method`, `check_threads_timeouts` и `joblib`-часть
   `check_n_folds` по `CONTRACTS.md` §4.3.7 остаются в движке. Сегодня они
   являются `model_validator`-ами `GeneralCfg`, после C3 их вызывает
@@ -1118,12 +1132,17 @@ dependencies = [
   `configurable_automl_engine`, `numpy`, `pandas`, `sklearn`, `optuna`,
   `yaml` и другие тяжёлые пакеты.
 - `tests/engine/` — существующие тесты движка и тесты обратной совместимости.
-  Они могут импортировать оба пакета.
+  Они могут импортировать оба пакета. Среди них — тест `CustomMetricSpec`:
+  старый путь `is` контрактному классу, прямой конструктор с некорректным
+  callable проходит структурную валидацию, а `train_best_model`/`optimize`/
+  `ModelTrainer` отвергают его до обучения (см. §11.3).
 - Общие фикстуры движка не используются контрактными тестами.
 - Тесты контракта покрывают:
   - импорт и `__all__`;
   - стабильные публичные подмодули;
   - валидацию моделей и коды ошибок;
+  - структурную валидацию `CustomMetricSpec` и стабильность `cache_key`
+    (ключ scorer-кэша движка);
   - `Protocol`-совместимость;
   - JSON Schema и её воспроизводимость;
   - `py.typed` и package data;
@@ -1383,7 +1402,7 @@ beta, `ReporterProtocol` и `SearchSpaceCallable` — engine-only,
 | `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `WORST_SCORE_THRESHOLD`, `AVAILABLE_ALGORITHMS` |
 | `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` |
 | `automl_contracts.metrics` | `AVAILABLE_METRICS` |
-| `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` |
+| `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec` (поля `path`, `kind`, `greater_is_better`, `additive`, `kwargs` и свойство `cache_key`), `ERR_CUSTOM_NAME_INVALID` |
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
