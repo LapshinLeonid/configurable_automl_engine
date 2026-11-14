@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from enum import Enum
 
 import numpy as np
@@ -76,7 +77,12 @@ def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
 def _best_by_rmse_oof(
     names: list[str], candidates: Mapping[str, FinalistCandidate]
 ) -> str:
-    """Select the candidate with the best (minimal) ``RMSE_oof``.
+    """Select the candidate with the best (minimal) aggregated ``RMSE_oof``.
+
+    The compared value is the finalist's multi-split aggregate (median or
+    mean per ``split_aggregation``) from ``trainer.oof_score_``; the ranking
+    label remains "ranking by RMSE_oof", its scalar comes from the aggregated
+    estimate.
 
     Tie-break: on equal ``RMSE_oof`` the first in list order wins (the pool
     order is deterministic). A candidate with unavailable ``RMSE_oof`` (None)
@@ -98,15 +104,19 @@ def _fallback_sort_key(
     name: str,
     audits: Mapping[str, SanityCheckResult],
     candidate_models: Mapping[str, FinalistCandidate],
-) -> tuple[int, tuple[int, ...], bool, float]:
+) -> tuple[bool, int, tuple[int, ...], bool, float]:
     """Fallback ranking key (see ``_select_active_winner``).
 
-    Minimum number of violated circuits → minimum severity (D > A > B > C) →
-    best ``RMSE_oof``. Hoisted to module level so the select step ranking
-    (``output: top_k``/``pool``) matches the winner selection."""
+    A candidate without any valid OOF repeat sorts after every candidate that
+    has a valid OOF estimate; among the auditable candidates the order is
+    minimum number of violated circuits → minimum severity (D > A > B > C) →
+    best aggregated ``RMSE_oof``. Hoisted to module level so the select step
+    ranking (``output: top_k``/``pool``) matches the winner selection."""
+    candidate = candidate_models[name]
     reasons = audits[name].reasons
-    rmse = candidate_models[name].rmse_oof
+    rmse = candidate.rmse_oof
     return (
+        not candidate.has_valid_oof,
         len(reasons),
         _severity_signature(reasons),
         rmse is None,
@@ -121,12 +131,14 @@ def _select_active_winner(
 ) -> str:
     """Select the winner in ``active`` mode.
 
-    First — the best ``RMSE_oof`` among the candidates that passed the audit
-    (CV and ``RMSE_full`` do not participate in the ranking). If there are no
-    valid candidates (total pool failure) — the formal fallback criterion of
-    the "least problematic" model: minimum number of violated circuits →
-    minimum severity (circuit significance is fixed in code: D > A > B > C,
-    see ``_circuit_rank``) → best ``RMSE_oof``. The run never fails."""
+    First — the best aggregated ``RMSE_oof`` among the candidates that passed
+    the audit (CV and ``RMSE_full`` do not participate in the ranking). If
+    there are no valid candidates (total pool failure) — the formal fallback
+    criterion of the "least problematic" model: a candidate without any valid
+    OOF repeat sorts after every candidate that has one, then minimum number
+    of violated circuits → minimum severity (circuit significance is fixed in
+    code: D > A > B > C, see ``_circuit_rank``) → best aggregated
+    ``RMSE_oof``. The run never fails."""
     valid = [n for n in pool_order if audits[n].is_valid]
     if valid:
         return _best_by_rmse_oof(valid, candidate_models)
@@ -213,10 +225,12 @@ def select_robust_winner(
     """Two-stage winner selection with a Sanity Gate audit.
 
     Iterates over the candidate pool (already trained on 100% of the data),
-    runs each candidate through ``ModelSanityGate.check`` (diversity/unique are
-    computed on the OOF vector; circuit D uses full-fit predictions) and ranks
-    the candidates that passed the audit by ``RMSE_oof`` (CV and ``RMSE_full``
-    do NOT participate in the ranking).
+    runs each candidate through ``ModelSanityGate.check`` (diversity/unique and
+    the generalization gap are computed per repeat and aggregated by the
+    median when repeat vectors are available; circuit D uses full-fit
+    predictions) and ranks the candidates that passed the audit by the
+    aggregated ``RMSE_oof``
+    (CV and ``RMSE_full`` do NOT participate in the ranking).
 
     Modes (``mode``):
     - ``off``: plain ranking — winner = best ``cv_score`` (no audit;
@@ -231,10 +245,12 @@ def select_robust_winner(
     budget exceeded" (in ``active`` mode they cannot win). ``0`` — no limit.
 
     Fallback (formalized): if all candidates are rejected, the "least
-    problematic" model is chosen — minimum number of violated circuits, on ties
-    — minimum violation severity (circuit significance is fixed in code:
-    D > A > B > C, see ``_circuit_rank``), on further ties — best ``RMSE_oof``.
-    The run never fails; a WARNING with the reasons is logged.
+    problematic" model is chosen — a candidate without any valid OOF repeat
+    sorts after every candidate that has one; then minimum number of violated
+    circuits, on ties — minimum violation severity (circuit significance is
+    fixed in code: D > A > B > C, see ``_circuit_rank``), on further ties —
+    best ``RMSE_oof``. The run never fails; a WARNING with the reasons is
+    logged.
 
     Args:
         candidate_models: The candidate pool
@@ -289,6 +305,27 @@ def select_robust_winner(
         )
 
     for name in pool_order:
+        cand = candidate_models[name]
+        if not cand.has_valid_oof:
+            reasons = [
+                (
+                    "Sanity Gate: no valid OOF repeats "
+                    "(every per-repeat RMSE_oof is non-finite)"
+                )
+            ]
+            _LOG.warning(
+                "[sanity_gate] candidate %s has no valid OOF repeats; "
+                "rejecting without auditing",
+                name,
+            )
+            audits[name] = SanityCheckResult(
+                is_valid=False,
+                reasons=reasons,
+                severity=2,
+                n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
+                n_valid_repeats=0,
+            )
+            continue
         if _audit_budget_exhausted():
             _LOG.warning(
                 "[sanity_gate] audit time budget (%.3fs) exceeded; "
@@ -300,24 +337,32 @@ def select_robust_winner(
                 is_valid=False,
                 reasons=[_audit_budget_skip_reason(audit_time_budget_seconds)],
                 severity=0,
+                n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
+                n_valid_repeats=0,
             )
             continue
-        cand = candidate_models[name]
         try:
-            audits[name] = sanity_gate.check(
+            audit = sanity_gate.check(
                 y=y,
                 y_pred_oof=cand.y_pred_oof,
                 y_pred_full=cand.y_pred_full,
                 X=X,
                 model=cand.model,
                 candidate_name=name,
+                y_pred_oof_by_repeat=cand.y_pred_oof_by_repeat,
             )
+            # The section reports the trainer repeat count for every candidate;
+            # n_valid_repeats keeps the count actually aggregated by the audit,
+            # so a single surviving repeat is not reported as a median.
+            audits[name] = replace(audit, n_repeats=cand.n_repeats)
         except Exception as err:  # noqa: BLE001 — audit failure = disqualification
             _LOG.warning("Sanity audit failed for candidate %s: %s", name, err)
             audits[name] = SanityCheckResult(
                 is_valid=False,
                 reasons=[f"Sanity audit failed: {err}"],
                 severity=4,
+                n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
+                n_valid_repeats=0,
             )
 
     disqualified = {
@@ -343,8 +388,8 @@ def select_robust_winner(
         _LOG.warning(
             "[sanity_gate active] All %d candidate(s) failed the sanity audit; "
             "falling back to the least problematic model %s. Formal criterion: "
-            "min violated circuits -> min severity (D > A > B > C) -> "
-            "best RMSE_oof. Reasons: %s",
+            "valid OOF (candidates without it last) -> min violated circuits "
+            "-> min severity (D > A > B > C) -> best RMSE_oof. Reasons: %s",
             len(pool_order),
             winner,
             {n: audits[n].reasons for n in pool_order},

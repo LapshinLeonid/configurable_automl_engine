@@ -158,6 +158,7 @@ BBC-CV estimate would be especially exposed to).
 │       │   ├── run_result.py               # build_experiment_result: assembly of the ExperimentResult model; owner stamp (mark_result_owner)
 │       │   ├── sanity_circuits.py          # Sanity Gate circuits A–D (diversity, unique, dead features, gap)
 │       │   ├── sanity_gate.py              # ModelSanityGate: settings, check(), audit logging
+│       │   ├── sanity_repeats.py           # Median aggregation of circuits A/B over repeated OOF vectors
 │       │   ├── sanity_result.py            # SanityCheckResult, severity, input checks
 │       │   ├── select_steps.py             # Select steps: cv_best and sanity_gate strategies (return a SelectOutcome)
 │       │   ├── state.py                    # Shared pipeline dataclasses (PhaseResult, PhaseContext, step outcomes, ...)

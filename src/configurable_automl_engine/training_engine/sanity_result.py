@@ -9,6 +9,7 @@ pandas and scikit-learn; it must not import the gate or the circuits.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,6 +46,15 @@ class SanityCheckResult:
             0 — clean; 1 — soft warnings only;
             2/3/4 — one/two/three or more disqualification reasons.
             In ``warn_only`` mode it never exceeds 1.
+        n_repeats: The total number of repeats recorded by the trainer,
+            including repeats invalidated by the M3 scoring layer. The select
+            step fills this value; a direct ``ModelSanityGate.check`` caller
+            sees the number of valid repeat vectors it passed.
+        n_valid_repeats: The number of valid repeat vectors used by this
+            audit (0 when the audit was skipped or failed). More than one
+            valid vector is aggregated by the median; exactly one valid
+            vector uses the single-split path even when ``n_repeats > 1``.
+            ``1`` also covers a classic single OOF vector.
     """
 
     is_valid: bool
@@ -55,6 +65,8 @@ class SanityCheckResult:
     dead_features_count: int = 0
     generalization_gap: float = float("nan")
     severity: int = _SEVERITY_CLEAN
+    n_repeats: int = 1
+    n_valid_repeats: int = 1
 
 
 def _compute_severity(
@@ -116,3 +128,43 @@ def _validate_check_inputs(
                 f"(got {x_len} and {y_arr.shape[0]})"
             )
     return y_arr, oof_arr
+
+
+def _validate_repeat_vectors(
+    y: np.ndarray, repeats: Sequence[Any] | None
+) -> list[np.ndarray] | None:
+    """Validate the per-repeat OOF vectors of a multi-split audit.
+
+    ``None`` and an empty sequence mean "no repeat information" — the caller
+    falls back to single-vector input. Every provided vector
+    must be one-dimensional and aligned to ``y`` by position (the same
+    contract as ``y_pred_oof``).
+
+    Args:
+        y: The validated target vector.
+        repeats: The per-repeat OOF vectors (already aligned to ``y``), or
+            ``None``.
+
+    Returns:
+        list[np.ndarray] | None: The vectors as float arrays, or ``None``
+            when no repeat information was passed.
+
+    Raises:
+        ValueError: When a vector is not one-dimensional or its length does
+            not match ``y``.
+    """
+    if repeats is None:
+        return None
+    vectors = list(repeats)
+    if not vectors:
+        return None
+    validated: list[np.ndarray] = []
+    for index, vector in enumerate(vectors):
+        arr = _to_float_vector(vector, f"y_pred_oof_by_repeat[{index}]")
+        if arr.shape != y.shape:
+            raise ValueError(
+                "y and every y_pred_oof_by_repeat vector must have the same "
+                f"length (got {y.shape} and {arr.shape} for repeat {index})"
+            )
+        validated.append(arr)
+    return validated

@@ -407,6 +407,40 @@ def test_section_repeats_without_audit_aggregation_uses_neutral_caption() -> Non
     assert "medians of the per-repeat values" not in report
 
 
+def test_one_valid_repeat_is_not_reported_as_aggregated() -> None:
+    # The trainer recorded two repeats, but the M3 scoring layer invalidated
+    # one of them: the gate audited the single surviving vector through the
+    # single-split path. The trainer-total n_repeats must not turn the neutral
+    # caption into a median claim.
+    result = _repeated_result(
+        sanity_gate={
+            "gate": {
+                "n_repeats": 2,
+                "split_aggregation": "median",
+                "audit": {
+                    "ridge": {
+                        "is_valid": True,
+                        "reasons": [],
+                        "soft_warnings": [],
+                        "diversity_ratio": 0.9,
+                        "unique_ratio": 0.95,
+                        "dead_features_count": 0,
+                        "generalization_gap": 2.5,
+                        "generalization_gap_infinite": False,
+                        "n_repeats": 2,
+                        "n_valid_repeats": 1,
+                    }
+                },
+            }
+        }
+    )
+    report = MarkdownReporter().report(result)
+
+    assert "## Sanity Gate" in report
+    assert "not aggregated over repeats" in report
+    assert "medians of the per-repeat values" not in report
+
+
 def test_winner_rmse_spread_does_not_claim_aggregated_circuits() -> None:
     result = _repeated_result(
         sanity_gate={
@@ -637,7 +671,7 @@ def test_score_std_pairs_with_the_hpo_winner_score_when_holdout_is_reserved(
     assert result.n_repeats == 3
 
 
-def test_repeated_gate_report_does_not_claim_aggregated_circuits(
+def test_repeated_gate_report_claims_aggregated_circuits(
     tmp_path: Any,
 ) -> None:
     rng = np.random.default_rng(2)
@@ -678,9 +712,9 @@ def test_repeated_gate_report_does_not_claim_aggregated_circuits(
     section = (result.sanity_gate or {})["gate_select"]
     assert "winner_rmse_oof_std" in section or "rmse_oof_std" in section
     report = MarkdownReporter().report(result)
-    assert "not aggregated over repeats" in report
+    assert "aggregated over the repeated splits" in report
     assert "`RMSE_oof` is aggregated over the repeats" in report
-    assert "medians of the per-repeat values" not in report
+    assert "medians of the per-repeat values" in report
 
 
 def test_oof_score_std_uses_the_comparison_metric_not_rmse(

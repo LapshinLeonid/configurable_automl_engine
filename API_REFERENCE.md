@@ -977,15 +977,22 @@ optional `general.sanity_gate` block.
    | **D — overfitting** | `check_generalization_gap` | A large gap between out-of-sample and in-sample error: `RMSE_oof / RMSE_full > max_generalization_gap`. By default (`generalization_gap_mode: "warn"`) this is only a warning; `"reject"` makes it a rejection. A perfect in-sample fit (infinite gap) is treated the same way; `RMSE_oof ≈ 0` additionally logs a WARNING about possible target leakage. |
 
    Checks A and B use the OOF predictions, check D uses both, check C
-   inspects the model itself.
+   inspects the model itself. With `general.n_repeats > 1`, checks A, B and D
+   are evaluated per repeat and the reported value is the median of the
+   per-repeat values (for D — `RMSE_oof / RMSE_full`); identical repeats keep
+   the same verdict at any `R`. Repeats invalidated by the M3 scoring layer
+   (non-finite per-repeat `RMSE_oof`) are excluded from the gate, matching the
+   ranking aggregate.
 4. **Pick the winner**: among the finalists that pass, the one with the lowest
-   `RMSE_oof`. The validation score and `RMSE_full` are not used for this
-   ranking.
+   aggregated `RMSE_oof` (the median or mean per-repeat value, according to
+   `general.split_aggregation`). The validation score and `RMSE_full` are not
+   used for this ranking.
 
 If **every** finalist is rejected, the run does not fail. The "least bad"
-finalist wins — fewest failed checks, then the least severe ones (D is the
-most severe, then A, B, C), then the lowest `RMSE_oof` — and a WARNING lists
-all reasons.
+finalist wins — a finalist without any valid OOF repeat ranks after every
+finalist that has one, then fewest failed checks, then the least severe ones
+(D is the most severe, then A, B, C), then the lowest `RMSE_oof` — and
+a WARNING lists all reasons.
 
 Rejected algorithms are also added to `result["disqualified_algorithms"]`,
 the same as algorithms that failed during tuning. Warnings never disqualify.
@@ -1108,8 +1115,10 @@ is absent.
 |-----|------|-------------|
 | `strategy` | `str` | Always `"sanity_gate"`. |
 | `generalization_gap_mode` | `str` | The check D mode used: `"warn"` or `"reject"`. |
+| `n_repeats` | `int` | Number of repeats recorded by the trainer; repeats invalidated by the M3 scoring layer stay counted here but are excluded from the metrics. More than one valid repeat is aggregated by the median; exactly one valid repeat uses the single-split path. |
+| `split_aggregation` | `str` | How the per-repeat `RMSE_oof` values were combined for the ranking: `"median"` or `"mean"`. |
 | `pool` | `list[str]` | Finalists, best first. |
-| `audit` | `dict[str, dict]` | Per finalist: `is_valid`, `reasons` (rejections), `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (`null` when disabled or not computable), `generalization_gap_infinite`, `generalization_gap_mode`, `severity`. |
+| `audit` | `dict[str, dict]` | Per finalist: `is_valid`, `reasons` (rejections), `soft_warnings`, `diversity_ratio`, `unique_ratio`, `dead_features_count`, `generalization_gap` (`null` when disabled or not computable), `generalization_gap_infinite`, `generalization_gap_mode`, `severity`, `n_repeats`, `n_valid_repeats`. `n_repeats` is the trainer total, while `n_valid_repeats` is the number of valid repeat vectors actually audited (`0` when the audit was skipped or failed). Circuit values are medians only when `n_valid_repeats > 1`; exactly one valid repeat uses the single-split path. |
 | `rmse_oof_std` | `dict[str, float]` | Per-finalist standard deviation of the per-repeat `RMSE_oof` values; present only when at least one finalist has a recorded spread (`n_repeats > 1`). |
 | `winner_rmse_oof_std` | `float` | Standard deviation of the winner's per-repeat `RMSE_oof`; present only when available. |
 | `disqualified` | `dict[str, list[str]]` | Rejected finalists and their reasons (also copied to `result["disqualified_algorithms"]`). Warnings are not listed here. |
@@ -1603,7 +1612,7 @@ Constructor parameters that have a counterpart in the `general` config section h
 * `datetime_expansion_` — `dict[str, list[str]]`: source datetime/timedelta column → generated component columns; re-applied by `predict` (empty when nothing was expanded).
 * `val_score` — value of the main metric computed on data the model has **not** been trained on: a hold-out split score (`train_test_split`) or the CV estimate (`k_fold`/`loo`) — the same validation method used by HPO to compare models. The CV estimate is the mean over folds for additive metrics and the pooled value over the out-of-fold vector for non-additive metrics (RMSE, MSE, R², nRMSE and their `neg_` aliases). With `n_repeats > 1` the per-repeat estimates are combined by `split_aggregation`. It is **not** a train score. Error-type metrics are returned as positive natural values (sign-corrected). When the pooled value is impossible (a scorer without the sklearn raw metric attributes, or no finite OOF pairs), the engine falls back to the per-fold mean and logs a WARNING once per algorithm and phase (e.g. an HPO phase name or the final fit).
 * `additional_scores` — `dict[str, float]` with values of the configured additional metrics computed with the same validation method as `val_score` (empty if none were set); with `n_repeats > 1` they are aggregated by the same policy.
-* `oof_score_` / `oof_predictions_` / `oof_coverage_` — the out-of-fold channel: with `n_repeats > 1` `oof_score_` is the median (or mean) of the per-repeat `RMSE_oof`, `oof_coverage_` is computed over the concatenation of all repeat vectors, `oof_predictions_` is the vector of the repeat whose `RMSE_oof` is closest to the aggregate (the representative repeat for the Sanity Gate), and `oof_predictions_by_repeat_` holds every repeat's vector in memory as a diagnostic (peak memory therefore grows as O(R × N) while the vectors are retained; they are not persisted in the artifact, which keeps the scalar per-repeat statistics).
+* `oof_score_` / `oof_predictions_` / `oof_coverage_` — the out-of-fold channel: with `n_repeats > 1` `oof_score_` is the median (or mean) of the per-repeat `RMSE_oof`, `oof_coverage_` is computed over the concatenation of all repeat vectors, `oof_predictions_` is the vector of the repeat whose `RMSE_oof` is closest to the aggregate (a representative diagnostic vector), and `oof_predictions_by_repeat_` holds every repeat's vector in memory: the Sanity Gate uses the repeats with a finite per-repeat `RMSE_oof` (a repeat invalidated as a whole is excluded) and aggregates circuits A/B and the circuit D gap ratio by the per-repeat median (peak memory therefore grows as O(R × N) while the vectors are retained; they are not persisted in the artifact, which keeps the scalar per-repeat statistics).
 * `repeat_scores_` / `score_mean` / `score_median` / `score_std` — the per-repeat primary-metric values and their summary (`None` when `n_repeats = 1`).
 * `oof_repeat_scores_` / `oof_score_std_` — the per-repeat `RMSE_oof` values and their standard deviation (`None` when `n_repeats = 1`). A repeat with non-finite predictions on a fold is invalidated as a whole: its primary/additional per-repeat values are NaN and its `RMSE_oof` is the worst-score sentinel `inf`, so the repeat is excluded from every aggregate.
 

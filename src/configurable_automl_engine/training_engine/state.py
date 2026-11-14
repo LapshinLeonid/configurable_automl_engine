@@ -137,6 +137,19 @@ class FinalistCandidate:
         trainer (Any | None): The finalist's ``ModelTrainer`` itself; passed to
             ``persist_artifact`` so the artifact can be saved WITHOUT retraining
             the winner.
+        y_pred_oof_by_repeat (list[np.ndarray | pd.Series] | None): The OOF
+            vectors of the valid repeats of the multi-split validation,
+            aligned to the rows of X and each one-dimensional (NaN marks an
+            uncovered row); repeats invalidated by the M3 scoring layer are
+            excluded. ``None`` when the trainer keeps no usable per-repeat
+            vectors or keeps no per-repeat metadata at all.
+        has_valid_oof (bool): ``False`` when per-repeat metadata is present
+            but every repeat was invalidated. Such a finalist has no valid
+            ranking value and is rejected by the Sanity Gate instead of
+            falling back to an invalidated representative vector.
+        n_repeats (int): The total number of repeats recorded by the trainer
+            (including invalidated ones); this is the value reported by the
+            gate section for every candidate and for the section itself.
     """
 
     algo_name: str
@@ -149,6 +162,9 @@ class FinalistCandidate:
     rmse_full: float | None = None
     trainer: Any | None = None
     rmse_oof_std: float | None = None
+    y_pred_oof_by_repeat: list[np.ndarray | pd.Series] | None = None
+    has_valid_oof: bool = True
+    n_repeats: int = 1
 
 
 @dataclass(frozen=True)
@@ -386,7 +402,10 @@ class SelectOutcome:
             the step (gate disqualifications added, fallback candidates of
             this step removed).
         sanity_gate_section (dict[str, Any] | None): The report section of a
-            ``sanity_gate`` step (``None`` for ``cv_best``).
+            ``sanity_gate`` step (``None`` for ``cv_best``). The section
+            carries the aggregated multi-split statistics (``n_repeats`` and
+            the median diversity/unique ratios and generalization gap)
+            together with the per-finalist audit.
     """
 
     working_set: dict[str, PhaseResult] = field(compare=False)

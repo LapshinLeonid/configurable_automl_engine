@@ -22,6 +22,7 @@ disqualifications.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -32,12 +33,18 @@ from configurable_automl_engine.training_engine.sanity_circuits import (
     check_dead_features,
     check_diversity,
     check_generalization_gap,
+    check_generalization_gap_repeats,
     check_unique,
+)
+from configurable_automl_engine.training_engine.sanity_repeats import (
+    check_diversity_repeats,
+    check_unique_repeats,
 )
 from configurable_automl_engine.training_engine.sanity_result import (
     SanityCheckResult,
     _compute_severity,
     _validate_check_inputs,
+    _validate_repeat_vectors,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,8 @@ class _CircuitsOutcome:
     unique_ratio: float = float("nan")
     dead_features_count: int = 0
     generalization_gap: float = float("nan")
+    n_repeats: int = 1
+    n_valid_repeats: int = 1
     reasons: list[str] = field(default_factory=list)
     soft_warnings: list[str] = field(default_factory=list)
 
@@ -268,13 +277,16 @@ class ModelSanityGate:
         X: Any | None = None,
         model: Any = None,
         candidate_name: str | None = None,
+        y_pred_oof_by_repeat: Sequence[Any] | None = None,
     ) -> SanityCheckResult:
         """Run the model through every enabled audit circuit.
 
         Args:
             y: the true target (1-D; may contain NaN — pairs are masked).
             y_pred_oof: OOF predictions aligned with ``y`` by rows (NaN for
-                uncovered rows is masked).
+                uncovered rows is masked). With repeated validation this is
+                the representative repeat's vector; circuits A/B use
+                ``y_pred_oof_by_repeat`` when it is provided.
             y_pred_full: full-fit predictions on the same rows (needed by
                 circuit D); None with circuit D enabled → fail with a reason.
             X: feature matrix in the form accepted by ``model.predict`` (needed
@@ -284,17 +296,32 @@ class ModelSanityGate:
             candidate_name: Name of the audited candidate. When provided, every
                 audit log line is prefixed with it, so a warning (e.g. about
                 dead features) is unambiguously attributed to a candidate.
+            y_pred_oof_by_repeat: The OOF vector of every repeat of the
+                multi-split validation (aligned to ``y``). When more than one
+                vector is passed, circuits A/B are computed per repeat and
+                aggregated by the median, and circuit D uses the median of the
+                per-repeat ``RMSE_oof / RMSE_full`` ratios. ``None`` or a
+                single vector follows the single-split path.
 
         Returns:
-            SanityCheckResult: the full audit result.
+            SanityCheckResult: the full audit result (``n_valid_repeats``
+            states how many valid vectors were aggregated; ``n_repeats``
+            mirrors it because a direct gate caller knows no trainer total).
 
         Raises:
             ValueError: when the input contract is violated (None arguments,
-                length mismatch between y/y_pred_oof/X).
+                length mismatch between y/y_pred_oof/X or between ``y`` and a
+                repeat vector).
         """
         y_arr, oof_arr = _validate_check_inputs(y, y_pred_oof, X)
+        repeat_vectors = _validate_repeat_vectors(y_arr, y_pred_oof_by_repeat)
         outcome = self._run_circuits(
-            y_arr=y_arr, oof_arr=oof_arr, y_pred_full=y_pred_full, X=X, model=model
+            y_arr=y_arr,
+            oof_arr=oof_arr,
+            repeat_vectors=repeat_vectors,
+            y_pred_full=y_pred_full,
+            X=X,
+            model=model,
         )
         reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
 
@@ -318,6 +345,8 @@ class ModelSanityGate:
             dead_features_count=outcome.dead_features_count,
             generalization_gap=outcome.generalization_gap,
             severity=severity,
+            n_repeats=outcome.n_repeats,
+            n_valid_repeats=outcome.n_valid_repeats,
         )
 
     def _run_circuits(
@@ -325,38 +354,68 @@ class ModelSanityGate:
         *,
         y_arr: np.ndarray,
         oof_arr: np.ndarray,
+        repeat_vectors: list[np.ndarray] | None,
         y_pred_full: Any | None,
         X: Any | None,
         model: Any,
     ) -> _CircuitsOutcome:
-        """Run every enabled circuit and collect the metrics and messages."""
+        """Run every enabled circuit and collect the metrics and messages.
+
+        With more than one repeat vector circuits A/B are evaluated per repeat
+        and aggregated by the median, while circuit D reports the median
+        per-repeat gap ratio. A single repeat follows the single-vector path.
+        """
         outcome = _CircuitsOutcome()
         reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
         diversity_failed = False
 
-        # Shared mask of finite pairs for the prediction-based circuits.
-        valid_pairs = np.isfinite(y_arr) & np.isfinite(oof_arr)
+        n_repeats = len(repeat_vectors) if repeat_vectors else 1
+        outcome.n_repeats = n_repeats
+        outcome.n_valid_repeats = n_repeats
+        # With exactly one valid repeat the single-split circuits must audit
+        # that repeat, not the representative vector (which may belong to an
+        # invalidated repeat).
+        single_oof = repeat_vectors[0] if repeat_vectors else oof_arr
+        valid_pairs = np.isfinite(y_arr) & np.isfinite(single_oof)
 
         if self.check_diversity:
-            outcome.diversity_ratio, d_reasons, d_warnings = check_diversity(
-                y_arr,
-                oof_arr,
-                valid_pairs,
-                adaptive=self.adaptive_diversity,
-                min_prediction_diversity=self.min_prediction_diversity,
-            )
+            if n_repeats > 1 and repeat_vectors is not None:
+                outcome.diversity_ratio, d_reasons, d_warnings = (
+                    check_diversity_repeats(
+                        y_arr,
+                        repeat_vectors,
+                        adaptive=self.adaptive_diversity,
+                        min_prediction_diversity=self.min_prediction_diversity,
+                    )
+                )
+            else:
+                outcome.diversity_ratio, d_reasons, d_warnings = check_diversity(
+                    y_arr,
+                    single_oof,
+                    valid_pairs,
+                    adaptive=self.adaptive_diversity,
+                    min_prediction_diversity=self.min_prediction_diversity,
+                )
             reasons.extend(d_reasons)
             soft_warnings.extend(d_warnings)
             diversity_failed = bool(d_reasons)
 
         if self.check_unique:
-            outcome.unique_ratio, u_reasons, u_warnings = check_unique(
-                y_arr,
-                oof_arr,
-                valid_pairs,
-                min_unique_count=self.min_unique_count,
-                min_unique_ratio=self.min_unique_ratio,
-            )
+            if n_repeats > 1 and repeat_vectors is not None:
+                outcome.unique_ratio, u_reasons, u_warnings = check_unique_repeats(
+                    y_arr,
+                    repeat_vectors,
+                    min_unique_count=self.min_unique_count,
+                    min_unique_ratio=self.min_unique_ratio,
+                )
+            else:
+                outcome.unique_ratio, u_reasons, u_warnings = check_unique(
+                    y_arr,
+                    single_oof,
+                    valid_pairs,
+                    min_unique_count=self.min_unique_count,
+                    min_unique_ratio=self.min_unique_ratio,
+                )
             reasons.extend(u_reasons)
             soft_warnings.extend(u_warnings)
 
@@ -372,23 +431,47 @@ class ModelSanityGate:
             soft_warnings.extend(c_warnings)
 
         if self.check_generalization_gap:
-            outcome.generalization_gap, g_reasons, g_warnings = (
-                check_generalization_gap(
-                    y_arr,
-                    oof_arr,
-                    y_pred_full,
-                    max_generalization_gap=self.max_generalization_gap,
+            if n_repeats > 1 and repeat_vectors is not None:
+                outcome.generalization_gap, g_reasons, g_warnings = (
+                    check_generalization_gap_repeats(
+                        y_arr,
+                        repeat_vectors,
+                        y_pred_full,
+                        max_generalization_gap=self.max_generalization_gap,
+                    )
                 )
-            )
+            else:
+                outcome.generalization_gap, g_reasons, g_warnings = (
+                    check_generalization_gap(
+                        y_arr,
+                        single_oof,
+                        y_pred_full,
+                        max_generalization_gap=self.max_generalization_gap,
+                    )
+                )
             reasons.extend(g_reasons)
             # Routing of circuit D violations: warn mode
             # (default) — soft_warnings (does not disqualify,
             # including an infinite gap from division by zero); reject mode —
             # reasons. Reasons in both modes
             # remain only for contract violations (y_pred_full=None) and
-            # non-computability (no finite pairs).
+            # non-computability (no finite pairs). In the repeated path the
+            # target-leakage signal is informational: the median-only decision
+            # must not be overridden by a single repeat's infinite ratio.
             if self.generalization_gap_mode == "reject":
-                reasons.extend(g_warnings)
+                if n_repeats > 1:
+                    reasons.extend(
+                        warning
+                        for warning in g_warnings
+                        if "possible target leakage" not in warning
+                    )
+                    soft_warnings.extend(
+                        warning
+                        for warning in g_warnings
+                        if "possible target leakage" in warning
+                    )
+                else:
+                    reasons.extend(g_warnings)
             else:
                 soft_warnings.extend(g_warnings)
         return outcome
@@ -439,10 +522,10 @@ class ModelSanityGate:
         # features on correlation, circuit D violations in the warn mode)
         # are logged at DEBUG/INFO level — they do not disqualify on
         # their own and must never be raised to WARNING. A deliberate
-        # exception: a suspected target leakage (RMSE_oof ≈ 0) in the
-        # warn mode is logged at the WARNING level — a silent
-        # disqualification would swap the winner and hide the leak, so a
-        # noticeable signal is needed.
+        # exception: a suspected target leakage (RMSE_oof ≈ 0) is logged at
+        # the WARNING level in the warn mode and in the repeated reject path
+        # (where it stays informational) — a silent disqualification would
+        # swap the winner and hide the leak, so a noticeable signal is needed.
         logger.info(
             "%sSanity gate: %s with %d soft warning(s) (non-disqualifying signals)",
             prefix,
@@ -450,10 +533,7 @@ class ModelSanityGate:
             len(soft_warnings),
         )
         for warning in soft_warnings:
-            if (
-                self.generalization_gap_mode == "warn"
-                and "possible target leakage" in warning
-            ):
+            if "possible target leakage" in warning:
                 logger.warning("%sSanity gate soft warning: %s", prefix, warning)
             else:
                 logger.debug("%sSanity gate soft warning: %s", prefix, warning)

@@ -1280,8 +1280,12 @@ def test_report_audit_section_serialized():
             "generalization_gap_infinite",
             "generalization_gap_mode",
             "severity",
+            "n_repeats",
+            "n_valid_repeats",
         }
-# The applied circuit D mode is present in the report.
+    assert section["n_repeats"] == 1
+    assert section["split_aggregation"] == "median"
+    # The applied circuit D mode is present in the report.
     assert section["generalization_gap_mode"] == "warn"
     assert all(
         audit["generalization_gap_mode"] == "warn" for audit in section["audit"].values()

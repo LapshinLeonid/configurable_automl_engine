@@ -17,12 +17,16 @@ A. Diversity Ratio (``check_diversity``) — ``Var(y_pred_oof) / Var(y)`` on
    fails, any visibly positive variance passes; the fixed threshold
    ``min_prediction_diversity`` applies only with
    ``adaptive_diversity=False``. A constant target skips the check with a
-   soft warning.
+   soft warning. With ``n_repeats > 1`` the ratio is computed per repeat and
+   aggregated by the median (``sanity_repeats``): identical repeats keep the
+   same verdict, while adding informative or degenerate repeats changes the
+   median.
 B. Unique Ratio (``check_unique``) — predictions are rounded to the scale of
    the target (decimals derived from ``std(y)``); fails when
    ``nunique < max(min_unique_count, min_unique_ratio * N)`` with the ratio
    term capped by ``nunique(y)`` — a model predicting ``y`` exactly always
-   reaches the threshold.
+   reaches the threshold. With ``n_repeats > 1`` the per-repeat ratios are
+   aggregated by the median with the same threshold semantics.
 C. Dead Feature Check (``check_dead_features``) — the share of zero
    coefficients (linear ``coef_`` path) is a soft signal; a standalone
    disqualification requires the combination with low diversity
@@ -39,7 +43,11 @@ D. Generalization Gap (``check_generalization_gap``) — ``RMSE_oof /
    (including an infinite gap: a perfect in-sample fit says nothing about
    quality on new data), ``"reject"`` — a reason and disqualification.
    ``RMSE_oof ~= 0`` additionally raises a WARNING — a deliberately visible
-   signal for possible target leakage.
+   signal for possible target leakage. With ``n_repeats > 1``
+   (``check_generalization_gap_repeats``) the reported gap is the median of
+   the per-repeat ratios; a repeat whose ratio cannot be computed is
+   excluded, and only a total non-computability yields NaN (the classic
+   single-split semantics).
 
 Threshold comparison sides are fixed in one place (module-level helpers
 ``_fails_below`` / ``_fails_above`` / ``_diversity_fails``):
@@ -70,6 +78,7 @@ so results are reproducible across runs for the same inputs.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -774,32 +783,148 @@ def check_generalization_gap(
 ) -> tuple[float, list[str], list[str]]:
     """Check ``RMSE_oof / RMSE_full`` against ``max_generalization_gap``.
 
-            Both RMSEs are computed on the **same** joint mask of finite pairs
-            (y, y_pred_oof, y_pred_full), so the ratio compares apples to apples.
+    Both RMSEs use the **same** joint mask of finite pairs, so the ratio
+    compares apples to apples. This is the single-split entry point;
+    repeated validation goes through
+    :func:`check_generalization_gap_repeats`, which delegates here for one
+    repeat. A gap violation (finite or infinite, e.g. ``RMSE_full ≈ 0`` or
+    ``RMSE_oof ≈ 0``) is a ``warnings`` entry routed by
+    ``generalization_gap_mode``; contract violations and non-computability
+    are ``reasons`` in both modes.
 
-            Returns three lists separately so that ``check()`` can route them by
-    Returns three lists separately so that ``check()`` can route them by
-            ``generalization_gap_mode``: a gap violation — finite
-            (strictly above the threshold) or infinite (division by zero:
-            ``RMSE_full ≈ 0`` perfect in-sample fit, ``RMSE_oof ≈ 0``) — is
-            returned as a ``warnings`` entry, which ``check()`` turns into a
-            reason in ``"reject"`` mode or into ``soft_warnings`` in ``"warn"``
-            mode (in the warn mode the circuit never disqualifies because
-            of the gap magnitude). Contract violations (``y_pred_full = None``)
-            and non-computability (no finite pairs) are returned as ``reasons``
-            in **both** modes. ``RMSE_oof ≈ 0`` is the only case additionally
-            logged at ``WARNING`` level in warn mode (possible target leakage).
+    Args:
+        y: the target.
+        y_pred_oof: OOF predictions.
+        y_pred_full: full-fit predictions (None → fail with a reason).
+        max_generalization_gap: the circuit-D threshold.
 
-            Args:
-                y: the target.
-                y_pred_oof: OOF predictions.
-                y_pred_full: full-fit predictions (None → fail with a reason).
-                max_generalization_gap: the circuit-D threshold.
-
-            Returns:
-                tuple[float, list[str], list[str]]: (generalization_gap, reasons,
-                    warnings).
+    Returns:
+        tuple[float, list[str], list[str]]: (generalization_gap, reasons,
+            warnings).
     """
+    return _generalization_gap_once(
+        y,
+        y_pred_oof,
+        y_pred_full,
+        max_generalization_gap=max_generalization_gap,
+    )
+
+
+def check_generalization_gap_repeats(
+    y: np.ndarray,
+    y_pred_oof_by_repeat: Sequence[np.ndarray],
+    y_pred_full: Any | None,
+    *,
+    max_generalization_gap: float,
+) -> tuple[float, list[str], list[str]]:
+    """Check the median per-repeat ``RMSE_oof / RMSE_full`` ratio.
+
+    Every repeat is evaluated on the same joint finite-pair mask as the
+    single-split circuit. A non-computable repeat is excluded from the
+    median; when every repeat is non-computable the circuit returns ``NaN``
+    with a reason. One repeat follows the single-split path.
+
+    The decision is applied once to the median: per-repeat infinite-gap
+    signals do not become separate decisions. An infinite median is reported
+    as an infinite median gap, while a finite median passes even if an
+    individual repeat was infinite. Mixed per-repeat decisions therefore
+    produce one aggregated decision, which keeps the gate stable across split
+    choices. A repeat's ``RMSE_oof ~= 0`` target-leakage warning is preserved
+    as an informational warning; it does not override the median-only
+    decision.
+
+    Args:
+        y: The target vector, one-dimensional. Non-finite target entries are
+            masked together with non-finite predictions.
+        y_pred_oof_by_repeat: The OOF vector of every repeat, each aligned to
+            ``y`` by position and one-dimensional (NaN marks an uncovered
+            row).
+        y_pred_full: Full-fit predictions aligned to ``y``; ``None`` fails
+            with an explicit reason.
+        max_generalization_gap: The circuit-D threshold.
+
+    Returns:
+        tuple[float, list[str], list[str]]: ``(median_gap, reasons,
+            warnings)``. A total non-computability yields ``NaN`` and a
+            reason; a median strictly above the threshold yields a warning.
+
+    Raises:
+        ValueError: If a repeat or ``y_pred_full`` has a different length from
+            ``y``, or if a value cannot be converted to a float vector.
+    """
+    vectors = list(y_pred_oof_by_repeat)
+    if len(vectors) <= 1:
+        oof = vectors[0] if vectors else np.full(y.shape, np.nan, dtype=float)
+        return check_generalization_gap(
+            y,
+            oof,
+            y_pred_full,
+            max_generalization_gap=max_generalization_gap,
+        )
+    if y_pred_full is None:
+        return (
+            float("nan"),
+            ["Circuit D (generalization gap): y_pred_full is not provided"],
+            [],
+        )
+
+    gaps: list[float] = []
+    leakage_warnings: list[str] = []
+    for vector in vectors:
+        gap, reasons, repeat_warnings = _generalization_gap_once(
+            y,
+            vector,
+            y_pred_full,
+            # Per-repeat threshold and warning routing are deferred to the
+            # aggregated median below.
+            max_generalization_gap=float("inf"),
+        )
+        if reasons:
+            # A non-computable repeat is excluded from the median.
+            continue
+        gaps.append(gap)
+        leakage_warnings.extend(
+            warning
+            for warning in repeat_warnings
+            if "possible target leakage" in warning
+        )
+    if not gaps:
+        return (
+            float("nan"),
+            [
+                (
+                    "Circuit D (generalization gap): no finite pairs to "
+                    "compute RMSE in any repeat"
+                )
+            ],
+            [],
+        )
+    median_gap = float(np.median(gaps))
+    warnings = list(dict.fromkeys(leakage_warnings))
+    if _fails_above(median_gap, max_generalization_gap):
+        if math.isinf(median_gap):
+            warnings.append(
+                f"Circuit D (generalization gap): median gap=inf over "
+                f"{len(gaps)} repeat(s) — division by zero in at least half "
+                f"of the repeats"
+            )
+        else:
+            warnings.append(
+                f"Circuit D (generalization gap): median gap={median_gap:.3f} "
+                f"over {len(gaps)} repeat(s) > "
+                f"max_generalization_gap={max_generalization_gap:.3f}"
+            )
+    return median_gap, [], warnings
+
+
+def _generalization_gap_once(
+    y: np.ndarray,
+    y_pred_oof: np.ndarray,
+    y_pred_full: Any | None,
+    *,
+    max_generalization_gap: float,
+) -> tuple[float, list[str], list[str]]:
+    """Compute one ``RMSE_oof / RMSE_full`` ratio (single split)."""
     if y_pred_full is None:
         return (
             float("nan"),
@@ -812,7 +937,13 @@ def check_generalization_gap(
             f"y and y_pred_full must have the same length "
             f"(got {y.shape} and {full_arr.shape})"
         )
-    mask = np.isfinite(y) & np.isfinite(y_pred_oof) & np.isfinite(full_arr)
+    oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
+    if oof_arr.shape != y.shape:
+        raise ValueError(
+            f"y and y_pred_oof must have the same length "
+            f"(got {y.shape} and {oof_arr.shape})"
+        )
+    mask = np.isfinite(y) & np.isfinite(oof_arr) & np.isfinite(full_arr)
     if not mask.any():
         return (
             float("nan"),
@@ -820,7 +951,7 @@ def check_generalization_gap(
             [],
         )
     rmse_full = float(np.sqrt(mean_squared_error(y[mask], full_arr[mask])))
-    rmse_oof = float(np.sqrt(mean_squared_error(y[mask], y_pred_oof[mask])))
+    rmse_oof = float(np.sqrt(mean_squared_error(y[mask], oof_arr[mask])))
     if rmse_oof <= _ZERO_RMSE_EPS:
         # RMSE_oof ≈ 0: either a perfect model or a target leakage.
         # In warn mode — a soft warning with an explicit leakage

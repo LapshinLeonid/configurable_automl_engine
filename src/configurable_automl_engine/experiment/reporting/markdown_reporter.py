@@ -187,7 +187,7 @@ def _has_repeat_markers(value: Any) -> bool:
     """
     if isinstance(value, dict):
         for key, item in value.items():
-            if isinstance(key, str) and key == "n_repeats":
+            if isinstance(key, str) and key in ("n_repeats", "n_valid_repeats"):
                 try:
                     if int(item) > 1:
                         return True
@@ -211,10 +211,13 @@ def _has_aggregated_audit(value: Any) -> bool:
     """True when a gate section actually records aggregated audit values.
 
     The section-level ``n_repeats`` alone does not prove aggregation: M4
-    records it on every section, including the single-split one. The audit
-    values are aggregated when a candidate carries ``n_repeats > 1`` or an
-    explicit per-repeat spread/median key. Only then may the report state
-    that the circuits use the concatenated OOF / median gap.
+    records it on every section, including the single-split one. A candidate
+    is aggregated when its ``n_valid_repeats`` is greater than one or it
+    carries an explicit per-repeat spread/median key. ``n_repeats`` is the
+    trainer total and may stay above one when only a single valid repeat was
+    audited, so it must not be used as the aggregation marker. Only an
+    actually aggregated audit lets the report state that the circuits use
+    the concatenated OOF / median gap.
     """
     if isinstance(value, dict):
         audit = value.get("audit")
@@ -223,7 +226,7 @@ def _has_aggregated_audit(value: Any) -> bool:
                 if not isinstance(item, dict):
                     continue
                 try:
-                    if int(item.get("n_repeats", 1)) > 1:
+                    if int(item.get("n_valid_repeats", 1)) > 1:
                         return True
                 except (TypeError, ValueError, OverflowError):
                     pass

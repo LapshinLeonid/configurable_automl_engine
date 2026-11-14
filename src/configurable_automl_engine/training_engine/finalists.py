@@ -523,13 +523,37 @@ def _to_candidate(
     Computes the derived quantities (``y_pred_full``, ``rmse_full``) exactly
     once from the already-trained trainer; the OOF vector and the aggregated
     ``RMSE_oof`` (with its per-repeat standard deviation) come from the
-    trainer's attributes."""
+    trainer's attributes. Only repeats with a finite per-repeat ``RMSE_oof``
+    are forwarded to the Sanity Gate: the M3 scoring layer invalidates a
+    whole repeat with the ``inf`` sentinel, and the gate must use the same
+    repeat set as the ranking aggregate. Without usable score metadata the
+    vectors are forwarded as-is."""
     y_pred_full = np.asarray(trainer.predict(X), dtype=float).reshape(-1)
     rmse_full: float | None = None
     try:
         rmse_full = oof_rmse(y, y_pred_full)
     except ValueError:
         rmse_full = None
+    vectors_by_repeat = getattr(trainer, "oof_predictions_by_repeat_", None)
+    repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
+    y_pred_oof_by_repeat: list[np.ndarray | pd.Series] | None = None
+    has_valid_oof = True
+    n_repeats = 1
+    if isinstance(vectors_by_repeat, (list, tuple)) and vectors_by_repeat:
+        repeat_vectors = list(vectors_by_repeat)
+        n_repeats = len(repeat_vectors)
+        if isinstance(repeat_scores, (list, tuple)) and len(repeat_scores) == len(
+            repeat_vectors
+        ):
+            finite_mask = [np.isfinite(float(score)) for score in repeat_scores]
+            has_valid_oof = any(finite_mask)
+            repeat_vectors = [
+                vector
+                for vector, is_finite in zip(repeat_vectors, finite_mask)
+                if is_finite
+            ]
+        if repeat_vectors:
+            y_pred_oof_by_repeat = repeat_vectors
     return FinalistCandidate(
         algo_name=algo_name,
         model=trainer.pipeline,
@@ -541,6 +565,9 @@ def _to_candidate(
         rmse_full=rmse_full,
         trainer=trainer,
         rmse_oof_std=getattr(trainer, "oof_score_std_", None),
+        y_pred_oof_by_repeat=y_pred_oof_by_repeat,
+        has_valid_oof=has_valid_oof,
+        n_repeats=n_repeats,
     )
 
 

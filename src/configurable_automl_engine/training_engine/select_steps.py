@@ -71,10 +71,11 @@ def _rank_sanity_candidates(
 ) -> list[str]:
     """Deterministic ranking of the ``sanity_gate`` select step.
 
-    The strategy's ranking metric is ``RMSE_oof``: candidates that passed the
-    audit are sorted by ascending ``RMSE_oof`` (None — last, ties — pool
-    order), followed by the rejected ones per the fallback criterion. The
-    first element of the ranking always matches ``result.winner_algo``."""
+    The strategy's ranking metric is the aggregated multi-split ``RMSE_oof``:
+    candidates that passed the audit are sorted by ascending ``RMSE_oof``
+    (None — last, ties — pool order), followed by the rejected ones per the
+    fallback criterion. The first element of the ranking always matches
+    ``result.winner_algo``."""
 
     def _rmse_key(name: str) -> tuple[bool, float]:
         rmse = candidate_models[name].rmse_oof
@@ -116,6 +117,8 @@ def _serialize_audit_result(
         "generalization_gap_infinite": bool(audit.generalization_gap == float("inf")),
         "generalization_gap_mode": generalization_gap_mode,
         "severity": int(audit.severity),
+        "n_repeats": int(audit.n_repeats),
+        "n_valid_repeats": int(audit.n_valid_repeats),
     }
 
 
@@ -298,27 +301,40 @@ def _sanity_gate_section(
     generalization_gap_mode: str,
     overhead_seconds: float,
     *,
+    n_repeats: int = 1,
+    split_aggregation: str = "median",
     candidates: Mapping[str, FinalistCandidate] | None = None,
 ) -> dict[str, Any]:
     """Build the report section of a ``sanity_gate`` select step.
 
     The applied circuit D mode is included in the report together with the
     audit so that the reader sees that a Circuit D warning did not disqualify
-    the model. The per-repeat spread of ``RMSE_oof`` is carried when it is
-    available; a single split keeps exactly the classic section shape. The
-    repeated-audit metadata (``n_repeats``/``split_aggregation``) is owned by
-    the M4 gate work and is not added here.
+    the model. The section states the multi-split source of the aggregated
+    metrics (``n_repeats`` and ``split_aggregation``): the per-candidate
+    ``diversity_ratio``/``unique_ratio`` and ``generalization_gap`` are
+    medians of the per-repeat values. The per-repeat spread of ``RMSE_oof``
+    is carried when it is available; a single split keeps exactly the classic
+    section shape.
 
     Args:
         result: The result of ``select_robust_winner``.
         generalization_gap_mode: The applied circuit D mode.
         overhead_seconds: The wall time of the training and audit.
+        n_repeats: The number of repeats recorded by the trainer; repeats
+            invalidated by the M3 scoring layer stay counted in the report but
+            are excluded from the metrics. More than one valid repeat is
+            aggregated by the median; exactly one valid repeat uses the
+            single-split path.
+        split_aggregation: The aggregation policy of the per-repeat
+            ``RMSE_oof`` values used for ranking.
         candidates: The trained finalists (the source of the per-repeat
             ``RMSE_oof`` spread).
     """
     section: dict[str, Any] = {
         "strategy": "sanity_gate",
         "generalization_gap_mode": generalization_gap_mode,
+        "n_repeats": int(n_repeats),
+        "split_aggregation": split_aggregation,
         "pool": list(result.pool),
         "audit": {
             name: _serialize_audit_result(res, generalization_gap_mode)
@@ -360,10 +376,12 @@ def _select_sanity_gate(
     2. ``_train_finalists`` — train each finalist on 100% of the data exactly
        once (a repeated select after HPO phases trains the finalists anew —
        old full-fit trainers are not reused);
-    3. ``ModelSanityGate`` audit;
+    3. ``ModelSanityGate`` audit: with repeated validation circuits A/B and D
+       are evaluated per repeat and aggregated by the median (for D — the
+       ``RMSE_oof / RMSE_full`` ratio);
     4. ``select_robust_winner`` (``active`` mode): rank the candidates that
-       passed the audit by ``RMSE_oof``, with a fallback criterion on total
-       disqualification.
+       passed the audit by the aggregated ``RMSE_oof``, with a fallback
+       criterion on total disqualification.
 
     Gate disqualifications enter the circuit breaker
     (``disqualified_algorithms``) on par with HPO failures; the exception is
@@ -436,10 +454,13 @@ def _select_sanity_gate(
         winner_audit.dead_features_count,
         _fmt_audit_value(winner_audit.generalization_gap),
     )
+    n_repeats = max((audit.n_repeats for audit in result.audit.values()), default=1)
     section = _sanity_gate_section(
         result,
         cfg.general.sanity_gate.generalization_gap_mode,
         overhead_seconds,
+        n_repeats=n_repeats,
+        split_aggregation=cfg.general.split_aggregation,
         candidates=candidates,
     )
 
