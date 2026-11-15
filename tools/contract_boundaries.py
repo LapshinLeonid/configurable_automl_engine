@@ -25,6 +25,7 @@ CONTRACT_PYPROJECT = CONTRACT_ROOT / "pyproject.toml"
 ENGINE_SRC = REPO_ROOT / "src" / "configurable_automl_engine"
 ENGINE_PYPROJECT = REPO_ROOT / "pyproject.toml"
 CI_CONFIG = REPO_ROOT / ".sourcecraft" / "ci.yaml"
+GITHUB_CI_CONFIG = REPO_ROOT / ".github" / "workflows" / "CI.yaml"
 
 ENGINE_MODULE = "configurable_automl_engine"
 ALLOWED_CONTRACT_DEPENDENCIES = frozenset({"pydantic", "pydantic-core"})
@@ -86,7 +87,21 @@ RUNTIME_CALL_PREFIXES = (
     "os.symlink",
     "os.uname",
     "os.walk",
-    "os.path.",
+    "os.path.abspath",
+    "os.path.exists",
+    "os.path.expanduser",
+    "os.path.expandvars",
+    "os.path.getatime",
+    "os.path.getctime",
+    "os.path.getmtime",
+    "os.path.getsize",
+    "os.path.isdir",
+    "os.path.isfile",
+    "os.path.islink",
+    "os.path.ismount",
+    "os.path.lexists",
+    "os.path.realpath",
+    "os.path.samefile",
     "pathlib.Path.exists",
     "pathlib.Path.glob",
     "pathlib.Path.is_dir",
@@ -107,6 +122,38 @@ RUNTIME_CALL_PREFIXES = (
     "socket.",
     "subprocess.",
 )
+PATH_METHODS = frozenset(
+    {
+        "absolute",
+        "chmod",
+        "exists",
+        "expanduser",
+        "glob",
+        "is_dir",
+        "is_file",
+        "iterdir",
+        "lchmod",
+        "lstat",
+        "mkdir",
+        "open",
+        "read_bytes",
+        "read_text",
+        "readlink",
+        "rename",
+        "replace",
+        "resolve",
+        "rglob",
+        "rmdir",
+        "samefile",
+        "stat",
+        "symlink_to",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    }
+)
+PATH_CLASS_NAMES = frozenset({"Path", "pathlib.Path"})
 RUNTIME_ATTRIBUTES = frozenset(
     {
         "os.environ",
@@ -287,22 +334,36 @@ def _string_type_violation(
     return None
 
 
+def _is_type_alias_annotation(annotation: ast.AST) -> bool:
+    name = _dotted_name(annotation)
+    return name is not None and name.rsplit(".", 1)[-1] == "TypeAlias"
+
+
+def _string_alias_value(node: ast.stmt) -> ast.Constant | None:
+    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+        return node.value
+    if (
+        isinstance(node, ast.AnnAssign)
+        and isinstance(node.value, ast.Constant)
+        and _is_type_alias_annotation(node.annotation)
+    ):
+        return node.value
+    type_alias_node = getattr(ast, "TypeAlias", ())
+    if isinstance(node, type_alias_node) and isinstance(node.value, ast.Constant):
+        return node.value
+    return None
+
+
 def _assigned_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
+    """Check direct string aliases, not ordinary string-valued data."""
     violations: list[Violation] = []
     for node in tree.body:
-        if isinstance(node, ast.Assign) or (
-            isinstance(node, ast.AnnAssign) and node.value is not None
-        ):
-            values = [node.value]
-        else:
-            values = []
-        for value in values:
-            if isinstance(value, ast.Call):
-                continue
-            for constant in _type_strings(value):
-                violation = _string_type_violation(path, constant, "string-annotation")
-                if violation is not None:
-                    violations.append(violation)
+        value = _string_alias_value(node)
+        if value is None or not isinstance(value.value, str):
+            continue
+        violation = _string_type_violation(path, value, "string-annotation")
+        if violation is not None:
+            violations.append(violation)
     return violations
 
 
@@ -368,6 +429,23 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
     return violations
 
 
+def _runtime_violation(path: Path, line: int, name: str) -> Violation:
+    return Violation(
+        "runtime-access",
+        path,
+        line,
+        f"the contract must not use {name!r}: runtime and environment "
+        "access belong to the engine",
+    )
+
+
+def _receiver_name(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    """Resolve the object an attribute is read from, including factory calls."""
+    if isinstance(node, ast.Call):
+        return _resolve_callable_name(node.func, aliases)
+    return _resolve_callable_name(node, aliases)
+
+
 def scan_contract_runtime_access(
     contract_src: Path = CONTRACT_SRC,
 ) -> list[Violation]:
@@ -377,34 +455,30 @@ def scan_contract_runtime_access(
         tree = _parse(path)
         aliases = _import_aliases(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute):
-                name = _resolve_callable_name(node, aliases)
+            if isinstance(node, ast.Name):
+                name = aliases.get(node.id, node.id)
                 if name in RUNTIME_ATTRIBUTES:
+                    violations.append(_runtime_violation(path, node.lineno, name))
+                continue
+            if isinstance(node, ast.Attribute):
+                attribute_name = _resolve_callable_name(node, aliases)
+                if attribute_name in RUNTIME_ATTRIBUTES:
                     violations.append(
-                        Violation(
-                            "runtime-access",
-                            path,
-                            node.lineno,
-                            f"the contract must not read {name!r}: runtime "
-                            "environment checks belong to the engine",
-                        )
+                        _runtime_violation(path, node.lineno, attribute_name)
+                    )
+                receiver = _receiver_name(node.value, aliases)
+                if receiver in PATH_CLASS_NAMES and node.attr in PATH_METHODS:
+                    violations.append(
+                        _runtime_violation(path, node.lineno, f"{receiver}.{node.attr}")
                     )
                 continue
             if not isinstance(node, ast.Call):
                 continue
-            name = _resolve_callable_name(node.func, aliases)
-            if name is None:
+            call_name = _resolve_callable_name(node.func, aliases)
+            if call_name is None:
                 continue
-            if name == "open" or name.startswith(RUNTIME_CALL_PREFIXES):
-                violations.append(
-                    Violation(
-                        "runtime-access",
-                        path,
-                        node.lineno,
-                        f"the contract must not use {name!r}: runtime and "
-                        "environment access belong to the engine",
-                    )
-                )
+            if call_name == "open" or call_name.startswith(RUNTIME_CALL_PREFIXES):
+                violations.append(_runtime_violation(path, node.lineno, call_name))
     return violations
 
 
@@ -614,32 +688,32 @@ def scan_engine_duplicates(
         tree = _parse(path)
         for node in tree.body:
             duplicate = False
+            duplicate_targets: list[ast.expr] = []
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 duplicate = node.name in contract_names
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
+            elif isinstance(node, ast.Assign):
+                duplicate_targets = node.targets
                 duplicate = any(
                     isinstance(target, ast.Name) and target.id in contract_names
-                    for target in targets
+                    for target in duplicate_targets
+                )
+            elif isinstance(node, ast.AnnAssign):
+                duplicate_targets = [node.target]
+                duplicate = (
+                    isinstance(node.target, ast.Name)
+                    and node.target.id in contract_names
                 )
             if duplicate:
-                name = (
-                    node.name
-                    if isinstance(
-                        node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-                    )
-                    else next(
+                if isinstance(
+                    node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    name = node.name
+                else:
+                    name = next(
                         target.id
-                        for target in (
-                            node.targets
-                            if isinstance(node, ast.Assign)
-                            else [node.target]
-                        )
+                        for target in duplicate_targets
                         if isinstance(target, ast.Name)
                     )
-                )
                 violations.append(
                     Violation(
                         "engine-duplicate",
@@ -961,33 +1035,128 @@ def inspect_engine_artifacts(
     return violations
 
 
-def scan_ci_configuration(ci_path: Path = CI_CONFIG) -> list[Violation]:
-    """Verify that the CI workflow contains the contract gates."""
-    if not ci_path.is_file():
-        return [
-            Violation("ci-configuration", ci_path, 1, "CI configuration is missing")
-        ]
-    text = ci_path.read_text(encoding="utf-8")
-    required = {
-        "contracts-guarantees": "contracts-guarantees task",
-        "scripts/check_contract_boundaries.py": "static boundary check",
-        "scripts/verify_contract_distribution.py": "artifact verification",
-        "python3.11 -m build automl-contracts": "contract build",
-        "twine check": "twine metadata check",
-        "python3.11 -m venv": "isolated environment",
-        "pytest tests/contracts": "contract tests",
-        "mypy src": "contract mypy",
-        "ruff check src/ automl-contracts/src/": "ruff for both packages",
-    }
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block_after_marker(
+    lines: list[str], marker: str, *, exact: bool = False
+) -> tuple[list[str], int] | None:
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        matches = stripped == marker if exact else stripped.startswith(marker)
+        if matches:
+            base = _line_indent(line)
+            block = [line]
+            for following in lines[index + 1 :]:
+                if not following.strip():
+                    block.append(following)
+                    continue
+                if _line_indent(following) <= base:
+                    break
+                block.append(following)
+            return block, index + 1
+    return None
+
+
+def _check_ci_block(
+    path: Path,
+    block: list[str],
+    required: dict[str, str],
+    label: str,
+) -> list[Violation]:
+    text = "\n".join(block)
     violations: list[Violation] = []
     for token, description in required.items():
         if token not in text:
             violations.append(
                 Violation(
                     "ci-configuration",
+                    path,
+                    1,
+                    f"{label} has no {description} ({token!r})",
+                )
+            )
+    return violations
+
+
+def scan_ci_configuration(
+    ci_path: Path = CI_CONFIG,
+    github_ci_path: Path | None = None,
+) -> list[Violation]:
+    """Verify that the dedicated CI jobs contain the contract gates."""
+    violations: list[Violation] = []
+    if not ci_path.is_file():
+        violations.append(
+            Violation("ci-configuration", ci_path, 1, "CI configuration is missing")
+        )
+    else:
+        lines = ci_path.read_text(encoding="utf-8").splitlines()
+        found = _block_after_marker(lines, "- name: contracts-guarantees")
+        if found is None:
+            violations.append(
+                Violation(
+                    "ci-configuration",
                     ci_path,
                     1,
-                    f"CI configuration has no {description} ({token!r})",
+                    "CI configuration has no contracts-guarantees task",
+                )
+            )
+        else:
+            block, _ = found
+            violations.extend(
+                _check_ci_block(
+                    ci_path,
+                    block,
+                    {
+                        "scripts/check_contract_boundaries.py": "static boundary check",
+                        "scripts/verify_contract_distribution.py": "artifact verification",
+                        "scripts/smoke_contract_install.py": "isolated smoke import",
+                        "python3.11 -m build automl-contracts": "contract build",
+                        "twine check": "twine metadata check",
+                        "python3.11 -m venv": "isolated environment",
+                        "pytest tests/contracts": "contract tests",
+                        "mypy src": "contract mypy",
+                        "ruff check src/ automl-contracts/src/": "ruff for both packages",
+                        "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
+                        "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
+                    },
+                    "contracts-guarantees task",
+                )
+            )
+    github_path = GITHUB_CI_CONFIG if github_ci_path is None else github_ci_path
+    if github_path.is_file():
+        lines = github_path.read_text(encoding="utf-8").splitlines()
+        found = _block_after_marker(lines, "contracts:", exact=True)
+        if found is None:
+            violations.append(
+                Violation(
+                    "ci-configuration",
+                    github_path,
+                    1,
+                    "GitHub CI has no contracts job",
+                )
+            )
+        else:
+            block, _ = found
+            violations.extend(
+                _check_ci_block(
+                    github_path,
+                    block,
+                    {
+                        "scripts/check_contract_boundaries.py": "static boundary check",
+                        "scripts/verify_contract_distribution.py": "artifact verification",
+                        "scripts/smoke_contract_install.py": "isolated smoke import",
+                        "python -m build automl-contracts": "contract build",
+                        "twine check": "twine metadata check",
+                        "python -m venv": "isolated environment",
+                        "python -m pytest tests/contracts": "contract tests",
+                        "mypy src": "contract mypy",
+                        "ruff check src/ automl-contracts/src/": "ruff for both packages",
+                        "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
+                        "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
+                    },
+                    "GitHub contracts job",
                 )
             )
     return violations
@@ -1001,6 +1170,7 @@ def run_static_checks(repo_root: Path = REPO_ROOT) -> list[Violation]:
     engine_src = repo_root / "src" / "configurable_automl_engine"
     engine_pyproject = repo_root / "pyproject.toml"
     ci_path = repo_root / ".sourcecraft" / "ci.yaml"
+    github_ci_path = repo_root / ".github" / "workflows" / "CI.yaml"
     violations: list[Violation] = []
     violations.extend(scan_contract_imports(contract_src))
     violations.extend(scan_contract_type_strings(contract_src))
@@ -1011,5 +1181,5 @@ def run_static_checks(repo_root: Path = REPO_ROOT) -> list[Violation]:
     violations.extend(scan_ruff_policy(engine_pyproject, contract_pyproject))
     violations.extend(scan_engine_duplicates(engine_src, contract_src))
     violations.extend(scan_engine_contract_usage(engine_src, engine_pyproject))
-    violations.extend(scan_ci_configuration(ci_path))
+    violations.extend(scan_ci_configuration(ci_path, github_ci_path))
     return violations

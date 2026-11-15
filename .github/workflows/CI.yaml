@@ -110,6 +110,9 @@ jobs:
         run: |
           ruff check src/ automl-contracts/src/
           ruff format --check src/ automl-contracts/src/
+          ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+          ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+          mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py
           (cd automl-contracts && mypy src)
           (cd automl-contracts && lint-imports)
           python -m pytest tests/contracts

@@ -18,6 +18,7 @@ from tools.contract_boundaries import (
     inspect_contract_wheel,
     inspect_engine_artifacts,
     run_static_checks,
+    scan_ci_configuration,
     scan_contract_dynamic_imports,
     scan_contract_imports,
     scan_contract_metadata,
@@ -227,6 +228,149 @@ def test_runtime_environment_access_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_path_instance_io_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        Path("x").read_text()
+        Path("x").write_text("...")
+        Path("x").exists()
+        Path("x").open()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
+
+
+def test_imported_runtime_attributes_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from os import environ
+        from sys import platform
+
+        environ.get("HOME")
+        platform
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    messages = {violation.message for violation in violations}
+    assert len(violations) == 2
+    assert any("os.environ" in message for message in messages)
+    assert any("sys.platform" in message for message in messages)
+
+
+def test_imported_runtime_function_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from os import getenv
+
+        getenv("HOME")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_pure_path_operations_are_allowed(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        from pathlib import Path
+
+        Path("a").joinpath("b")
+        os.path.join("a", "b")
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_ordinary_string_values_are_not_type_annotations(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from typing import Literal
+
+        SUPPORTED_FORMATS = ("pickle", "joblib")
+        FORMATS = Literal["numpy", "pandas"]
+        value: str = "joblib"
+        """,
+    )
+    assert scan_contract_type_strings(tmp_path) == []
+
+
+def test_annotated_type_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from typing import TypeAlias
+
+        ConfigAlias: TypeAlias = "configurable_automl_engine.Config"
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_ci_requires_a_dedicated_contracts_task(tmp_path: Path) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: run-quality-checks
+                cubes:
+                  - name: legacy
+                    script:
+                      - |
+                        ruff check src/ automl-contracts/src/
+                        mypy src
+                        pytest tests/contracts
+                        python3.11 -m venv /tmp/venv
+                        python3.11 -m build automl-contracts
+                        twine check automl-contracts/dist/*
+                        python3.11 scripts/check_contract_boundaries.py
+                        python3.11 scripts/verify_contract_distribution.py
+                        python3.11 scripts/smoke_contract_install.py
+                        ruff check tools/contract_boundaries.py
+                        mypy tools/contract_boundaries.py
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    assert any(
+        "no contracts-guarantees task" in violation.message for violation in violations
+    )
+
+
+def test_ci_checks_commands_inside_contracts_task(tmp_path: Path) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: contracts-guarantees
+                cubes:
+                  - name: static
+                    script:
+                      - |
+                        ruff check src/ automl-contracts/src/
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    assert violations
+    assert all(
+        "contracts-guarantees task" in violation.message for violation in violations
+    )
 
 
 def test_allowed_contract_imports_pass(tmp_path: Path) -> None:
