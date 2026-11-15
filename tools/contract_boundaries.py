@@ -77,6 +77,9 @@ RUNTIME_CALL_PREFIXES = (
     "os.getenv",
     "os.getenvb",
     "os.listdir",
+    "os.lstat",
+    "os.readlink",
+    "os.scandir",
     "os.makedirs",
     "os.mkdir",
     "os.open",
@@ -97,6 +100,25 @@ RUNTIME_CALL_PREFIXES = (
     "os.sendfile",
     "os.splice",
     "os.copy_file_range",
+    "os.system",
+    "os.popen",
+    "os.fork",
+    "os.forkpty",
+    "os.execv",
+    "os.execve",
+    "os.execvp",
+    "os.execvpe",
+    "os.execl",
+    "os.execlp",
+    "os.execlpe",
+    "os.spawn",
+    "os.posix_spawn",
+    "os.kill",
+    "os.killpg",
+    "os.setuid",
+    "os.setgid",
+    "os.chroot",
+    "os.ptrace",
     "os.putenv",
     "os.remove",
     "os.rename",
@@ -121,18 +143,24 @@ RUNTIME_CALL_PREFIXES = (
     "os.path.lexists",
     "os.path.realpath",
     "os.path.samefile",
-    "pathlib.Path.exists",
-    "pathlib.Path.glob",
-    "pathlib.Path.is_dir",
-    "pathlib.Path.is_file",
-    "pathlib.Path.open",
-    "pathlib.Path.read_bytes",
-    "pathlib.Path.read_text",
-    "pathlib.Path.write_bytes",
-    "pathlib.Path.write_text",
+    "asyncio.",
+    "concurrent.",
+    "ftplib.",
+    "http.",
+    "httplib.",
     "platform.",
     "psutil.",
+    "requests.",
     "resource.",
+    "signal.",
+    "smtplib.",
+    "socketserver.",
+    "ssl.",
+    "telnetlib.",
+    "threading.",
+    "urllib.",
+    "urllib2.",
+    "xmlrpc.",
     "shutil.copy",
     "shutil.copy2",
     "shutil.move",
@@ -141,44 +169,32 @@ RUNTIME_CALL_PREFIXES = (
     "socket.",
     "subprocess.",
 )
-PATH_METHODS = frozenset(
+PATH_PURE_METHODS = frozenset(
     {
-        "absolute",
-        "chmod",
-        "exists",
-        "expanduser",
-        "glob",
-        "is_block_device",
-        "is_char_device",
-        "is_dir",
-        "is_fifo",
-        "is_file",
-        "is_junction",
-        "is_mount",
-        "is_socket",
-        "is_symlink",
-        "iterdir",
-        "lchmod",
-        "lstat",
-        "mkdir",
-        "open",
-        "read_bytes",
-        "read_text",
-        "readlink",
-        "rename",
-        "replace",
-        "resolve",
-        "rglob",
-        "rmdir",
-        "samefile",
-        "stat",
-        "symlink_to",
-        "touch",
-        "unlink",
-        "write_bytes",
-        "write_text",
+        "__bytes__",
+        "__eq__",
+        "__fspath__",
+        "__hash__",
+        "__repr__",
+        "__rtruediv__",
+        "__str__",
+        "__truediv__",
+        "as_posix",
+        "as_uri",
+        "full_match",
+        "is_absolute",
+        "is_relative_to",
+        "is_reserved",
+        "joinpath",
+        "match",
+        "relative_to",
+        "with_name",
+        "with_segments",
+        "with_stem",
+        "with_suffix",
     }
 )
+
 PATH_CLASS_NAMES = frozenset({"Path", "pathlib.Path"})
 PATH_RETURNING_METHODS = frozenset(
     {
@@ -405,21 +421,35 @@ def _is_type_alias_annotation(annotation: ast.AST, aliases: dict[str, str]) -> b
     return name is not None and name.rsplit(".", 1)[-1] == "TypeAlias"
 
 
+def _looks_like_type_reference(value: str) -> bool:
+    """Separate qualified type names from ordinary dotted string data."""
+    if ENGINE_MODULE in value:
+        return True
+    if "." not in value:
+        return False
+    last = value.rsplit(".", 1)[-1]
+    return bool(last) and (last[0].isupper() or last.startswith("_"))
+
+
 def _assigned_type_strings(
     path: Path, tree: ast.Module, aliases: dict[str, str]
 ) -> list[Violation]:
     """Check type aliases, not ordinary string-valued data."""
     violations: list[Violation] = []
     type_alias_node = getattr(ast, "TypeAlias", ())
-    for node in tree.body:
+    for node in ast.walk(tree):
         constants: list[ast.Constant] = []
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             value = node.value
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                if "." in value.value:
+                if _looks_like_type_reference(value.value):
                     constants = [value]
             elif isinstance(value, (ast.Subscript, ast.BinOp)):
-                constants = list(_type_expression_strings(value, aliases))
+                constants = [
+                    constant
+                    for constant in _type_expression_strings(value, aliases)
+                    if _looks_like_type_reference(str(constant.value))
+                ]
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             if _is_type_alias_annotation(node.annotation, aliases):
                 constants = list(_type_expression_strings(node.value, aliases))
@@ -589,14 +619,16 @@ def scan_contract_runtime_access(
                     violations.append(
                         _runtime_violation(path, node.lineno, attribute_name)
                     )
-                if node.attr in PATH_METHODS and _is_path_expression(
-                    node.value, aliases, path_names
-                ):
-                    violations.append(
-                        _runtime_violation(path, node.lineno, f"Path.{node.attr}")
-                    )
                 continue
             if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and _is_path_expression(
+                node.func.value, aliases, path_names
+            ):
+                if node.func.attr not in PATH_PURE_METHODS:
+                    violations.append(
+                        _runtime_violation(path, node.lineno, f"Path.{node.func.attr}")
+                    )
                 continue
             call_name = _resolve_callable_name(node.func, aliases)
             if call_name is None:
@@ -801,6 +833,13 @@ def contract_public_names(contract_src: Path = CONTRACT_SRC) -> set[str]:
     return names
 
 
+def _is_contract_reexport(value: ast.AST, aliases: dict[str, str]) -> bool:
+    name = _resolve_callable_name(value, aliases)
+    return name == "automl_contracts" or bool(
+        name and name.startswith("automl_contracts.")
+    )
+
+
 def scan_engine_duplicates(
     engine_src: Path = ENGINE_SRC,
     contract_src: Path = CONTRACT_SRC,
@@ -810,6 +849,7 @@ def scan_engine_duplicates(
     violations: list[Violation] = []
     for path in python_files(engine_src):
         tree = _parse(path)
+        aliases = _import_aliases(tree)
         for node in tree.body:
             duplicate = False
             duplicate_targets: list[ast.expr] = []
@@ -820,12 +860,14 @@ def scan_engine_duplicates(
                 duplicate = any(
                     isinstance(target, ast.Name) and target.id in contract_names
                     for target in duplicate_targets
-                )
+                ) and not _is_contract_reexport(node.value, aliases)
             elif isinstance(node, ast.AnnAssign):
                 duplicate_targets = [node.target]
                 duplicate = (
                     isinstance(node.target, ast.Name)
                     and node.target.id in contract_names
+                    and node.value is not None
+                    and not _is_contract_reexport(node.value, aliases)
                 )
             if duplicate:
                 if isinstance(
@@ -1189,7 +1231,7 @@ def _check_ci_block(
     required: dict[str, str],
     label: str,
 ) -> list[Violation]:
-    text = "\n".join(block)
+    text = "\n".join(line for line in block if not line.lstrip().startswith("#"))
     violations: list[Violation] = []
     for token, description in required.items():
         if token not in text:

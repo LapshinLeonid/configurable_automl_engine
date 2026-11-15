@@ -283,6 +283,77 @@ def test_runtime_environment_access_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
+def test_os_lstat_and_scandir_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        os.lstat("x")
+        os.scandir("x")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_process_and_network_access_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import ftplib
+        import http.client
+        import os
+        import smtplib
+        import urllib.request
+
+        os.system("true")
+        os.popen("true")
+        os.fork()
+        os.execv("x", [])
+        os.kill(1, 0)
+        urllib.request.urlopen("http://example.com")
+        http.client.HTTPSConnection("example.com")
+        smtplib.SMTP("example.com")
+        ftplib.FTP("example.com")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 9
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_path_working_directory_helpers_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        Path.cwd()
+        Path.home()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_pure_path_methods_are_allowed(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        Path("x").joinpath("y")
+        Path("x").with_suffix(".json")
+        Path("x").as_posix()
+        Path("x").match("*.py")
+        Path("x").is_absolute()
+        Path("x").relative_to("x")
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
 def test_path_instance_io_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -458,6 +529,75 @@ def test_imported_type_alias_name_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["string-annotation"]
 
 
+def test_nested_type_aliases_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from typing import TYPE_CHECKING, TypeAlias
+
+        if TYPE_CHECKING:
+            Alias1: TypeAlias = list["configurable_automl_engine.Config"]
+
+        try:
+            Alias2 = list["configurable_automl_engine.Config"]
+        except ImportError:
+            Alias2 = None
+
+        class Holder:
+            Alias3 = "configurable_automl_engine.Config"
+
+        def build():
+            Alias4: TypeAlias = "configurable_automl_engine.Config"
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert len(violations) == 4
+    assert {violation.rule for violation in violations} == {"string-annotation"}
+
+
+def test_dotted_data_constant_is_not_a_type_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        DEFAULT_DTYPE = "numpy.float32"
+        DEFAULT_FORMAT = "joblib"
+        """,
+    )
+    assert scan_contract_type_strings(tmp_path) == []
+
+
+def test_ci_commented_commands_do_not_satisfy_contracts_task(
+    tmp_path: Path,
+) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: contracts-guarantees
+                cubes:
+                  - name: static
+                    script:
+                      - |
+                        # scripts/check_contract_boundaries.py
+                        scripts/verify_contract_distribution.py
+                        scripts/smoke_contract_install.py
+                        python3.11 -m build automl-contracts
+                        twine check automl-contracts/dist/*
+                        python3.11 -m venv /tmp/venv
+                        pytest tests/contracts
+                        mypy src
+                        ruff check src/ automl-contracts/src/
+                        ruff check tools/contract_boundaries.py
+                        mypy tools/contract_boundaries.py
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    assert any("static boundary check" in violation.message for violation in violations)
+
+
 def test_ci_requires_a_dedicated_contracts_task(tmp_path: Path) -> None:
     ci = tmp_path / "ci.yaml"
     _write(
@@ -574,6 +714,20 @@ def test_engine_duplicate_constant_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_engine_duplicates(tmp_path, CONTRACT_SRC)
     assert [violation.rule for violation in violations] == ["engine-duplicate"]
+
+
+def test_engine_contract_reexports_are_not_duplicates(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "engine.py",
+        """
+        import automl_contracts
+        from automl_contracts import Config as _Config
+
+        Config = automl_contracts.Config
+        ConfigAgain = _Config
+        """,
+    )
+    assert scan_engine_duplicates(tmp_path, CONTRACT_SRC) == []
 
 
 def test_contract_names_include_public_submodule_symbols() -> None:
