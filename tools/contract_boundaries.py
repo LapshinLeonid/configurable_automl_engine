@@ -170,6 +170,30 @@ RUNTIME_CALL_PREFIXES = (
     "os.path.lexists",
     "os.path.realpath",
     "os.path.samefile",
+    "posixpath.exists",
+    "posixpath.isfile",
+    "posixpath.isdir",
+    "posixpath.islink",
+    "posixpath.ismount",
+    "posixpath.lexists",
+    "posixpath.getsize",
+    "posixpath.getmtime",
+    "posixpath.getctime",
+    "posixpath.getatime",
+    "posixpath.realpath",
+    "posixpath.samefile",
+    "ntpath.exists",
+    "ntpath.isfile",
+    "ntpath.isdir",
+    "ntpath.islink",
+    "ntpath.ismount",
+    "ntpath.lexists",
+    "ntpath.getsize",
+    "ntpath.getmtime",
+    "ntpath.getctime",
+    "ntpath.getatime",
+    "ntpath.realpath",
+    "ntpath.samefile",
     "asyncio.",
     "concurrent.",
     "ftplib.",
@@ -190,10 +214,13 @@ RUNTIME_CALL_PREFIXES = (
     "urllib2.",
     "xmlrpc.",
     "shelve.",
+    "shutil.chown",
     "shutil.copy",
     "shutil.copy2",
     "shutil.disk_usage",
+    "shutil.make_archive",
     "shutil.move",
+    "shutil.unpack_archive",
     "shutil.rmtree",
     "shutil.which",
     "socket.",
@@ -291,6 +318,7 @@ RUNTIME_ATTRIBUTES = frozenset(
         "sys.getwindowsversion",
         "sys.implementation",
         "sys.meta_path",
+        "sys.modules",
         "sys.path",
         "sys.path_hooks",
         "sys.platform",
@@ -396,21 +424,99 @@ def _resolve_possible_names(node: ast.AST, aliases: FlowAliases) -> frozenset[st
     return frozenset()
 
 
+def _iter_target_names(target: ast.AST) -> Iterator[ast.Name]:
+    if isinstance(target, ast.Name):
+        yield target
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _iter_target_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from _iter_target_names(target.value)
+
+
 def _remove_target_aliases(targets: Sequence[ast.AST], aliases: FlowAliases) -> None:
     for target in targets:
-        if isinstance(target, ast.Name):
-            aliases.pop(target.id, None)
+        for name in _iter_target_names(target):
+            aliases[name.id] = frozenset()
+
+
+def _value_callable_names(
+    value: ast.AST,
+    aliases: FlowAliases,
+    path_aliases: dict[str, str] | None,
+    path_names: set[str] | None,
+) -> frozenset[str]:
+    if isinstance(value, ast.Attribute) and path_names is not None:
+        static = path_aliases or {}
+        if _is_path_expression(value.value, static, path_names):
+            if value.attr not in PATH_PURE_METHODS:
+                return frozenset({f"Path.{value.attr}"})
+            return frozenset()
+    if isinstance(value, (ast.Name, ast.Attribute)):
+        return _resolve_possible_names(value, aliases)
+    return frozenset()
+
+
+def _assign_target(
+    target: ast.AST,
+    value: ast.AST,
+    aliases: FlowAliases,
+    path_aliases: dict[str, str] | None,
+    path_names: set[str] | None,
+) -> None:
+    if isinstance(target, (ast.Tuple, ast.List)):
+        if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(
+            value.elts
+        ):
+            for element_target, element_value in zip(target.elts, value.elts):
+                _assign_target(
+                    element_target,
+                    element_value,
+                    aliases,
+                    path_aliases,
+                    path_names,
+                )
+        else:
+            _remove_target_aliases([target], aliases)
+        return
+    if isinstance(target, ast.Starred):
+        _assign_target(target.value, value, aliases, path_aliases, path_names)
+        return
+    if isinstance(target, ast.Name):
+        aliases[target.id] = _value_callable_names(
+            value, aliases, path_aliases, path_names
+        )
 
 
 def _assign_target_aliases(
-    targets: Sequence[ast.AST], value: ast.AST, aliases: FlowAliases
+    targets: Sequence[ast.AST],
+    value: ast.AST,
+    aliases: FlowAliases,
+    path_aliases: dict[str, str] | None = None,
+    path_names: set[str] | None = None,
 ) -> None:
-    resolved: frozenset[str] = frozenset()
-    if isinstance(value, (ast.Name, ast.Attribute)):
-        resolved = _resolve_possible_names(value, aliases)
+    if (
+        len(targets) == 1
+        and isinstance(targets[0], (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+    ):
+        _assign_target(targets[0], value, aliases, path_aliases, path_names)
+        return
     for target in targets:
-        if isinstance(target, ast.Name):
-            aliases[target.id] = resolved
+        _assign_target(target, value, aliases, path_aliases, path_names)
+
+
+def _apply_named_expressions(
+    node: ast.AST,
+    aliases: FlowAliases,
+    path_aliases: dict[str, str] | None,
+    path_names: set[str] | None,
+) -> None:
+    for child in ast.walk(node):
+        if isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+            _assign_target_aliases(
+                [child.target], child.value, aliases, path_aliases, path_names
+            )
 
 
 def _iterable_callable_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
@@ -501,6 +607,7 @@ def _iter_function_calls(
     path_names: set[str],
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
+    aliases[stmt.name] = frozenset()
     for decorator in stmt.decorator_list:
         yield from _calls_in_expression(decorator, aliases, path_names)
     for default in stmt.args.defaults:
@@ -520,7 +627,7 @@ def _iter_function_calls(
     for argument in arguments:
         if argument is None:
             continue
-        base_aliases.pop(argument.arg, None)
+        base_aliases[argument.arg] = frozenset()
         if argument.annotation is not None and _annotation_contains_path(
             argument.annotation, _import_aliases_from_alias_sets(aliases)
         ):
@@ -547,6 +654,7 @@ def _iter_class_calls(
     path_names: set[str],
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
+    aliases[stmt.name] = frozenset()
     for decorator in stmt.decorator_list:
         yield from _calls_in_expression(decorator, aliases, path_names)
     for base in stmt.bases:
@@ -568,7 +676,9 @@ def _iter_assign_calls(
     _global: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.value, aliases, path_names)
-    _assign_target_aliases(stmt.targets, stmt.value, aliases)
+    static = _import_aliases_from_alias_sets(aliases)
+    _apply_named_expressions(stmt.value, aliases, static, path_names)
+    _assign_target_aliases(stmt.targets, stmt.value, aliases, static, path_names)
 
 
 def _iter_ann_assign_calls(
@@ -579,7 +689,9 @@ def _iter_ann_assign_calls(
 ) -> Iterator[CallContext]:
     if stmt.value is not None:
         yield from _calls_in_expression(stmt.value, aliases, path_names)
-        _assign_target_aliases([stmt.target], stmt.value, aliases)
+        static = _import_aliases_from_alias_sets(aliases)
+        _apply_named_expressions(stmt.value, aliases, static, path_names)
+        _assign_target_aliases([stmt.target], stmt.value, aliases, static, path_names)
     else:
         _remove_target_aliases([stmt.target], aliases)
 
@@ -591,6 +703,9 @@ def _iter_aug_assign_calls(
     _global: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.value, aliases, path_names)
+    _apply_named_expressions(
+        stmt.value, aliases, _import_aliases_from_alias_sets(aliases), path_names
+    )
     _remove_target_aliases([stmt.target], aliases)
 
 
@@ -601,6 +716,9 @@ def _iter_if_calls(
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.test, aliases, path_names)
+    _apply_named_expressions(
+        stmt.test, aliases, _import_aliases_from_alias_sets(aliases), path_names
+    )
     body = dict(aliases)
     yield from _iter_calls_with_aliases(stmt.body, body, path_names, global_aliases)
     orelse = dict(aliases)
@@ -615,6 +733,8 @@ def _iter_for_calls(
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.iter, aliases, path_names)
+    static = _import_aliases_from_alias_sets(aliases)
+    _apply_named_expressions(stmt.iter, aliases, static, path_names)
     inner = dict(aliases)
     if isinstance(stmt.target, ast.Name):
         inner[stmt.target.id] = _iterable_callable_names(stmt.iter, aliases)
@@ -633,6 +753,9 @@ def _iter_while_calls(
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.test, aliases, path_names)
+    _apply_named_expressions(
+        stmt.test, aliases, _import_aliases_from_alias_sets(aliases), path_names
+    )
     body = dict(aliases)
     yield from _iter_calls_with_aliases(stmt.body, body, path_names, global_aliases)
     orelse = dict(aliases)
@@ -648,6 +771,12 @@ def _iter_with_calls(
 ) -> Iterator[CallContext]:
     for item in stmt.items:
         yield from _calls_in_expression(item.context_expr, aliases, path_names)
+        _apply_named_expressions(
+            item.context_expr,
+            aliases,
+            _import_aliases_from_alias_sets(aliases),
+            path_names,
+        )
     inner = dict(aliases)
     for item in stmt.items:
         if item.optional_vars is not None:
@@ -690,10 +819,19 @@ def _iter_match_calls(
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
     yield from _calls_in_expression(stmt.subject, aliases, path_names)
+    _apply_named_expressions(
+        stmt.subject, aliases, _import_aliases_from_alias_sets(aliases), path_names
+    )
     branches: list[FlowAliases] = []
     for case in stmt.cases:
         if case.guard is not None:
             yield from _calls_in_expression(case.guard, aliases, path_names)
+            _apply_named_expressions(
+                case.guard,
+                aliases,
+                _import_aliases_from_alias_sets(aliases),
+                path_names,
+            )
         branch = dict(aliases)
         branches.append(branch)
         yield from _iter_calls_with_aliases(
@@ -719,6 +857,7 @@ _SCOPE_HANDLERS: dict[type[ast.stmt], ScopeHandler] = {
     ast.AsyncWith: _iter_with_calls,
     ast.With: _iter_with_calls,
     ast.Try: _iter_try_calls,
+    ast.TryStar: _iter_try_calls,
     ast.Match: _iter_match_calls,
 }
 
@@ -1164,7 +1303,12 @@ def scan_contract_runtime_access(
             forbidden = {
                 name
                 for name in possible
-                if name == "open" or name.startswith(RUNTIME_CALL_PREFIXES)
+                if name == "open"
+                or name.startswith(RUNTIME_CALL_PREFIXES)
+                or (
+                    name.startswith("Path.")
+                    and name.split(".", 1)[1] not in PATH_PURE_METHODS
+                )
             }
             if forbidden:
                 violations.append(_runtime_violation(path, node.lineno, min(forbidden)))

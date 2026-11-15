@@ -378,6 +378,92 @@ def test_module_alias_after_function_is_visible(tmp_path: Path) -> None:
     assert "os.system" in violations[0].message
 
 
+def test_tuple_assignment_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        f, _ = os.system, None
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_tuple_assignment_import_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        f, _ = __import__, None
+        f("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_walrus_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        if (f := os.system):
+            f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_walrus_import_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        if (f := __import__):
+            f("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_try_star_alias_is_merged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        try:
+            pass
+        except* Exception:
+            f = os.system
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_bound_path_method_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        read = Path("x").read_text
+        read()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
 def test_os_file_io_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -550,6 +636,28 @@ def test_stdlib_filesystem_modules_are_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert len(violations) == 9
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_remaining_stdlib_runtime_apis_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import ntpath
+        import posixpath
+        import shutil
+        import sys
+
+        posixpath.exists("x")
+        ntpath.exists("x")
+        shutil.make_archive("x", "zip")
+        shutil.unpack_archive("x")
+        shutil.chown("x", user="root")
+        sys.modules["configurable_automl_engine"]
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 6
     assert {violation.rule for violation in violations} == {"runtime-access"}
 
 
@@ -803,6 +911,25 @@ def test_path_slash_composition_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_shadowed_open_is_not_the_builtin(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from collections.abc import Callable
+
+        def open(path: str) -> str:
+            return path
+
+        def f(open: Callable[[str], str]) -> str:
+            return open("x")
+
+        open("x")
+        f(lambda value: value)
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
 
 
 def test_pure_path_operations_are_allowed(tmp_path: Path) -> None:

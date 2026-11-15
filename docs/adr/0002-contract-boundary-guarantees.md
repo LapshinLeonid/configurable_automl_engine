@@ -63,9 +63,10 @@ configurable_automl_engine ───────▶ automl_contracts
   числе через импорт-алиас и присваивание (`f = __import__; f(...)`).
   Присваивания callable анализируются по областям видимости и в порядке
   выполнения, поэтому одинаковые имена в разных функциях не смешиваются.
-  Ветки `if`/`try`/`for`/`while`/`with`/`match` объединяются как наборы
-  возможных целей, а функции видят module-level aliases, определённые после
-  `def`.
+  Ветки `if`/`try`/`except*`/`for`/`while`/`with`/`match` объединяются как
+  наборы возможных целей, а функции видят module-level aliases, определённые
+  после `def`. Распаковка tuple/list, вложенная распаковка и walrus-выражения
+  (`f, _ = os.system, None`, `if (f := os.system): ...`) также учитываются.
   Разрешён только `importlib.metadata.version` для получения версии
   установленного дистрибутива;
 - строковая ссылка внутри параметризованного type-alias
@@ -128,12 +129,18 @@ AST-проверка импортов использует белый списо
   `os.getpid`, `os.getppid`, `os.getuid`, `os.getgid`, `os.get_exec_path`,
   `subprocess.*`, `socket.*`, `urllib.*`, `http.*`, `smtplib.*`, `ftplib.*`,
   `tempfile.*`, `sqlite3.*`, `io.*`, `glob.*`, `zipfile.*`, `tarfile.*`,
-  `dbm.*`, `shelve.*`, `fileinput.*`, `mmap.*`, `webbrowser.*`;
-- обращения к `sys.argv`, `sys.path`, `sys.stdin`, `sys.stdout`, `sys.stderr`,
-  `sys.executable`, `sys.prefix` и аналогичным environment-зависимым
-  атрибутам;
+  `dbm.*`, `shelve.*`, `fileinput.*`, `mmap.*`, `webbrowser.*`,
+  `posixpath.*`/`ntpath.*` (файловые проверки), `shutil.make_archive`,
+  `shutil.unpack_archive`, `shutil.chown`;
+- обращения к `sys.argv`, `sys.path`, `sys.modules`, `sys.stdin`, `sys.stdout`,
+  `sys.stderr`, `sys.executable`, `sys.prefix` и аналогичным
+  environment-зависимым атрибутам;
 - присваивание запрещённого callable локальному имени
   (`run = os.system; run(...)`, `read = open; read(...)`) не обходит проверку;
+  связанный метод `read = Path(...).read_text` превращается в запрещённый
+  sentinel и также не обходит allow-list чистых методов `Path`;
+- локальное определение или параметр с именем `open` затеняет builtin и не
+  считается файловым I/O;
 - динамический импорт, перечисленный в разделе 3.
 
 `Path("model.pkl")` как значение по умолчанию является частью модели
