@@ -1,0 +1,13 @@
+include README.md
+include CHANGELOG.md
+include LICENSE.md
+include src/automl_contracts/py.typed
+include src/automl_contracts/schemas/*.json
+prune tests
+prune dist
+prune scripts
+global-exclude __pycache__ *.py[cod]
+prune src/automl_contracts.egg-info
+prune .mypy_cache
+prune .ruff_cache
+prune .import_linter_cache

@@ -20,6 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -e automl-contracts
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e ".[all,test]"; fi
 
       # Oversampling evidence benchmark (the evidence gate T13). Compares the

@@ -27,6 +27,10 @@ from configurable_automl_engine.common.definitions import (
     ValidationStrategy,
     SerializationFormat,
 )
+from configurable_automl_engine.training_engine.config_runtime import (
+    get_unknown_hyperparameters,
+    validate_runtime_config,
+)
 
 from unittest.mock import patch
 
@@ -400,8 +404,8 @@ def test_threads_mode_rejects_phase_timeout():
             "phase_timeout": 60,
         }
     }
-    with pytest.raises(ValidationError, match="not supported in parallel_mode='threads'"):
-        Config.model_validate(cfg_data)
+    with pytest.raises(ValueError, match="not supported in parallel_mode='threads'"):
+        validate_runtime_config(Config.model_validate(cfg_data))
 
 
 def test_threads_mode_rejects_task_timeout():
@@ -413,8 +417,8 @@ def test_threads_mode_rejects_task_timeout():
             "task_timeout": 30,
         }
     }
-    with pytest.raises(ValidationError, match="not supported in parallel_mode='threads'"):
-        Config.model_validate(cfg_data)
+    with pytest.raises(ValueError, match="not supported in parallel_mode='threads'"):
+        validate_runtime_config(Config.model_validate(cfg_data))
 
 
 def test_threads_mode_rejects_both_timeouts():
@@ -427,8 +431,8 @@ def test_threads_mode_rejects_both_timeouts():
             "task_timeout": 30,
         }
     }
-    with pytest.raises(ValidationError) as exc_info:
-        Config.model_validate(cfg_data)
+    with pytest.raises(ValueError) as exc_info:
+        validate_runtime_config(Config.model_validate(cfg_data))
     msg = str(exc_info.value)
     assert "general.phase_timeout=60" in msg
     assert "general.task_timeout=30" in msg
@@ -601,7 +605,7 @@ def test_general_cfg_coverage_line_83():
         )
 
 
-@patch("configurable_automl_engine.training_engine.config.general_rules.is_installed")
+@patch("configurable_automl_engine.training_engine.config_runtime.is_installed")
 def test_joblib_not_installed_raises_error(mock_is_installed):
     """Test for the exception raised when joblib is missing."""
     # Simulate the package being absent
@@ -617,14 +621,14 @@ def test_joblib_not_installed_raises_error(mock_is_installed):
             "validation_strategy": "k_fold",
             "n_folds": 5,
         },
-        "algorithms": {"any_algo": {"enable": True}},
+        "algorithms": {"ridge": {"enable": True}},
     }
 
-    with pytest.raises(ValidationError, match=".*serialization_format='joblib'.*"):
-        Config.model_validate(data)
+    with pytest.raises(ValueError, match=".*serialization_format='joblib'.*"):
+        validate_runtime_config(Config.model_validate(data))
 
 
-@patch("configurable_automl_engine.training_engine.config.root.is_installed")
+@patch("configurable_automl_engine.training_engine.config_runtime.is_installed")
 def test_missing_algorithm_dependency_raises_error(mock_is_installed):
     """Test for the exception raised when an algorithm's library is missing."""
     mock_is_installed.return_value = False
@@ -644,7 +648,7 @@ def test_missing_algorithm_dependency_raises_error(mock_is_installed):
         "Algorithm 'xgboosting' is enabled, but the package 'xgboost' is not installed"
     )
     with pytest.raises(ValueError, match=expected_msg):
-        Config.model_validate(data)
+        validate_runtime_config(Config.model_validate(data))
 
 
 def test_config_skips_disabled_algorithms_dependency_check():
@@ -835,11 +839,11 @@ def test_algorithm_dependency_check():
     # Mock the mapping and the installation-check function
     with (
         patch(
-            "configurable_automl_engine.training_engine.config.algorithms.ALGO_PACKAGE_MAPPING",
+            "configurable_automl_engine.training_engine.config_runtime.ALGO_PACKAGE_MAPPING",
             {"xgboosting": "xgboost_pkg"},
         ),
         patch(
-            "configurable_automl_engine.training_engine.config.root.is_installed"
+            "configurable_automl_engine.training_engine.config_runtime.is_installed"
         ) as mock_installed,
     ):
         # Scenario: the package is NOT installed
@@ -856,10 +860,10 @@ def test_algorithm_dependency_check():
 
         expected_msg = "Algorithm 'xgboosting' is enabled, but the package 'xgboost_pkg' is not installed"
         with pytest.raises(ValueError, match=re.escape(expected_msg)):
-            Config.model_validate(config_data)
+            validate_runtime_config(Config.model_validate(config_data))
         # Scenario: the package is installed
         mock_installed.return_value = True
-        cfg = Config.model_validate(config_data)
+        cfg = validate_runtime_config(Config.model_validate(config_data))
         assert getattr(cfg.algorithms, "xgboosting").enable is True
 
 
@@ -878,14 +882,14 @@ def test_general_cfg_n_folds():
 
 def test_get_unknown_hyperparameters_none():
     cfg = AlgoCfg(hyperparameters=None)
-    assert cfg.get_unknown_hyperparameters("xgboosting") == []
+    assert get_unknown_hyperparameters(cfg, "xgboosting") == []
 
 
 def test_get_unknown_hyperparameters_skipped_when_unresolvable():
     """If the estimator cannot be resolved (unknown algorithm / missing dependency),
     the check is skipped gracefully — the list of unknowns is empty."""
     cfg = AlgoCfg(hyperparameters={"a": [1, 10]})
-    assert cfg.get_unknown_hyperparameters("no_such_algo") == []
+    assert get_unknown_hyperparameters(cfg, "no_such_algo") == []
 
 
 def test_get_unknown_hyperparameters_valid():
@@ -893,13 +897,13 @@ def test_get_unknown_hyperparameters_valid():
         hyperparameters={"alpha": [1e-4, 10.0]}  # valid ElasticNet parameter
     )
 
-    assert cfg.get_unknown_hyperparameters("elasticnet") == []
+    assert get_unknown_hyperparameters(cfg, "elasticnet") == []
 
 
 def test_get_unknown_hyperparameters_legacy_name_valid():
     """The legacy name n_iter is considered valid for ardregression."""
     cfg = AlgoCfg(hyperparameters={"n_iter": [100, 500]})
-    assert cfg.get_unknown_hyperparameters("ardregression") == []
+    assert get_unknown_hyperparameters(cfg, "ardregression") == []
 
 
 def test_get_unknown_hyperparameters_unknown():
@@ -907,7 +911,7 @@ def test_get_unknown_hyperparameters_unknown():
         hyperparameters={"bad_param": [1, 10]}  # not in the ElasticNet signature
     )
 
-    assert cfg.get_unknown_hyperparameters("elasticnet") == ["bad_param"]
+    assert get_unknown_hyperparameters(cfg, "elasticnet") == ["bad_param"]
 
 
 # --- Tests for the preprocessing override ---
@@ -978,7 +982,7 @@ def test_hyperparameter_compatibility_error():
     }
 
     with pytest.raises(ValueError, match="unknown hyperparameters"):
-        Config.model_validate(cfg_data)
+        validate_runtime_config(Config.model_validate(cfg_data))
 
 
 def test_hyperparameter_compatibility_error_lists_allowed():
@@ -998,7 +1002,7 @@ def test_hyperparameter_compatibility_error_lists_allowed():
     }
 
     with pytest.raises(ValueError) as exc_info:
-        Config.model_validate(cfg_data)
+        validate_runtime_config(Config.model_validate(cfg_data))
 
     msg = str(exc_info.value)
     assert "unknown hyperparameters ['bad']" in msg
@@ -1167,7 +1171,7 @@ def test_hyperparameter_compatibility_typo_rejected():
     }
 
     with pytest.raises(ValueError, match="unknown hyperparameters"):
-        Config.model_validate(cfg_data)
+        validate_runtime_config(Config.model_validate(cfg_data))
 
 
 def test_hyperparameter_compatibility_gpr_typo_rejected():
@@ -1186,7 +1190,7 @@ def test_hyperparameter_compatibility_gpr_typo_rejected():
     }
 
     with pytest.raises(ValueError, match="unknown hyperparameters"):
-        Config.model_validate(cfg_data)
+        validate_runtime_config(Config.model_validate(cfg_data))
 
 
 def test_hyperparameter_compatibility_skips_disabled():
@@ -1225,7 +1229,7 @@ def test_hyperparameter_compatibility_aggregates_errors():
     }
 
     with pytest.raises(ValueError) as exc_info:
-        Config.model_validate(cfg_data)
+        validate_runtime_config(Config.model_validate(cfg_data))
 
     msg = str(exc_info.value)
     assert f"Algorithm '{algo_a}': unknown hyperparameters ['bad']" in msg

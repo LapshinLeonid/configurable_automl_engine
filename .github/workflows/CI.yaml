@@ -23,21 +23,26 @@ jobs:
           pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML import-linter==2.15
           # Install the project itself in "editable" mode so it is visible as a package
           # This works if there is a setup.py or pyproject.toml at the repository root
+          pip install -e automl-contracts
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e ".[all,test]"; fi
 
       - name: Lint with Ruff
-        run: ruff check src/
+        run: ruff check src/ automl-contracts/src/
 
       - name: Check formatting with Ruff
-        run: ruff format --check src/
+        run: ruff format --check src/ automl-contracts/src/
 
       # Import layers: training_engine -> hpo/tuner/trainer -> building
       # blocks -> common (contracts in pyproject.toml, no allowlist).
       - name: Check import layers
-        run: lint-imports
+        run: |
+          lint-imports
+          (cd automl-contracts && lint-imports)
 
       - name: Type check with Mypy
-        run: mypy src --install-types --non-interactive
+        run: |
+          mypy src --install-types --non-interactive
+          (cd automl-contracts && mypy src)
 
       - name: Run tests
         env:
@@ -99,6 +104,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -e automl-contracts
           pip install -e ".[all,test]"
 
       - name: Run the parallel and safety-net tests

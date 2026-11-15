@@ -823,7 +823,11 @@ def _run_version(
     base_artifacts: Path | None,
 ) -> None:
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(src), env.get("PYTHONPATH", "")])
+    search_path = [str(src)]
+    contract_src = src.parent / "automl-contracts" / "src"
+    if contract_src.is_dir():
+        search_path.insert(0, str(contract_src))
+    env["PYTHONPATH"] = os.pathsep.join([*search_path, env.get("PYTHONPATH", "")])
     env["COMPARE_SRC"] = str(src)
     env["PYTHONHASHSEED"] = "0"
     cmd = [
@@ -862,7 +866,13 @@ def _generate_schema(checkout: Path, src: Path, workdir: Path) -> bytes:
     """Run the version's own ``schema_generator.py``; return the schema bytes."""
     workdir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(src)
+    search_path = [str(src)]
+    contract_src = src.parent / "automl-contracts" / "src"
+    if contract_src.is_dir():
+        search_path.insert(0, str(contract_src))
+    env["PYTHONPATH"] = os.pathsep.join(search_path)
+    output = workdir / "config.schema.json"
+    output.unlink(missing_ok=True)
     subprocess.run(
         [sys.executable, str(checkout / "schema_generator.py")],
         cwd=workdir,
@@ -870,7 +880,7 @@ def _generate_schema(checkout: Path, src: Path, workdir: Path) -> bytes:
         check=True,
         capture_output=True,
     )
-    return (workdir / "config.schema.json").read_bytes()
+    return output.read_bytes()
 
 
 def _flatten(value: Any, path: str, out: dict[str, str]) -> None:

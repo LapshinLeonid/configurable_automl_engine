@@ -88,6 +88,7 @@ workflows:
                 # Install project dependencies from pyproject.toml
                 echo "📦 Installing project dependencies..."
                 python3 -m pip install --upgrade pip
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e automl-contracts
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
                 # Install the SourceCraft CLI
@@ -312,6 +313,7 @@ workflows:
                 # Install project dependencies from pyproject.toml
                 echo "📦 Installing project dependencies..."
                 python3 -m pip install --upgrade pip
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e automl-contracts
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3 -m pip install -e ".[all,test]"
 
                 # Install the SourceCraft CLI
@@ -376,6 +378,7 @@ workflows:
                 # --ignore-installed, otherwise pip fails with
                 # "Cannot uninstall blinker 1.4" during dependency setup
                 python3.11 -m pip install --ignore-installed blinker
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e automl-contracts
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e ".[all,test]"
                 python3.11 -m pip install ruff mypy types-PyYAML pytest-cov import-linter==2.15
               - |
@@ -383,8 +386,8 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  1. CODE STYLE CHECK (Ruff)"
                 echo "═══════════════════════════════════════════════════════════════"
-                python3.11 -m ruff check src/
-                python3.11 -m ruff format --check src/
+                python3.11 -m ruff check src/ automl-contracts/src/
+                python3.11 -m ruff format --check src/ automl-contracts/src/
                 echo "✅ Ruff: no issues found"
               - |
                 echo ""
@@ -394,6 +397,7 @@ workflows:
                 # `lint-imports` is the console script of import-linter; call
                 # it via the 3.11 interpreter context (Scripts dir on PATH)
                 python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())"
+                (cd automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
                 echo "✅ Import layers: no violations found"
               - |
                 echo ""
@@ -401,6 +405,7 @@ workflows:
                 echo "  3. TYPE CHECK (Mypy)"
                 echo "═══════════════════════════════════════════════════════════════"
                 python3.11 -m mypy src --install-types --non-interactive
+                (cd automl-contracts && python3.11 -m mypy src)
                 echo "✅ Mypy: no issues found"
 
           - name: run-tests

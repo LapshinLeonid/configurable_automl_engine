@@ -203,15 +203,20 @@ If you are considering larger contributions to the source code, please contact t
 ## Local development
 
 Set up an editable installation with the development dependencies (the `dev`
-extra combines `all` and `test`, including `import-linter`):
+extra combines `all` and `test`, including `import-linter`). The engine depends
+on the local `automl-contracts` distribution, so install the contract first:
 
+    python -m pip install -e ./automl-contracts
     python -m pip install -e "configurable-automl-engine[dev]"
 
 Run the mandatory checks the same way CI does:
 
 ```bash
-ruff format src/ && ruff check src/ && ruff format --check src/
+ruff format src/ automl-contracts/src/
+ruff check src/ automl-contracts/src/
+ruff format --check src/ automl-contracts/src/
 mypy src
+(cd automl-contracts && mypy src && lint-imports)
 lint-imports
 pytest --cov=src
 ```

@@ -439,11 +439,14 @@ def test_pickled_classes_stay_defined_in_their_modules() -> None:
         f"{PACKAGE}.preprocessing.columns"
     )
     assert oversampling.DataOversampler.__module__ == f"{PACKAGE}.oversampling.sampler"
+    from automl_contracts import preprocessing as contract_preprocessing
+
     for cls in (
         preprocessing_presets.AlgorithmClass,
         preprocessing_presets.PreprocessingPreset,
     ):
-        assert cls.__module__ == f"{PACKAGE}.preprocessing_presets"
+        assert cls.__module__ == "automl_contracts.preprocessing"
+        assert cls is getattr(contract_preprocessing, cls.__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

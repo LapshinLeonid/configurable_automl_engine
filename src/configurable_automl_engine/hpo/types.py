@@ -18,8 +18,8 @@ from typing import Any
 import numpy as np
 from optuna.trial import FrozenTrial
 
-from configurable_automl_engine.common.definitions import (
-    WORST_SCORE_THRESHOLD as _WORST_SCORE_THRESHOLD,
+from configurable_automl_engine.common.definitions import (  # noqa: F401
+    WORST_SCORE_THRESHOLD,
 )
 
 
@@ -173,10 +173,3 @@ class OptimizeResult:
 #    worst-score sentinel class — any score at or below WORST_SCORE_THRESHOLD —
 #    treating the algorithm as failed.
 HPO_WORST_SCORE = -3.4028235e38
-
-
-# The lower bound of the "worst-score sentinel" class (see the docstring of
-# ``common.definitions.WORST_SCORE_THRESHOLD`` — the canonical definition);
-# re-exported here so the HPO-side checks and the documented import path
-# (``configurable_automl_engine.tuner.WORST_SCORE_THRESHOLD``) keep working.
-WORST_SCORE_THRESHOLD = _WORST_SCORE_THRESHOLD

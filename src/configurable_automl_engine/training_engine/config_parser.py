@@ -14,9 +14,11 @@ Key features:
     3. Flexible Search Space DSL: Support for a compact YAML syntax
        for defining search spaces (Categorical, Float, Int, Log)
        with automatic type coercion from list-like structures.
-    4. Dependency Guard: A built-in mechanism that verifies whether the
-       required third-party packages (XGBoost and others) are installed
-       for all algorithms enabled in the config, at initialization time.
+    4. Runtime Validation: ``read_config`` applies structural validation
+       through the contract ``Config`` and then calls
+       ``validate_runtime_config`` to verify installed algorithm packages,
+       estimator hyperparameter compatibility, platform settings and
+       custom-metric callables.
     5. Data Balancing Schema: Management of oversampling strategies
        (SMOTE, ADASYN) with field aliasing support
        for a cleaner YAML-file structure.

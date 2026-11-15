@@ -40,6 +40,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -e automl-contracts
           pip install -e ".[all,test]"
 
       - name: Compare with the base commit

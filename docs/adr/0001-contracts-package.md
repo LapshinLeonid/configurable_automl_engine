@@ -1053,7 +1053,8 @@ errors, definitions, protocols
 - **Генератор:** `automl-contracts/scripts/generate_schema.py` с явным
   `main()`/CLI. Импорт генератора не пишет файл; побочных эффектов нет.
 - **Генерация:** `Config.model_json_schema()` с детерминированной очисткой
-  описаний (`inspect.cleandoc`), `indent=2`, UTF-8, завершающий перевод строки,
+  описаний (`inspect.cleandoc`), `indent=2`, UTF-8, без завершающего
+  перевода строки (для байтовой совместимости с прежним генератором),
   без временных меток и абсолютных путей.
 - **Package data:** файл входит в wheel контракта как
   `automl_contracts/schemas/config.schema.json` и доступен через

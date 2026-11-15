@@ -1,0 +1,1728 @@
+{
+  "$defs": {
+    "AlgoCfg": {
+      "additionalProperties": false,
+      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, the overridden search space\nand the preprocessing preset override.\nAttributes:\n    enable: Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters: Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters: Custom parameter bounds\n        overriding the default values.",
+      "properties": {
+        "enable": {
+          "default": true,
+          "description": "Whether to use this algorithm in the AutoML pipeline",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "limit_hyperparameters": {
+          "default": false,
+          "description": "Restrict the search to ONLY the parameters listed in 'hyperparameters'; every other parameter stays at the estimator default (no DEFAULT_SPACES entries are added). false (default) — user ranges override and are merged into DEFAULT_SPACES.",
+          "title": "Limit Hyperparameters",
+          "type": "boolean"
+        },
+        "hyperparameters": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/SearchSpaceEntry"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Keys must correspond to the algorithm's allowed hyperparameters: the constructor parameters of the sklearn estimator (including legacy names from LEGACY_PARAM_MAPPINGS). The source of truth is models.get_allowed_hyperparameters.",
+          "title": "Hyperparameters"
+        },
+        "preprocessing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreprocessingOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit override of the feature preprocessing preset for this algorithm. Set partially or fully: 'imputation_strategy' ('mean'|'median'), 'scaling' — a string shorthand ('standard'|'robust'|'quantile'|'none') or an object ({'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} / {'type': 'quantile', 'output_distribution': 'uniform'|'normal', 'n_quantiles': int, 'subsample': int}), and 'outliers' — winsorization of numeric features: a string shorthand ('none'|'quantile'|'iqr') or an object ({'method': 'quantile', 'lower_quantile': float, 'upper_quantile': float} / {'method': 'iqr', 'iqr_multiplier': float}). Merged per field with general.preprocessing: a field set here wins, a field left null is taken from general.preprocessing, then from the automatic choice based on the algorithm class. None — only general.preprocessing and the automatic selection apply."
+        }
+      },
+      "title": "AlgoCfg",
+      "type": "object"
+    },
+    "AlgorithmsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "elasticnet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sgdregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision_tree": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "random_forest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extra_trees": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gradient_boosting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "adaboost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "poissonregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gammaregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tweedieregressor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gaussian_process_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "isotonic_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "nearest_neighbors_regression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "svr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ardregression": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "glm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ridge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lasso": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "xgboosting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlgoCfg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "AlgorithmsConfig",
+      "type": "object"
+    },
+    "CategoricalSpace_Any_": {
+      "properties": {
+        "type": {
+          "const": "categorical",
+          "title": "Type",
+          "type": "string"
+        },
+        "options": {
+          "items": {},
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "options"
+      ],
+      "title": "CategoricalSpace[Any]",
+      "type": "object"
+    },
+    "ComplexityGuardCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the adaptive complexity guard for tree/boosting spaces.\n\nExtends the data-dependent clipping layer (``clip_search_space``): on\nsmall data the search ranges of tree/boosting hyperparameters are too\nwide, trials are spent on values that do not change the model, the TPE\nsurface has flat regions and the search drifts toward overfit models.\nThis section tightens the ranges depending on the number of rows (``n``)\nand the feature count.\n\nTwo feature counts are used deliberately: the size-mode ratio ``n / p``\nuses the ORIGINAL column count (a categorical column counts as 1, before\nthe one-hot expansion), so that large-but-wide data (one-hot expanded)\nis not pushed into a smaller size mode; the rules that depend on the\nfeature count (``max_features``, ``colsample_bytree``) use ``p`` after\npreprocessing — what the model sees.\n\nTwo independent levels of restrictions:\n* level A — lossless clipping: removes values that cannot change the\n  model on data of the given size (``lossless``). For ``min_samples_leaf``\n  the cap is a physical bound (larger leaves are unreachable on the sample\n  size), not a claim about model quality;\n* level B — regularization: deliberately shifts the space toward simpler\n  models on small data (``regularize``). For boosting this includes the\n  ``n_estimators`` budget — the tree count together with\n  ``learning_rate`` is the main complexity regulator of a boosting\n  ensemble;\n* level \"time\" — time-only caps of bagging ensembles (``n_estimators``\n  of random forest / extra trees): more trees only reduce the variance\n  of the ensemble.\n\nAttributes:\n    mode (ComplexityGuardMode): Operation mode: 'off' — disabled,\n        'warn' — restrictions are computed and logged but NOT applied,\n        'apply' — computed and applied.\n    lossless (bool): Enable level A (lossless clipping).\n    regularize (bool): Enable level B (regularization heuristic).\n    user_range_policy (ComplexityGuardUserRangePolicy): Policy for an\n        empty intersection of a user range (``algo.hyperparameters``)\n        with the guard range: 'user_wins' (default) — the user range\n        stays, 'engine_wins' — the guard restriction is applied.\n    small_n_threshold (int): ``n < threshold`` marks the 'small' mode.\n    small_np_ratio_threshold (float): ``n / p < threshold`` marks the\n        'small' mode. ``p`` is the ORIGINAL column count (a categorical\n        column counts as 1, before one-hot expansion).\n    medium_n_threshold (int): ``n < threshold`` marks the 'medium' mode.\n    medium_np_ratio_threshold (float): ``n / p < threshold`` marks the\n        'medium' mode. ``p`` is the ORIGINAL column count (a categorical\n        column counts as 1, before one-hot expansion).\n    size_basis (ComplexityGuardSizeBasis): Basis of ``n``: 'rows' (default)\n        — independent rows, 'groups' — reserved for group validation.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ComplexityGuardMode",
+          "default": "apply",
+          "description": "Operation mode of the adaptive complexity guard: 'apply' (default) — restrictions are computed and applied, 'warn' — computed and logged but NOT applied, 'off' — disabled (search spaces are unchanged)."
+        },
+        "lossless": {
+          "default": true,
+          "description": "Enable level A (lossless clipping): removes values that cannot change the model on data of the given size (e.g. max_depth=25 on 15 rows is equivalent to max_depth=6). Safe. For min_samples_leaf the cap is a physical bound (larger leaves are unreachable on the sample size), not a claim about model quality.",
+          "title": "Lossless",
+          "type": "boolean"
+        },
+        "regularize": {
+          "default": true,
+          "description": "Enable level B (regularization): deliberately shifts the space toward simpler models on small data. A heuristic.",
+          "title": "Regularize",
+          "type": "boolean"
+        },
+        "user_range_policy": {
+          "$ref": "#/$defs/ComplexityGuardUserRangePolicy",
+          "default": "user_wins",
+          "description": "Policy for an empty intersection of a user range (algo.hyperparameters) with the guard range: 'user_wins' (default) — the explicit user range stays (a warning is logged), 'engine_wins' — the guard restriction is applied."
+        },
+        "small_n_threshold": {
+          "default": 50,
+          "description": "Row threshold of the 'small' mode: n < threshold marks the data as small.",
+          "minimum": 1,
+          "title": "Small N Threshold",
+          "type": "integer"
+        },
+        "small_np_ratio_threshold": {
+          "default": 5.0,
+          "description": "Ratio threshold of the 'small' mode: n / p < threshold marks the data as small (wide data with few rows per feature). p is the ORIGINAL column count (a categorical column counts as 1, before the one-hot expansion).",
+          "exclusiveMinimum": 0.0,
+          "title": "Small Np Ratio Threshold",
+          "type": "number"
+        },
+        "medium_n_threshold": {
+          "default": 300,
+          "description": "Row threshold of the 'medium' mode: n < threshold marks the data as medium.",
+          "minimum": 1,
+          "title": "Medium N Threshold",
+          "type": "integer"
+        },
+        "medium_np_ratio_threshold": {
+          "default": 20.0,
+          "description": "Ratio threshold of the 'medium' mode: n / p < threshold marks the data as medium. p is the ORIGINAL column count (a categorical column counts as 1, before the one-hot expansion).",
+          "exclusiveMinimum": 0.0,
+          "title": "Medium Np Ratio Threshold",
+          "type": "number"
+        },
+        "size_basis": {
+          "$ref": "#/$defs/ComplexityGuardSizeBasis",
+          "default": "rows",
+          "description": "Basis of the row count n for the size mode: 'rows' (default) — independent rows, 'groups' — reserved for group validation (repeats of one group carry less information than independent rows); only 'rows' is used today."
+        }
+      },
+      "title": "ComplexityGuardCfg",
+      "type": "object"
+    },
+    "ComplexityGuardMode": {
+      "description": "Operation modes of the adaptive complexity guard.",
+      "enum": [
+        "off",
+        "warn",
+        "apply"
+      ],
+      "title": "ComplexityGuardMode",
+      "type": "string"
+    },
+    "ComplexityGuardSizeBasis": {
+      "description": "Basis of the row count ``n`` for the size mode.",
+      "enum": [
+        "rows",
+        "groups"
+      ],
+      "title": "ComplexityGuardSizeBasis",
+      "type": "string"
+    },
+    "ComplexityGuardUserRangePolicy": {
+      "description": "Policy for an empty intersection of a user range with the guard range.",
+      "enum": [
+        "user_wins",
+        "engine_wins"
+      ],
+      "title": "ComplexityGuardUserRangePolicy",
+      "type": "string"
+    },
+    "CustomMetricSpec": {
+      "additionalProperties": false,
+      "description": "The declaration of one custom metric or scorer.\n\nAttributes:\n    path: Dotted import path of the callable (``\"pkg.mod:attr\"`` or\n        ``\"pkg.mod.attr\"``).\n    kind: ``\"metric\"`` for a ``(y_true, y_pred, **kwargs)`` function;\n        ``\"scorer\"`` for an ``(estimator, X, y)`` scorer.\n    greater_is_better: The natural direction of the returned value. It is\n        required by the engine for ``kind=\"metric\"`` and checked against\n        the scorer direction for sklearn scorers.\n    additive: ``True`` when the CV estimate is the mean of per-fold\n        values; ``False`` when the pooled out-of-fold value is required.\n    kwargs: Static keyword arguments of the metric function.",
+      "properties": {
+        "path": {
+          "description": "Dotted import path of the callable: 'package.module:attribute' (preferred) or 'package.module.attribute'.",
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "kind": {
+          "default": "metric",
+          "description": "'metric' — fn(y_true, y_pred, **kwargs) -> float; 'scorer' — sklearn scorer(estimator, X, y) -> float.",
+          "enum": [
+            "metric",
+            "scorer"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "greater_is_better": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Natural direction of the returned value. Required for kind='metric'; for a make_scorer scorer it is taken from the scorer; a plain callable scorer defaults to true.",
+          "title": "Greater Is Better"
+        },
+        "additive": {
+          "default": false,
+          "description": "true — the CV estimate is the mean of the per-fold values (only valid for per-sample means such as MAE); false (default) — the value over the pooled out-of-fold vector.",
+          "title": "Additive",
+          "type": "boolean"
+        },
+        "kwargs": {
+          "additionalProperties": true,
+          "description": "Static keyword arguments passed to the metric function.",
+          "title": "Kwargs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "CustomMetricSpec",
+      "type": "object"
+    },
+    "EnsembleCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the experimental top-K ensemble.\n\nThe ensemble is built AFTER the terminal select step from the\ncompleted records of the run's leaderboard: the top-K algorithms are\nretrained on 100% of the data (exactly once each) and their\npredictions are averaged with the weights derived from the\nvalidation scores. The result of the ensemble is reported in the\ndedicated ``ensemble`` section of the ``ExperimentResult`` (the\nwinner and the winner artifact are NOT affected: the ensemble is an\nadditional experimental output, not a replacement of the terminal\nselection).\n\nAttributes:\n    enable: Build the ensemble (off by default — the ensemble is an\n        experimental feature outside the MVP pipeline).\n    k: The requested ensemble size (the number of top leaderboard\n        members, ≥ 1). When ``k`` exceeds the number of available\n        completed algorithms, ``min(k, n)`` is used with a warning.\n    weight_method: How the member weights are derived from the\n        validation scores: ``\"score_weighted\"`` (default) —\n        direction-aware conversion (inverse for error metrics,\n        proportional for score metrics); ``\"equal\"`` — the uniform\n        baseline.",
+      "properties": {
+        "enable": {
+          "default": false,
+          "description": "Build the experimental weighted-average ensemble of the top-K leaderboard models after the terminal selection (off by default). When enabled, the result carries the dedicated 'ensemble' report section (members, scores, weights, the artifact path of the serialized ensemble) and the artifact file is written next to the winner model; the winner and the winner artifact themselves are not affected",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "k": {
+          "default": 3,
+          "description": "The requested ensemble size: the number of top leaderboard members to combine (>= 1). When k exceeds the number of completed algorithms, min(k, n) members are used with a warning; k=1 is the valid single-model boundary case",
+          "minimum": 1,
+          "title": "K",
+          "type": "integer"
+        },
+        "weight_method": {
+          "default": "score_weighted",
+          "description": "How the member weights are derived from the validation scores: 'score_weighted' (default) — direction-aware conversion (inverse for error metrics like RMSE/MAE, proportional for score metrics like R2); 'equal' — the uniform weights baseline",
+          "enum": [
+            "score_weighted",
+            "equal"
+          ],
+          "title": "Weight Method",
+          "type": "string"
+        }
+      },
+      "title": "EnsembleCfg",
+      "type": "object"
+    },
+    "FeatureSelectionCfg": {
+      "additionalProperties": false,
+      "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode: Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method: Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile: Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features: Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold: Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators: Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/FeatureSelectionMode",
+          "default": "disabled",
+          "description": "Feature selection mode: 'disabled', 'always' or 'auto'. By default 'disabled' — feature selection is not applied."
+        },
+        "method": {
+          "$ref": "#/$defs/FeatureSelectionMethod",
+          "default": "importance",
+          "description": "Selection algorithm: 'importance' (tree-based), 'percentile' (f_regression), 'mutual_info' (mutual information) or 'variance' (variance filter)."
+        },
+        "percentile": {
+          "default": 50.0,
+          "description": "Percentage of features to keep (for the 'percentile' and 'mutual_info' methods).",
+          "exclusiveMinimum": 0.0,
+          "maximum": 100.0,
+          "title": "Percentile",
+          "type": "number"
+        },
+        "min_features": {
+          "default": 2,
+          "description": "Lower bound on the number of features kept (protection against an empty feature matrix).",
+          "minimum": 1,
+          "title": "Min Features",
+          "type": "integer"
+        },
+        "variance_threshold": {
+          "default": 0.0,
+          "description": "Minimum feature variance for the 'variance' method.",
+          "minimum": 0.0,
+          "title": "Variance Threshold",
+          "type": "number"
+        },
+        "n_estimators": {
+          "default": 50,
+          "description": "Number of trees used to estimate feature importance in the 'importance' method.",
+          "minimum": 10,
+          "title": "N Estimators",
+          "type": "integer"
+        }
+      },
+      "title": "FeatureSelectionCfg",
+      "type": "object"
+    },
+    "FeatureSelectionMethod": {
+      "description": "Supported algorithms for reducing the feature space.",
+      "enum": [
+        "importance",
+        "percentile",
+        "mutual_info",
+        "variance"
+      ],
+      "title": "FeatureSelectionMethod",
+      "type": "string"
+    },
+    "FeatureSelectionMode": {
+      "description": "Operation modes of the feature space reduction mechanism.",
+      "enum": [
+        "disabled",
+        "always",
+        "auto"
+      ],
+      "title": "FeatureSelectionMode",
+      "type": "string"
+    },
+    "FloatSpace": {
+      "description": "Distribution for floating-point numbers: [min, max, 'float', step?].",
+      "properties": {
+        "type": {
+          "enum": [
+            "float",
+            "float_log"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "low": {
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "title": "High",
+          "type": "number"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        }
+      },
+      "required": [
+        "type",
+        "low",
+        "high"
+      ],
+      "title": "FloatSpace",
+      "type": "object"
+    },
+    "GeneralCfg": {
+      "additionalProperties": false,
+      "description": "General settings of the AutoML process, validation, and parallelism.\n\nThe central control node of the experiment, responsible for choosing\nmetrics, quality evaluation strategies (Cross-Validation / Hold-out),\nand distributing computational resources.\nAttributes:\n    comparison_metric (ComparisonMetric): Main metric for ranking models\n        (a built-in name or a ``custom_metrics`` key).\n    additional_metrics (List[ComparisonMetric]): Additional informational\n        metrics, computed for the final model with the same validation method\n        used for model comparison (hold-out/CV, not train score).\n    custom_metrics (dict[str, CustomMetricSpec]): User metrics and scorers\n        loaded by a dotted import path, keyed by the name the metric\n        fields refer to.\n    path_to_model (Path): Filesystem path for exporting the model artifact.\n    serialization_format (SerializationFormat): Save format (pickle/joblib).\n    log_to_file (Path | None): File for writing the engine's run logs.\n    phases (List[HPOPhaseCfg]): Sequence of pipeline steps:\n        HPO phases ('all_algorithms' / 'refine') and explicit selection\n        steps ('select'); the last phase must be a select with output: winner.\n        Defaults to ``all_algorithms`` + ``select(cv_best, winner)``.\n    validation_strategy (ValidationStrategy): Evaluation method\n        ('train_test_split', 'k_fold', 'loo' or 'auto').\n    n_folds (int): Number of splits for cross-validation.\n    n_repeats (int): Number of repeats of the validation strategy in the\n        multi-split (repeated) mode (1 — the classic single-split\n        behavior).\n    split_aggregation (SplitAggregation): How the per-repeat scores are\n        combined into a single estimate ('median' or 'mean').\n    random_state (int | None): The engine seed driving data splits, model\n        seeds and the TPE sampler base seed (``random_state +\n        phase_ordinal``); recorded in the report. None — the run is not\n        reproducible (a WARNING is logged).\n    categorical_encoding (EncodingStrategy): Encoding strategy for\n        categorical features ('one_hot', 'ordinal', 'target', 'frequency'\n        or 'hashing'). Default is 'one_hot'.\n    parallel_strategy (str): Parallelization level (only by algorithms).\n    max_workers (int | None): Limit on threads or processes.\n    parallel_mode (str): Technical execution mode ('threads' or 'processes').\n    start_method (str | None): How the worker processes start in\n        'processes' mode ('forkserver', 'spawn' or 'fork'); None — the\n        engine default ('forkserver' where available, else 'spawn').\n    feature_selection (FeatureSelectionCfg): Feature space reduction\n        settings. By default mode='disabled' — feature selection is not applied.\n    preprocessing (PreprocessingOverride | None): Run-level default\n        override of the adaptive feature preprocessing preset, applied\n        to every algorithm and merged per field with its per-algorithm\n        block (fields the per-algorithm block leaves unset come from\n        here).\n        Precedence per field: class preset < general block <\n        per-algorithm block. None — no run-level default.\n    target_transform (TargetTransform): Transformation of the target\n        ``y`` inside the ``model`` step of every trial pipeline, the\n        final trainer and the hold-out trainer ('none' / 'log1p' /\n        'boxcox' / 'yeo-johnson' / 'auto'); applied identically everywhere so\n        the selected hyperparameters match the final model. GLM\n        algorithms with a restricted loss domain are validated against\n        the transformed target before HPO. The 'auto' mode decides the\n        concrete method from the target skewness (see\n        ``target_transform_skew_threshold``): with a reserved outer\n        hold-out — once, before the HPO phases, on the train part of\n        the split; without a hold-out — inside every cross-validation\n        fold (each fit resolves its own method from its own y_train,\n        so the validation-fold values cannot influence the choice).\n    target_transform_skew_threshold (float): The ``|skew(y)|`` threshold\n        of the ``general.target_transform: 'auto'`` decision: a target\n        whose absolute Fisher skewness exceeds the threshold receives\n        ``log1p`` (``min(y) > -1``) or ``yeo-johnson``, a more symmetric\n        target keeps ``none``. Must be > 0.",
+      "properties": {
+        "custom_metrics": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CustomMetricSpec"
+          },
+          "description": "User-defined metrics and scorers, keyed by the metric name that comparison_metric / additional_metrics refer to. A name must match ^[a-z][a-z0-9_]*$ and must not be a built-in metric name. Each entry names a callable by its dotted import path ('package.module:attribute'); the callable itself is imported and checked by the engine at the public entry points.",
+          "title": "Custom Metrics",
+          "type": "object"
+        },
+        "comparison_metric": {
+          "default": "r2",
+          "description": "Metric for comparing models and choosing the best one: one of nrmse, rmse, neg_root_mean_squared_error, mae, mse, r2, or the name of a custom_metrics entry",
+          "title": "Comparison Metric",
+          "type": "string"
+        },
+        "additional_metrics": {
+          "description": "List of additional quality metrics, whose values are computed for the final trained model with the same validation method used for model comparison (hold-out scoring or the mean over CV folds), and are returned together with the training results (key 'additional_metrics'). The metrics are purely informational: they do not take part in hyperparameter optimization, model comparison, or winner selection. Valid values are the same as for comparison_metric (built-in names and custom_metrics names). Duplicates in the list are ignored (the value is counted once), and a match with the main comparison metric (including aliases, for example rmse ↔ neg_root_mean_squared_error) is excluded from the list — its value is already returned as 'score'. Both rules are applied during config validation, so the resulting list in general.additional_metrics may differ from the one originally passed by the user.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Additional Metrics",
+          "type": "array"
+        },
+        "path_to_model": {
+          "default": "model.pkl",
+          "description": "Path for saving/loading the resulting trained model",
+          "format": "path",
+          "title": "Path To Model",
+          "type": "string"
+        },
+        "serialization_format": {
+          "$ref": "#/$defs/SerializationFormat",
+          "default": "pickle",
+          "description": "Model serialization format (pickle, joblib, etc.)"
+        },
+        "log_to_file": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Path to the log file. If not set, logs are printed to the console only",
+          "title": "Log To File"
+        },
+        "phases": {
+          "description": "List of sequential pipeline steps. Default: one HPO phase over all algorithms followed by picking the best cross-validation score: [{action: all_algorithms, n_trials: 50}, {action: select, strategy: cv_best, output: winner}]",
+          "items": {
+            "$ref": "#/$defs/HPOPhaseCfg"
+          },
+          "title": "Phases",
+          "type": "array"
+        },
+        "validation_strategy": {
+          "$ref": "#/$defs/ValidationStrategy",
+          "default": "auto",
+          "description": "Quality evaluation strategy:k-fold cross-validation, fixed hold-out,LOO, or automatic selection"
+        },
+        "n_folds": {
+          "default": 5,
+          "description": "Number of blocks (folds) for cross-validation.Used only when validation_strategy = 'k_fold'",
+          "title": "N Folds",
+          "type": "integer"
+        },
+        "n_repeats": {
+          "default": 1,
+          "description": "Number of repeats of the validation strategy in the multi-split (repeated) validation mode. 1 (default) — the classic single-split behavior: exactly one split per fold cycle, no change of the existing estimates. R > 1 — the base strategy is re-drawn R times with the deterministic seeds random_state + r (r = 0..R-1), so two runs with the same random_state produce identical sets of repeated splits; the per-repeat scores are combined by split_aggregation. The 'loo' strategy has deterministic folds: with 'loo' any n_repeats > 1 is ignored with a WARNING (repeating it would only multiply the computation by identical splits; the same guard applies when 'auto' resolves to 'loo'). Must be an integer. Every repeat multiplies the validation cost of every trial; the computational budget guard (the sum of the phase n_trials x n_folds x n_repeats for the fold-based strategies; a hold-out repeat is one split, so n_folds does not multiply it) rejects a prohibitive combination at config validation — see general_rules.",
+          "minimum": 1,
+          "title": "N Repeats",
+          "type": "integer"
+        },
+        "split_aggregation": {
+          "default": "median",
+          "description": "How the per-repeat (per-split) scores of the multi-split (repeated) validation are combined into a single estimate: 'median' (default) — robust to a 'lucky' split on a micro-sample (the winner, the Sanity Gate decision and the ensemble selection stop depending on one specific split); 'mean' — the classic average of the per-repeat scores. Used only when n_repeats > 1; with n_repeats = 1 the single split score is returned unchanged regardless of this field.",
+          "enum": [
+            "mean",
+            "median"
+          ],
+          "title": "Split Aggregation",
+          "type": "string"
+        },
+        "random_state": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 42,
+          "description": "The engine seed: drives the data splits (CV folds / hold-out), the model seeds (via the ModelTrainer and the model factory) and the TPE sampler base seed (random_state + hpo_phase_ordinal). It is recorded in the training report under the 'random_state' key. None — a non-deterministic run: the data splits are not fixed and stochastic models draw a fresh RNG at fit time; a WARNING is logged that the run is not reproducible.",
+          "title": "Random State"
+        },
+        "holdout_fraction": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "const": "auto",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "auto",
+          "description": "Fraction of rows (in (0, 1)) reserved as an outer hold-out BEFORE hyperparameter optimization: these rows never participate in model selection and are used only to report the honest out-of-sample estimate result[\"holdout_score\"] of the winner. The final model is still trained on ALL data (the hold-out rows are included in the final fit). 'auto' (default) — reserve 0.2 of the rows when the input has at least 100 rows; on smaller data no hold-out is reserved. None — no outer hold-out is reserved and the key is not reported. Without a hold-out result[\"score\"] and result[\"oof_score\"] are computed on the folds that selected the algorithm and hyperparameters and are optimistic; the honest estimate is then the bias-corrected (BBC-CV) result[\"bbc_score\"].",
+          "title": "Holdout Fraction"
+        },
+        "categorical_encoding": {
+          "default": "one_hot",
+          "description": "Encoding strategy for categorical features: 'one_hot' (each category -> a separate binary column), 'ordinal' (each categorical column -> one numeric column with an imposed order), 'target' (target encoding with smoothing), 'frequency' (category frequency) or 'hashing' (deterministic hashing into a fixed number of binary columns). Ordinal encoding does not increase the number of columns and is useful for linear models, but it imposes an artificial order on categories. Target/frequency/hashing are effective for high-cardinality columns.",
+          "enum": [
+            "one_hot",
+            "ordinal",
+            "target",
+            "frequency",
+            "hashing"
+          ],
+          "title": "Categorical Encoding",
+          "type": "string"
+        },
+        "high_cardinality_threshold": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 50,
+          "description": "Cardinality threshold for the automatic mode (>= 0). Columns with a number of unique values strictly greater than the threshold are encoded with the high_cardinality_encoding strategy (default 'frequency'), the rest — with the categorical_encoding strategy. Must be set together with high_cardinality_encoding. The default 50 enables the automatic high-cardinality mode out of the box; to disable it, set both this field and high_cardinality_encoding to null explicitly.",
+          "title": "High Cardinality Threshold"
+        },
+        "high_cardinality_encoding": {
+          "anyOf": [
+            {
+              "enum": [
+                "one_hot",
+                "ordinal",
+                "target",
+                "frequency",
+                "hashing"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "frequency",
+          "description": "Encoding strategy for high-cardinality columns (above high_cardinality_threshold; default 'frequency' — the relative category frequency, which does not expand the feature space). Must be set together with high_cardinality_threshold. The default 'frequency' keeps the memory/CPU footprint low on high-cardinality columns; set this field and the threshold to null to disable the automatic mode.",
+          "title": "High Cardinality Encoding"
+        },
+        "hashing_n_components": {
+          "default": 16,
+          "description": "Number of binary columns per categorical column for 'hashing' encoding (>= 1). Controls the dimensionality of the output features: the growth in the number of features does not depend on the column cardinality.",
+          "minimum": 1,
+          "title": "Hashing N Components",
+          "type": "integer"
+        },
+        "target_encoding_smoothing": {
+          "default": 20.0,
+          "description": "Smoothing parameter (m) of target encoding (>= 0). At m=0 the pure mean of the target variable per category is used; at large m rare categories approach the global mean.",
+          "minimum": 0,
+          "title": "Target Encoding Smoothing",
+          "type": "number"
+        },
+        "target_encoding_fallback": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Fallback value of target encoding for categories not present in the training set. None — the global mean of the target variable.",
+          "title": "Target Encoding Fallback"
+        },
+        "parallel_strategy": {
+          "$ref": "#/$defs/ParallelStrategy",
+          "default": "algorithms",
+          "description": "Parallelization strategy.Currently only 'algorithms' is supported (each algorithm in its own thread/process)."
+        },
+        "max_workers": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum number of threads/processes.If null, the number of CPU cores is used",
+          "title": "Max Workers"
+        },
+        "parallel_mode": {
+          "default": "threads",
+          "description": "Concurrency mode: threads (for I/O-bound tasks) or processes (for CPU-intensive computations)",
+          "enum": [
+            "threads",
+            "processes"
+          ],
+          "title": "Parallel Mode",
+          "type": "string"
+        },
+        "start_method": {
+          "anyOf": [
+            {
+              "enum": [
+                "forkserver",
+                "spawn",
+                "fork"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the worker processes start in parallel_mode='processes': 'forkserver', 'spawn' or 'fork'. None — the engine default: 'forkserver' where the platform has it (Linux, macOS), otherwise 'spawn'. With 'forkserver' and 'spawn' the workers re-import the main script, so a script that calls train_best_model must guard its top-level code with `if __name__ == \"__main__\":`. 'fork' (POSIX only) does not re-import the script but copies the multi-threaded parent process, which can deadlock a worker. Setting it with parallel_mode='threads' is a config error.",
+          "title": "Start Method"
+        },
+        "phase_timeout": {
+          "anyOf": [
+            {
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Global timeout for the whole HPO phase (in seconds). If None — the default value of 3600 seconds (1 hour) is used. Supported only in parallel_mode='processes', where it is hard: hung workers are forcibly terminated. In parallel_mode='threads' timeouts are forbidden and are a config error: an already running Python function cannot be interrupted, so a soft timeout does not save time and only discards the ready results of completed algorithms.",
+          "title": "Phase Timeout"
+        },
+        "task_timeout": {
+          "anyOf": [
+            {
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Timeout for a single task (algorithm) within a phase (in seconds). If None — phase_timeout or the global timeout is used. Counted from the moment the task actually starts, not from the moment it was submitted to the pool: while a task waits in the queue (more algorithms than max_workers), it does not expire before starting. Supported only in parallel_mode='processes', where it is hard. In parallel_mode='threads' timeouts are forbidden and are a config error: an already running Python function cannot be interrupted, so a soft timeout does not save time and only discards the ready results of completed algorithms.",
+          "title": "Task Timeout"
+        },
+        "pruning": {
+          "$ref": "#/$defs/PruningCfg",
+          "description": "Early stopping (pruning) settings for Optuna trials. Disabled by default: each trial runs to completion."
+        },
+        "feature_selection": {
+          "$ref": "#/$defs/FeatureSelectionCfg",
+          "description": "Feature space reduction settings. By default mode='disabled' — feature selection is not applied."
+        },
+        "sanity_gate": {
+          "$ref": "#/$defs/SanityGateCfg",
+          "description": "Thresholds and settings of the Sanity Gate audit for select steps with strategy: sanity_gate. The section is an optional source of thresholds (corridor, top_k_candidates, audit limits), not a behavioral flag: selection is performed only by explicit select phases in general.phases. Having the section without sanity select steps is valid"
+        },
+        "complexity_guard": {
+          "$ref": "#/$defs/ComplexityGuardCfg",
+          "description": "Settings of the adaptive complexity guard for tree/boosting search spaces on small data (mode: 'off'/'warn'/'apply', lossless/regularize levels, user_range_policy, size-mode thresholds, size_basis). See API_REFERENCE.md."
+        },
+        "ensemble": {
+          "$ref": "#/$defs/EnsembleCfg",
+          "description": "Experimental weighted-average ensemble of the top-K leaderboard models (disabled by default). When general.ensemble.enable is true, after the terminal selection the engine retrains the top-K completed algorithms on 100% of the data, averages their predictions with weights derived from the validation scores and reports the dedicated 'ensemble' section in the result. The winner and the winner artifact are NOT affected"
+        },
+        "preprocessing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreprocessingOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Run-level default override of the adaptive feature preprocessing preset, applied to EVERY algorithm and merged per field with the algorithm's own block (algorithms.<name>.preprocessing): a field the algorithm block leaves null is taken from here. Reuses the same model as the per-algorithm block: 'imputation_strategy' ('mean'|'median'), 'scaling' ('standard'|'robust'|'quantile'|'none' or an object form) and 'outliers' ('none'|'quantile'|'iqr' or an object form); fields left as null keep the automatic selection based on the algorithm class. Precedence per field: class preset < general.preprocessing < algorithms.<name>.preprocessing — a field set at a higher level replaces the whole field from the lower level (nested values are never merged). None — no run-level default. Unknown keys are rejected at config validation."
+        },
+        "inf_policy": {
+          "default": "as_missing",
+          "description": "Policy for infinite values (±inf) in numeric features: 'as_missing' (default) — replace them with NaN and log a WARNING listing the columns and counts (missing values are imputed by the preprocessor); 'error' — reject the data with a ValueError naming the columns.",
+          "enum": [
+            "as_missing",
+            "error"
+          ],
+          "title": "Inf Policy",
+          "type": "string"
+        },
+        "datetime_policy": {
+          "default": "expand",
+          "description": "Policy for datetime/timedelta columns (not handled by any transformer): 'expand' (default) — replace each column with derived numeric components (year, month, day, dayofweek, and hour if it is non-zero) and log a WARNING listing the generated columns; 'drop' — remove the columns and log a WARNING; 'error' — reject the data with a ValueError naming the columns.",
+          "enum": [
+            "expand",
+            "drop",
+            "error"
+          ],
+          "title": "Datetime Policy",
+          "type": "string"
+        },
+        "drop_id_like_columns": {
+          "default": false,
+          "description": "Whether ID-like columns (object/string with nunique/n >= 0.95, or a unique monotonic integer column) are dropped from the feature matrix. False (default) — such columns are only reported with a WARNING naming them; true — they are removed. ID-like columns are typically uninformative for regression and can slow training down dramatically.",
+          "title": "Drop Id Like Columns",
+          "type": "boolean"
+        },
+        "target_transform": {
+          "$ref": "#/$defs/TargetTransform",
+          "default": "none",
+          "description": "Transformation of the target y inside the 'model' step of the pipeline, applied identically in the HPO trials, in the final trainer and in the hold-out trainer: 'none' (default) — no transformation; 'log1p' — log(1 + y) (requires min(y) > -1); 'boxcox' — the Box-Cox power transformation (requires min(y) > 0); 'yeo-johnson' — the Yeo-Johnson power transformation (any real y); 'auto' — the engine decides from the target skewness: |skew(y)| > target_transform_skew_threshold selects 'log1p' when min(y) > -1, otherwise 'yeo-johnson'; a more symmetric target keeps 'none'. The decision point follows the estimation design: with a reserved outer hold-out the method is decided once before HPO on the train part of the split (the resolved concrete method — never 'auto' — is what the HPO, the final trainer, the artifact metadata and the ExperimentResult see). Without a reserved hold-out (holdout_fraction null, or 'auto' on data below the auto-holdout threshold) the decision moves INSIDE every cross-validation fold: each fold (and the final full fit) resolves its own method from its own y_train, so the validation-fold target values cannot influence the transformation they are scored with; the config and the artifact metadata then report the 'auto' placeholder, and the fitted pipelines carry the resolved method per fit. The hyperparameters are optimized for the model trained on the TRANSFORMED target, so the search matches the final model. A domain violation (min(y) outside the method's domain) fails once before the first trial with a concrete method, and per-fold with the fold-local resolution. GLM algorithms with a restricted loss domain (gammaregressor, poissonregressor, tweedieregressor/glm) are validated by the target-domain guard: against the TRANSFORMED target with a concrete method, and against the UNTRANSFORMED y with 'auto' (the fold-local resolution cannot assume a method; a GLM that fails on a transformed fold is penalized by the ordinary HPO failure policy). 'predict' returns values in the original scale (the inverse transformation clips to the train range)."
+        },
+        "target_transform_skew_threshold": {
+          "default": 1.0,
+          "description": "The |skew(y)| threshold of the 'auto' mode of general.target_transform: a target whose absolute Fisher skewness exceeds the threshold receives a transformation ('log1p' when min(y) > -1, otherwise 'yeo-johnson'); a more symmetric target keeps 'none'. Must be > 0.",
+          "exclusiveMinimum": 0.0,
+          "title": "Target Transform Skew Threshold",
+          "type": "number"
+        }
+      },
+      "title": "GeneralCfg",
+      "type": "object"
+    },
+    "HPOPhaseCfg": {
+      "additionalProperties": false,
+      "description": "Configuration of a single pipeline step.\n\nThe class describes the parameters of a specific step: an HPO phase\n(``all_algorithms`` / ``refine``) or an explicit selection step\n(``select``), enabling multi-stage search and selection strategies\n(for example: search across all models → audited select → fine-tuning\nfinalists → final winner select).\n\nAttributes:\n    name (str): Unique phase identifier.\n    n_trials (int): Iteration (trial) limit for HPO phases\n        (``all_algorithms`` / ``refine``), default\n        ``DEFAULT_PHASE_N_TRIALS``. Ignored for ``select``.\n    action (str): Action type: 'all_algorithms' (search across all\n        algorithms), 'refine' (fine-tune the whole input set\n        with warm-start) or 'select' (selection step). The unsupported\n        value 'refine_winner' is rejected by validation with a\n        migration hint.\n    strategy (Literal['cv_best', 'sanity_gate'] | None): Select step\n        strategy (only for action='select'): ranking by CV score\n        ('cv_best') or a Sanity Gate audit ('sanity_gate').\n    output (Literal['winner', 'top_k', 'pool'] | None): What the\n        select step returns (only for action='select'): 'winner' — a\n        single winner (terminal step), 'top_k' — the top-K candidates,\n        'pool' — the entire corridor pool of finalists.\n    k (int | None): Number of candidates (>= 1) for output='top_k'.\n        Required only for output='top_k'; forbidden for\n        output='winner'/'pool'.",
+      "properties": {
+        "name": {
+          "default": "phase",
+          "description": "User-defined name of the optimization phase (for example, 'coarse_search' or 'fine_tuning')",
+          "title": "Name",
+          "type": "string"
+        },
+        "n_trials": {
+          "default": 50,
+          "description": "Number of iterations (trials) for HPO phases (all_algorithms / refine). Ignored for action='select'",
+          "minimum": 1,
+          "title": "N Trials",
+          "type": "integer"
+        },
+        "action": {
+          "default": "all_algorithms",
+          "description": "Phase action: 'all_algorithms' — search across all algorithms, 'refine' — fine-tune the whole input set with warm-start, 'select' — explicit selection step (strategy governs the strategy, output the output shape). The unsupported 'refine_winner' is rejected: use the pair 'select' (cv_best) + 'refine'",
+          "enum": [
+            "all_algorithms",
+            "refine",
+            "select"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "enum": [
+                "cv_best",
+                "sanity_gate"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Select step strategy (only for action='select'): 'cv_best' — ranking by CV score, 'sanity_gate' — finalist pool + ModelSanityGate audit + ranking by RMSE_oof. Forbidden for all_algorithms/refine phases",
+          "title": "Strategy"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "enum": [
+                "winner",
+                "top_k",
+                "pool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Output shape of the select step (only for action='select'): 'winner' — a single winner (terminal step), 'top_k' — the top-K candidates (requires the k parameter), 'pool' — the entire corridor pool of finalists. Forbidden for all_algorithms/refine phases",
+          "title": "Output"
+        },
+        "k": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Number of candidates (>= 1) for output='top_k'; required only for output='top_k', forbidden for output='winner'/'pool'. Forbidden for all_algorithms/refine phases",
+          "title": "K"
+        }
+      },
+      "title": "HPOPhaseCfg",
+      "type": "object"
+    },
+    "IntSpace": {
+      "description": "Distribution for integer numbers: [min, max, 'int', step?].",
+      "properties": {
+        "type": {
+          "const": "int",
+          "title": "Type",
+          "type": "string"
+        },
+        "low": {
+          "title": "Low",
+          "type": "integer"
+        },
+        "high": {
+          "title": "High",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        }
+      },
+      "required": [
+        "type",
+        "low",
+        "high"
+      ],
+      "title": "IntSpace",
+      "type": "object"
+    },
+    "IqrOutliers": {
+      "additionalProperties": false,
+      "description": "IQR-based clipping of numeric features.\n\nThe bounds are learned from the training data (per CV fold, no leakage)\nby :class:`~configurable_automl_engine.preprocessing.Winsorizer` with\n``method=\"iqr\"``: every value outside\n``[Q1 - iqr_multiplier * IQR, Q3 + iqr_multiplier * IQR]`` of the\ntraining column is clipped to the corresponding bound.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"iqr\"``).\n    iqr_multiplier: The IQR multiplier: ``> 0``.",
+      "properties": {
+        "method": {
+          "const": "iqr",
+          "default": "iqr",
+          "description": "IQR clipping: values outside Q1 - k * IQR .. Q3 + k * IQR are clipped to the bounds (Winsorizer).",
+          "title": "Method",
+          "type": "string"
+        },
+        "iqr_multiplier": {
+          "default": 1.5,
+          "description": "The IQR multiplier of the clipping bounds (must be > 0).",
+          "exclusiveMinimum": 0.0,
+          "title": "Iqr Multiplier",
+          "type": "number"
+        }
+      },
+      "title": "IqrOutliers",
+      "type": "object"
+    },
+    "NoOutliers": {
+      "additionalProperties": false,
+      "description": "No outlier handling: numeric features are passed through as-is.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"none\"``).",
+      "properties": {
+        "method": {
+          "const": "none",
+          "default": "none",
+          "description": "No outlier handling is applied.",
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "title": "NoOutliers",
+      "type": "object"
+    },
+    "NoScaling": {
+      "additionalProperties": false,
+      "description": "No scaling: numeric features are passed to the model unscaled.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"none\"``).",
+      "properties": {
+        "type": {
+          "const": "none",
+          "default": "none",
+          "description": "The scaling type: no scaling is applied.",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "NoScaling",
+      "type": "object"
+    },
+    "OversamplingAlgorithm": {
+      "enum": [
+        "random",
+        "smote",
+        "adasyn"
+      ],
+      "title": "OversamplingAlgorithm",
+      "type": "string"
+    },
+    "OversamplingCfg": {
+      "additionalProperties": false,
+      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable: Global flag enabling oversampling.\n    multiplier: Target sample-increase factor.\n    algorithm: Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins: Number of quantile bins for the regression path.\n    add_noise: Whether to add Gaussian noise to the numeric\n        features of the oversampled training set.\n    noise_level: Noise standard deviation as a fraction of each\n        column's standard deviation.",
+      "properties": {
+        "data_oversampling": {
+          "default": false,
+          "description": "Flag enabling data balancing. Applies only to the training set",
+          "title": "Data Oversampling",
+          "type": "boolean"
+        },
+        "data_oversampling_multiplier": {
+          "default": 1.0,
+          "description": "How many times to increase the number of minority-class examples",
+          "minimum": 1.0,
+          "title": "Data Oversampling Multiplier",
+          "type": "number"
+        },
+        "data_oversampling_algorithm": {
+          "$ref": "#/$defs/OversamplingAlgorithm",
+          "default": "random",
+          "description": "Algorithm for synthesizing new data (Random, SMOTE, ADASYN)"
+        },
+        "data_oversampling_target_bins": {
+          "default": 8,
+          "description": "Number of quantile bins for the regression oversampling strategy",
+          "minimum": 2,
+          "title": "Data Oversampling Target Bins",
+          "type": "integer"
+        },
+        "data_oversampling_add_noise": {
+          "default": false,
+          "description": "Add Gaussian noise to the numeric features of the oversampled training set (categorical columns are not noised)",
+          "title": "Data Oversampling Add Noise",
+          "type": "boolean"
+        },
+        "data_oversampling_noise_level": {
+          "default": 0.01,
+          "description": "Gaussian noise standard deviation as a fraction of each numeric column's standard deviation",
+          "exclusiveMinimum": 0.0,
+          "title": "Data Oversampling Noise Level",
+          "type": "number"
+        }
+      },
+      "title": "OversamplingCfg",
+      "type": "object"
+    },
+    "ParallelStrategy": {
+      "description": "Parallelization strategy of the engine.",
+      "enum": [
+        "algorithms"
+      ],
+      "title": "ParallelStrategy",
+      "type": "string"
+    },
+    "PreprocessingOverride": {
+      "additionalProperties": false,
+      "description": "An explicit user override of the preprocessing preset.\n\nIt may be specified partially or fully: ``None`` in a field means \"keep the\nautomatically selected value\". Invalid values are rejected at the config\nvalidation stage (Pydantic) with a clear message.",
+      "properties": {
+        "imputation_strategy": {
+          "anyOf": [
+            {
+              "enum": [
+                "mean",
+                "median"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Override of the missing value imputation strategy ('mean' or 'median'). None — automatic selection.",
+          "title": "Imputation Strategy"
+        },
+        "scaling": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/StandardScaling"
+                    },
+                    {
+                      "$ref": "#/$defs/RobustScaling"
+                    },
+                    {
+                      "$ref": "#/$defs/QuantileScaling"
+                    },
+                    {
+                      "$ref": "#/$defs/NoScaling"
+                    }
+                  ]
+                },
+                {
+                  "enum": [
+                    "standard",
+                    "robust",
+                    "quantile",
+                    "none"
+                  ],
+                  "type": "string"
+                }
+              ],
+              "description": "Scaling of numeric features: a string shorthand ('standard' | 'robust' | 'quantile' | 'none') or an object ({'type': 'standard'} | {'type': 'robust', 'quantile_range': [low, high], 'with_centering': bool} | {'type': 'quantile', 'output_distribution': 'uniform'|'normal', 'n_quantiles': int, 'subsample': int} | {'type': 'none'})."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Scaling override: a string shorthand ('standard', 'robust', 'quantile' or 'none'), an object ({'type': 'robust', 'quantile_range': [low, high], ...}) or None (automatic selection). The shorthand is normalized to its object form.",
+          "title": "Scaling"
+        },
+        "outliers": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/NoOutliers"
+                    },
+                    {
+                      "$ref": "#/$defs/QuantileOutliers"
+                    },
+                    {
+                      "$ref": "#/$defs/IqrOutliers"
+                    }
+                  ]
+                },
+                {
+                  "enum": [
+                    "none",
+                    "quantile",
+                    "iqr"
+                  ],
+                  "type": "string"
+                }
+              ],
+              "description": "Outlier handling for numeric features: a string shorthand ('none' | 'quantile' | 'iqr') or an object ({'method': 'none'} | {'method': 'quantile', 'lower_quantile': float, 'upper_quantile': float} | {'method': 'iqr', 'iqr_multiplier': float})."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Outlier handling override: a string shorthand ('none', 'quantile' or 'iqr'), an object ({'method': 'quantile', ...} | {'method': 'iqr', ...}) or None (automatic selection). The shorthand is normalized to its object form.",
+          "title": "Outliers"
+        }
+      },
+      "title": "PreprocessingOverride",
+      "type": "object"
+    },
+    "PruningCfg": {
+      "additionalProperties": false,
+      "description": "Early stopping (pruning) settings for trials in the HPO phase.\n\nIntermediate evaluation mechanism: when enabled, the tuner publishes a\nquality estimate after every natural validation step (for example, after\neach cross-validation fold), allowing the Optuna pruner to discard an\nobviously hopeless trial before the full evaluation finishes.\nFor validation strategies without natural steps (hold-out /\ntrain_test_split) the pruner is not applied — the behavior is safe and\ndocumented (see API_REFERENCE.md).\n\nAttributes:\n    enable (bool): Global flag enabling early stopping.\n        Default is False — the feature is off and trials run to completion.\n    strategy (PruningStrategy): Pruning strategy: 'median'\n        (optuna.pruners.MedianPruner) or 'hyperband'\n        (optuna.pruners.HyperbandPruner).\n    min_steps (int): Minimum number of intermediate steps (for example,\n        CV folds) before the first pruning decision. For 'median' this is\n        n_warmup_steps, for 'hyperband' — min_resource.\n    n_startup_trials (int): Number of completed trials after which pruning\n        is enabled (only for 'median'; analogous to\n        n_startup_trials in Optuna).\n    reduction_factor (int): Budget reduction factor between Hyperband\n        rounds (only for 'hyperband'; controls pruning aggressiveness).",
+      "properties": {
+        "enable": {
+          "default": false,
+          "description": "Flag enabling early stopping (pruning) of Optuna trials. Default is False — each trial runs to completion.",
+          "title": "Enable",
+          "type": "boolean"
+        },
+        "strategy": {
+          "$ref": "#/$defs/PruningStrategy",
+          "default": "median",
+          "description": "Trial pruning strategy: 'median' (MedianPruner) or 'hyperband' (HyperbandPruner)"
+        },
+        "min_steps": {
+          "default": 1,
+          "description": "Minimum number of intermediate steps (for example, folds of cross-validation) before the first pruning decision. For 'median' maps to n_warmup_steps, for 'hyperband' — min_resource",
+          "minimum": 1,
+          "title": "Min Steps",
+          "type": "integer"
+        },
+        "n_startup_trials": {
+          "default": 5,
+          "description": "Number of completed trials after which pruning is enabled (only for 'median'; analogous to n_startup_trials in Optuna)",
+          "minimum": 1,
+          "title": "N Startup Trials",
+          "type": "integer"
+        },
+        "reduction_factor": {
+          "default": 3,
+          "description": "Budget reduction factor between Hyperband rounds (only for 'hyperband'; pruning aggressiveness)",
+          "minimum": 2,
+          "title": "Reduction Factor",
+          "type": "integer"
+        }
+      },
+      "title": "PruningCfg",
+      "type": "object"
+    },
+    "PruningStrategy": {
+      "description": "Supported early stopping (pruning) strategies for Optuna trials.",
+      "enum": [
+        "median",
+        "hyperband"
+      ],
+      "title": "PruningStrategy",
+      "type": "string"
+    },
+    "QuantileOutliers": {
+      "additionalProperties": false,
+      "description": "Quantile (winsorized) clipping of numeric features.\n\nThe bounds are learned from the training data (per CV fold, no leakage)\nby :class:`~configurable_automl_engine.preprocessing.Winsorizer` with\n``method=\"quantile\"``: every value outside\n``[lower_quantile, upper_quantile]`` of the training column is clipped\nto the corresponding bound.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    method: The outlier handling discriminator (always ``\"quantile\"``).\n    lower_quantile: The lower clipping quantile: ``0 <= lower < upper <= 1``.\n    upper_quantile: The upper clipping quantile: ``0 <= lower < upper <= 1``.",
+      "properties": {
+        "method": {
+          "const": "quantile",
+          "default": "quantile",
+          "description": "Quantile clipping: values outside the training quantiles are clipped to the bounds (Winsorizer).",
+          "title": "Method",
+          "type": "string"
+        },
+        "lower_quantile": {
+          "default": 0.01,
+          "description": "The lower clipping quantile: 0 <= lower < upper <= 1.",
+          "title": "Lower Quantile",
+          "type": "number"
+        },
+        "upper_quantile": {
+          "default": 0.99,
+          "description": "The upper clipping quantile: 0 <= lower < upper <= 1.",
+          "title": "Upper Quantile",
+          "type": "number"
+        }
+      },
+      "title": "QuantileOutliers",
+      "type": "object"
+    },
+    "QuantileScaling": {
+      "additionalProperties": false,
+      "description": "Quantile scaling: :class:`sklearn.preprocessing.QuantileTransformer`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"quantile\"``).\n    output_distribution: The marginal distribution of the transformed\n        data: ``\"uniform\"`` or ``\"normal\"``.\n    n_quantiles: The number of quantiles to compute (``>= 10``).\n    subsample: The maximum number of samples used to estimate the\n        quantiles (``>= n_quantiles``).",
+      "properties": {
+        "type": {
+          "const": "quantile",
+          "default": "quantile",
+          "description": "The scaling type: QuantileTransformer (non-parametric transform to a uniform or normal distribution).",
+          "title": "Type",
+          "type": "string"
+        },
+        "output_distribution": {
+          "default": "uniform",
+          "description": "Marginal distribution of the transformed data: 'uniform' or 'normal'.",
+          "enum": [
+            "uniform",
+            "normal"
+          ],
+          "title": "Output Distribution",
+          "type": "string"
+        },
+        "n_quantiles": {
+          "default": 1000,
+          "description": "Number of quantiles to compute (>= 10).",
+          "minimum": 10,
+          "title": "N Quantiles",
+          "type": "integer"
+        },
+        "subsample": {
+          "default": 100000,
+          "description": "Maximum number of samples used to estimate the quantiles for computational efficiency (>= n_quantiles). The value is always forwarded to sklearn (the sklearn default is 10_000), so the behavior is stable against upstream default changes.",
+          "minimum": 1,
+          "title": "Subsample",
+          "type": "integer"
+        }
+      },
+      "title": "QuantileScaling",
+      "type": "object"
+    },
+    "RobustScaling": {
+      "additionalProperties": false,
+      "description": "Robust scaling: :class:`sklearn.preprocessing.RobustScaler`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"robust\"``).\n    quantile_range: The ``(low, high)`` quantiles used by the scaler:\n        ``0 <= low < high <= 100``.\n    with_centering: Whether to center the data with the median before\n        scaling.",
+      "properties": {
+        "type": {
+          "const": "robust",
+          "default": "robust",
+          "description": "The scaling type: RobustScaler (median centering and quantile range; robust to outliers).",
+          "title": "Type",
+          "type": "string"
+        },
+        "quantile_range": {
+          "default": [
+            25.0,
+            75.0
+          ],
+          "description": "The (low, high) quantiles of RobustScaler: 0 <= low < high <= 100.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Quantile Range",
+          "type": "array"
+        },
+        "with_centering": {
+          "default": true,
+          "description": "Center the data with the median before scaling.",
+          "title": "With Centering",
+          "type": "boolean"
+        }
+      },
+      "title": "RobustScaling",
+      "type": "object"
+    },
+    "SanityGateCfg": {
+      "additionalProperties": false,
+      "description": "Thresholds and settings of the Sanity Gate audit.\n\n        The section is exclusively a **source of thresholds** for select steps\n        with ``strategy: sanity_gate`` (finalist pool: corridor δ from the\n        leader ∩ hard cap ``top_k_candidates``, optional soft family\n        complementation; the audit thresholds of ``ModelSanityGate`` are passed\n        to the gate constructor unchanged). There is no global switch:\n        selection happens ONLY via explicit ``select`` steps in\n        ``general.phases``, and diagnostics are available in the gate section of\n        each select step's report.\n\n        Having the section without select steps with ``strategy: sanity_gate``\n        is valid: the section is an optional source of thresholds, not a\n        behavioral flag.\n\nAttributes:\n            top_k_candidates (int): Hard cap on the finalist pool size (>= 1).\n            corridor_delta (float): Relative corridor width δ (in (0, 1)).\n            corridor_mode (CorridorMode): 'multiplicative' | 'additive' | 'auto'.\n            enforce_family_diversity (bool): Enable soft family complementation.\n            algorithm_families (dict[str, str] | None): Map of \"algorithm → family\".\n            allowed_families (list[str] | None): Families taking part in the complementation.\n            family_diversity_multiplier (float): Expanded corridor multiplier.\n            min_prediction_diversity (float): Circuit A threshold (in (0, 1]);\n                computed on OOF predictions. Applied only in the\n                non-adaptive mode (adaptive_diversity=false).\n            adaptive_diversity (bool): Adaptive mode for circuit A\n                (default True): comparison with the constant model —\n                zero prediction variance and models worse than the\n                constant prediction (R²_oof < 0) fail.\n            min_unique_count (int): Absolute minimum nunique for circuit B (>= 1).\n            min_unique_ratio (float): Lower bound for the fraction of unique values (in (0, 1]).\n                Applied as ``min_unique_ratio * N`` capped by the number of distinct\n                target values (a perfect model always reaches the cap).\n            max_dead_feature_ratio (float): Circuit C threshold (in [0, 1]) — a signal\n                for linear models; standalone disqualification only when\n                ``dead_features_require_low_diversity=true`` and diversity is low.\n            dead_features_require_low_diversity (bool): Combined rule\n                \"many dead features AND low diversity\".\n            zero_coef_tolerance (float): Zero coefficient tolerance (>= 0).\n            max_generalization_gap (float): Circuit D threshold (>= 1, default 1.5).\n            generalization_gap_mode (GeneralizationGapMode): Circuit D mode\n                (default 'warn'): 'warn' — a circuit D violation (a finite gap\n                above the threshold or an infinite gap from division by zero)\n                goes to soft_warnings (a soft warning); 'reject' — a failure →\n                reasons → disqualification.\n                Reasons in both modes — only contract violations and\n                non-computability.\n            check_permutation_sensitivity (bool): Enable the permutation audit of\n                feature sensitivity (circuit C, for non-linear models).\n            permutation_max_rows (int): Row subsample used for permutations (>= 1).\n            permutation_max_features (int): Cap on the checked columns (>= 1).\n            permutation_repeats (int): Permutation repeats (>= 1).\n            permutation_seed (int): Fixed permutation seed.\n            permutation_tolerance (float): Feature \"deadness\" threshold (>= 0).\n            audit_time_budget_seconds (float): Time budget for the audit phase\n                (>= 0; 0 means unlimited).\n            check_diversity (bool): Enable circuit A.\n            check_unique (bool): Enable circuit B.\n            check_dead_features (bool): Enable circuit C.\n            check_generalization_gap (bool): Enable circuit D.",
+      "properties": {
+        "top_k_candidates": {
+          "default": 3,
+          "description": "Hard cap on the finalist pool size (>= 1, default 3).",
+          "minimum": 1,
+          "title": "Top K Candidates",
+          "type": "integer"
+        },
+        "corridor_delta": {
+          "default": 0.15,
+          "description": "Relative corridor width δ from the leader (strictly in (0, 1), default 0.15).",
+          "exclusiveMaximum": 1.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Corridor Delta",
+          "type": "number"
+        },
+        "corridor_mode": {
+          "default": "auto",
+          "description": "Shape of the finalist pool corridor: 'multiplicative', 'additive' or 'auto' (chosen based on the metric type, default 'auto').",
+          "enum": [
+            "multiplicative",
+            "additive",
+            "auto"
+          ],
+          "title": "Corridor Mode",
+          "type": "string"
+        },
+        "enforce_family_diversity": {
+          "default": false,
+          "description": "Optional soft complementation of missing families into the finalist pool (default False — disabled).",
+          "title": "Enforce Family Diversity",
+          "type": "boolean"
+        },
+        "algorithm_families": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Map of 'algorithm → family' for the family complementation rule. None — algorithms without a classification are treated as their own family.",
+          "title": "Algorithm Families"
+        },
+        "allowed_families": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Families taking part in the family complementation rule (None — all are allowed).",
+          "title": "Allowed Families"
+        },
+        "family_diversity_multiplier": {
+          "default": 1.5,
+          "description": "Multiplier of the expanded corridor for family complementation (> 0).",
+          "exclusiveMinimum": 0.0,
+          "title": "Family Diversity Multiplier",
+          "type": "number"
+        },
+        "min_prediction_diversity": {
+          "default": 0.15,
+          "description": "Circuit A (diversity) threshold: Var(y_pred_oof)/Var(y) >= threshold; computed on OOF predictions (strictly in (0, 1], default 0.15). Applied only in the non-adaptive mode (adaptive_diversity=false).",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Min Prediction Diversity",
+          "type": "number"
+        },
+        "adaptive_diversity": {
+          "default": true,
+          "description": "Adaptive mode for circuit A (default True): comparison with a constant model — zero variance in predictions (a tie with the constant baseline) and models worse than the constant prediction (R²_oof < 0) fail; the absolute min_prediction_diversity threshold is not applied.",
+          "title": "Adaptive Diversity",
+          "type": "boolean"
+        },
+        "min_unique_count": {
+          "default": 5,
+          "description": "Absolute lower bound for nunique in circuit B (>= 1).",
+          "minimum": 1,
+          "title": "Min Unique Count",
+          "type": "integer"
+        },
+        "min_unique_ratio": {
+          "default": 0.05,
+          "description": "Lower bound for the fraction of unique predictions in circuit B (in (0, 1]). Applied as min_unique_ratio * N capped by the number of distinct target values (a perfect model always reaches the cap).",
+          "exclusiveMinimum": 0.0,
+          "maximum": 1.0,
+          "title": "Min Unique Ratio",
+          "type": "number"
+        },
+        "max_dead_feature_ratio": {
+          "default": 0.4,
+          "description": "Threshold for the fraction of 'dead' features in circuit C (in [0, 1]) — for linear models this is a signal; standalone disqualification only when dead_features_require_low_diversity=true and diversity is low.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Max Dead Feature Ratio",
+          "type": "number"
+        },
+        "dead_features_require_low_diversity": {
+          "default": true,
+          "description": "Combined circuit C rule: disqualification only on the combination of 'many dead features AND low diversity'.",
+          "title": "Dead Features Require Low Diversity",
+          "type": "boolean"
+        },
+        "zero_coef_tolerance": {
+          "default": 1e-12,
+          "description": "Coefficients with |coef| <= the threshold are considered zero (circuit C).",
+          "minimum": 0.0,
+          "title": "Zero Coef Tolerance",
+          "type": "number"
+        },
+        "max_generalization_gap": {
+          "default": 1.5,
+          "description": "Circuit D threshold: RMSE_oof/RMSE_full > threshold — overfitting.",
+          "minimum": 1.0,
+          "title": "Max Generalization Gap",
+          "type": "number"
+        },
+        "generalization_gap_mode": {
+          "default": "warn",
+          "description": "Circuit D (generalization gap) mode: 'warn' (default) — a circuit D violation (a finite gap > max_generalization_gap or an infinite gap from division by zero: RMSE_full≈0 / RMSE_oof≈0) is recorded in soft_warnings (does not disqualify); 'reject' — a failure → reasons → disqualification. Reasons in both modes remain only for contract violations (y_pred_full=None) and non-computability (no finite pairs). The field is deliberately NOT named mode (mode is reserved: it is rejected by the _reject_removed_mode validator with a migration error).",
+          "enum": [
+            "warn",
+            "reject"
+          ],
+          "title": "Generalization Gap Mode",
+          "type": "string"
+        },
+        "check_permutation_sensitivity": {
+          "default": true,
+          "description": "Enable the permutation audit of feature sensitivity (circuit C for non-linear models; controls audit cost). Default is True; False — the permutation path is skipped, the linear coefficient-based path remains.",
+          "title": "Check Permutation Sensitivity",
+          "type": "boolean"
+        },
+        "permutation_max_rows": {
+          "default": 5000,
+          "description": "Row subsample for the permutation path of circuit C (>= 1, default 5000).",
+          "minimum": 1,
+          "title": "Permutation Max Rows",
+          "type": "integer"
+        },
+        "permutation_max_features": {
+          "default": 100,
+          "description": "Cap on the columns checked in the permutation path (>= 1, default 100).",
+          "minimum": 1,
+          "title": "Permutation Max Features",
+          "type": "integer"
+        },
+        "permutation_repeats": {
+          "default": 3,
+          "description": "Number of permutation repeats per column (>= 1).",
+          "minimum": 1,
+          "title": "Permutation Repeats",
+          "type": "integer"
+        },
+        "permutation_seed": {
+          "default": 42,
+          "description": "Fixed permutation seed (for determinism).",
+          "title": "Permutation Seed",
+          "type": "integer"
+        },
+        "permutation_tolerance": {
+          "default": 0.001,
+          "description": "Relative 'deadness' threshold for a feature in permutations.",
+          "minimum": 0.0,
+          "title": "Permutation Tolerance",
+          "type": "number"
+        },
+        "audit_time_budget_seconds": {
+          "default": 0,
+          "description": "Time budget for the Sanity Gate audit phase (in seconds). 0 — unlimited (default).",
+          "minimum": 0.0,
+          "title": "Audit Time Budget Seconds",
+          "type": "number"
+        },
+        "check_diversity": {
+          "default": true,
+          "description": "Enable circuit A.",
+          "title": "Check Diversity",
+          "type": "boolean"
+        },
+        "check_unique": {
+          "default": true,
+          "description": "Enable circuit B.",
+          "title": "Check Unique",
+          "type": "boolean"
+        },
+        "check_dead_features": {
+          "default": true,
+          "description": "Enable circuit C.",
+          "title": "Check Dead Features",
+          "type": "boolean"
+        },
+        "check_generalization_gap": {
+          "default": true,
+          "description": "Enable circuit D.",
+          "title": "Check Generalization Gap",
+          "type": "boolean"
+        }
+      },
+      "title": "SanityGateCfg",
+      "type": "object"
+    },
+    "SearchSpaceEntry": {
+      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\n\nAttributes:\n    config: Validated object of a concrete distribution type.\n    explicit_type: Whether the distribution type was written explicitly in\n        the source config rather than inferred from the boundary numbers.\n\nThe internal ``explicit_type`` flag records whether the distribution type\nwas written explicitly in the source config (``[low, high, \"float\"]``) or\ninferred from the boundary numbers. Inferred types are re-resolved\nagainst the parameter type (the default search space or the model\nsignature) by :func:`normalize_hyperparameter_entry` — e.g. an\nintegral-looking ``[1, 50]`` for a real-valued parameter stays a real\nrange.",
+      "properties": {
+        "config": {
+          "discriminator": {
+            "mapping": {
+              "categorical": "#/$defs/CategoricalSpace_Any_",
+              "float": "#/$defs/FloatSpace",
+              "float_log": "#/$defs/FloatSpace",
+              "int": "#/$defs/IntSpace"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CategoricalSpace_Any_"
+            },
+            {
+              "$ref": "#/$defs/FloatSpace"
+            },
+            {
+              "$ref": "#/$defs/IntSpace"
+            }
+          ],
+          "title": "Config"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "title": "SearchSpaceEntry",
+      "type": "object"
+    },
+    "SerializationFormat": {
+      "description": "Supported model serialization formats.",
+      "enum": [
+        "pickle",
+        "joblib"
+      ],
+      "title": "SerializationFormat",
+      "type": "string"
+    },
+    "StandardScaling": {
+      "additionalProperties": false,
+      "description": "Standard scaling: :class:`sklearn.preprocessing.StandardScaler`.\n\nThe spec is a frozen value object: parameters cannot be mutated after\ncreation, so module-level defaults stay safe to share.\n\nAttributes:\n    type: The scaling type discriminator (always ``\"standard\"``).",
+      "properties": {
+        "type": {
+          "const": "standard",
+          "default": "standard",
+          "description": "The scaling type: StandardScaler (zero mean, unit variance).",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "StandardScaling",
+      "type": "object"
+    },
+    "TargetTransform": {
+      "description": "Target transformations supported by the engine.\n\n``none`` applies no transformation, ``log1p`` requires ``min(y) > -1``,\n``boxcox`` requires strictly positive ``y``, ``yeo-johnson`` accepts any\nreal target and ``auto`` lets the engine choose from the target\nskewness.",
+      "enum": [
+        "none",
+        "log1p",
+        "boxcox",
+        "yeo-johnson",
+        "auto"
+      ],
+      "title": "TargetTransform",
+      "type": "string"
+    },
+    "ValidationStrategy": {
+      "description": "Allowed validation strategies for hyperparameter optimization.",
+      "enum": [
+        "train_test_split",
+        "k_fold",
+        "loo",
+        "auto"
+      ],
+      "title": "ValidationStrategy",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Root object of the AutoML configuration contract.\n\nAggregates the configuration sections and validates their structure,\nfield types, allowed values and pure cross-field rules. Checks that need\nthe installed environment (algorithm packages, estimator signatures,\nruntime custom-metric callables, platform limits) are applied by the\nengine's ``validate_runtime_config`` function.\n\nAttributes:\n    general: General experiment parameters.\n    oversampling: Data preprocessing settings.\n    algorithms: Registry of available and active algorithms.",
+  "properties": {
+    "general": {
+      "$ref": "#/$defs/GeneralCfg",
+      "description": "General experiment and validation settings"
+    },
+    "oversampling": {
+      "$ref": "#/$defs/OversamplingCfg",
+      "default": {
+        "data_oversampling": false,
+        "data_oversampling_multiplier": 1.0,
+        "data_oversampling_algorithm": "random",
+        "data_oversampling_target_bins": 8,
+        "data_oversampling_add_noise": false,
+        "data_oversampling_noise_level": 0.01
+      },
+      "description": "Data balancing settings"
+    },
+    "algorithms": {
+      "$ref": "#/$defs/AlgorithmsConfig",
+      "description": "Dictionary of algorithms, where the key is the algorithm name (for example, 'xgboosting', 'random_forest')"
+    }
+  },
+  "required": [
+    "algorithms"
+  ],
+  "title": "Config",
+  "type": "object"
+}
