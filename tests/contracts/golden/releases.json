@@ -1,3 +1,6 @@
 {
-  "0.1.0": "8f896347304c25281553aeaba5b1ee2b768874408bef92ea44984f740f8292be"
+  "0.1.0": {
+    "schema_version": 2,
+    "api_digest": "e8c33c731349d29cc6094f32e52211f7e81625bcf19faeac8d571371fda52e5e"
+  }
 }

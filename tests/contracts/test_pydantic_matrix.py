@@ -3,6 +3,9 @@
 The ADR supports ``pydantic>=2.12.5,<3``.  The test installs the lower bound
 and the latest allowed version into isolated target directories and runs the
 same serialization/schema checks under each of them.
+
+The installation is network-dependent, so the module is skipped unless
+``AUTOML_RUN_NETWORK_TESTS=1`` (set in CI).
 """
 
 from __future__ import annotations
@@ -21,6 +24,11 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 SCHEMA = CONTRACT_SRC / "automl_contracts" / "schemas" / "config.schema.json"
 GENERATOR = REPO_ROOT / "automl-contracts" / "scripts" / "generate_schema.py"
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("AUTOML_RUN_NETWORK_TESTS") != "1",
+    reason="set AUTOML_RUN_NETWORK_TESTS=1 to install Pydantic versions",
+)
 
 
 def install_pydantic(target: Path, requirement: str) -> None:

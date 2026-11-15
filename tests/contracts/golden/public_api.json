@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "contract_version": "0.1.0",
   "changelog_version": "0.1.0",
   "pyproject_version": "0.1.0",
-  "api_digest": "8f896347304c25281553aeaba5b1ee2b768874408bef92ea44984f740f8292be",
+  "api_digest": "e8c33c731349d29cc6094f32e52211f7e81625bcf19faeac8d571371fda52e5e",
   "modules": {
     "automl_contracts": [
       "AUTO_HOLDOUT_FRACTION",
@@ -2120,7 +2120,7 @@
       "module": "automl_contracts.protocols",
       "qualname": "MetricFunction",
       "kind": "protocol",
-      "call": "(self, y_true: 'Any', y_pred: 'Any', kwargs: 'Any') -> 'float'"
+      "call": "(self, y_true: 'Any', y_pred: 'Any', **kwargs: 'Any') -> 'float'"
     },
     "NO_OUTLIERS": {
       "module": "automl_contracts.preprocessing",

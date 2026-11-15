@@ -1,4 +1,9 @@
-"""Isolated installation and use of the contract without the engine."""
+"""Isolated installation and use of the contract without the engine.
+
+Wheel building and clean-venv installation are network-dependent, so those
+tests are skipped unless ``AUTOML_RUN_NETWORK_TESTS=1`` (set in CI).  The
+in-process import boundary check remains hermetic.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,8 @@ CANONICAL_SCHEMA = (
     CONTRACT_ROOT / "src" / "automl_contracts" / "schemas" / "config.schema.json"
 )
 DATA_DIR = Path(__file__).resolve().parent / "data"
+
+NETWORK_TESTS_ENABLED = os.environ.get("AUTOML_RUN_NETWORK_TESTS") == "1"
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +50,10 @@ def contract_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return wheels[0]
 
 
+@pytest.mark.skipif(
+    not NETWORK_TESTS_ENABLED,
+    reason="set AUTOML_RUN_NETWORK_TESTS=1 to run wheel-building tests",
+)
 def test_wheel_package_data_and_metadata(contract_wheel: Path) -> None:
     with zipfile.ZipFile(contract_wheel) as archive:
         names = set(archive.namelist())
@@ -68,6 +79,10 @@ def test_wheel_package_data_and_metadata(contract_wheel: Path) -> None:
         assert forbidden not in metadata
 
 
+@pytest.mark.skipif(
+    not NETWORK_TESTS_ENABLED,
+    reason="set AUTOML_RUN_NETWORK_TESTS=1 to run clean-venv tests",
+)
 def test_contract_is_usable_in_a_clean_venv(
     contract_wheel: Path, tmp_path: Path
 ) -> None:

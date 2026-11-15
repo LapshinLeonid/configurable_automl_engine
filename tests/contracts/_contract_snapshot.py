@@ -118,6 +118,11 @@ DOCUMENTED_SUBMODULE_EXPORTS: dict[str, tuple[str, ...]] = {
 _ADDRESS_RE = re.compile(r" at 0x[0-9a-fA-F]+")
 _API_VERSION_PATTERN = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
 
+#: Version of the snapshot representation itself. Bump it when the shape of
+#: the golden payload changes without changing the contract API; release
+#: history entries with another schema version may be re-pinned.
+SNAPSHOT_SCHEMA_VERSION = 2
+
 
 def read_contract_version() -> str:
     """Return the static version from ``automl-contracts/pyproject.toml``."""
@@ -229,21 +234,35 @@ def format_value(value: Any) -> Any:
 
 
 def _format_signature(obj: Any) -> str:
-    """Render a callable signature with deterministic annotations."""
+    """Render a callable signature with deterministic annotations and kinds."""
     try:
         signature = inspect.signature(obj)
     except (TypeError, ValueError):  # pragma: no cover - builtins without signature
         return "<no signature>"
-    params: list[str] = []
+    parts: list[str] = []
+    positional_only: list[int] = []
+    star_emitted = False
     for parameter in signature.parameters.values():
-        text = parameter.name
-        annotation = format_annotation(parameter.annotation)
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY and not star_emitted:
+            parts.append("*")
+            star_emitted = True
+        prefix = ""
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            prefix = "*"
+            star_emitted = True
+        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            prefix = "**"
+        text = f"{prefix}{parameter.name}"
         if parameter.annotation is not inspect.Parameter.empty:
-            text += f": {annotation}"
+            text += f": {format_annotation(parameter.annotation)}"
         if parameter.default is not inspect.Parameter.empty:
             text += f" = {format_value(parameter.default)!r}"
-        params.append(text)
-    result = f"({', '.join(params)})"
+        parts.append(text)
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            positional_only.append(len(parts) - 1)
+    if positional_only:
+        parts.insert(positional_only[-1] + 1, "/")
+    result = f"({', '.join(parts)})"
     if signature.return_annotation is not inspect.Signature.empty:
         result += f" -> {format_annotation(signature.return_annotation)}"
     return result
@@ -365,7 +384,7 @@ def build_snapshot() -> dict[str, Any]:
 
     api = build_public_api()
     return {
-        "schema_version": 1,
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "contract_version": automl_contracts.__version__,
         "changelog_version": read_changelog_latest_version(),
         "pyproject_version": read_contract_version(),
@@ -379,11 +398,23 @@ def load_golden() -> dict[str, Any]:
     return json.loads(PUBLIC_API_GOLDEN.read_text(encoding="utf-8"))
 
 
-def load_release_history() -> dict[str, str]:
-    """Read the released-version -> public-API digest history."""
+def load_release_history() -> dict[str, dict[str, Any]]:
+    """Read the released-version -> public-API entry history.
+
+    Older single-digest entries are read as schema version 1 and are
+    re-pinned on the next snapshot regeneration.
+    """
     if not RELEASE_HISTORY.is_file():
         return {}
-    return json.loads(RELEASE_HISTORY.read_text(encoding="utf-8"))
+    raw = json.loads(RELEASE_HISTORY.read_text(encoding="utf-8"))
+    return {
+        version: (
+            entry
+            if isinstance(entry, dict)
+            else {"schema_version": 1, "api_digest": str(entry)}
+        )
+        for version, entry in raw.items()
+    }
 
 
 def write_golden() -> Path:
@@ -403,13 +434,20 @@ def write_golden() -> Path:
         )
     history = load_release_history()
     previous = history.get(version)
-    if previous is not None and previous != snapshot["api_digest"]:
+    if (
+        previous is not None
+        and previous["schema_version"] == snapshot["schema_version"]
+        and previous["api_digest"] != snapshot["api_digest"]
+    ):
         raise SystemExit(
             f"The public API changed but the contract version is still "
             f"{version}. Bump the version (MINOR or MAJOR) and add a "
             "CHANGELOG.md entry, then regenerate the snapshot."
         )
-    history[version] = snapshot["api_digest"]
+    history[version] = {
+        "schema_version": snapshot["schema_version"],
+        "api_digest": snapshot["api_digest"],
+    }
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     PUBLIC_API_GOLDEN.write_text(
         json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n",
@@ -485,28 +523,58 @@ def contract_public_names() -> set[str]:
 def parse_engine_imports_from_source() -> list[tuple[str, str]]:
     """Return the old engine import pairs recorded in CONTRACTS.md.
 
-    The helper reads the ``Старый путь`` / ``Символы`` columns of the public
-    compatibility matrix.  It is used by engine tests to build the golden
-    import matrix; keeping the parser here avoids a second source of truth.
+    Two table layouts are supported:
+
+    * section 5.1 lists a full old path in the first cell and the imported
+      symbols in the second cell;
+    * sections 4.3.2-4.3.6 write the current path per symbol, using the
+      ``...config.<section>.<symbol>`` or
+      ``...training_engine.config.<section>.<symbol>`` shorthand.
+
+    Only public/deprecated contract rows are used for the shorthand form, so
+    internal engine helpers do not leak into the compatibility matrix.
     """
     pairs: list[tuple[str, str]] = []
     for line in CONTRACTS_DOC.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("|") or "configurable_automl_engine" not in line:
+        if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) < 5:
             continue
-        old_path = cells[0]
-        path_match = re.search(r"`(configurable_automl_engine[^`]*)`", old_path)
-        if not path_match:
+
+        full_path = re.search(r"`(configurable_automl_engine[^`]*)`", cells[0])
+        if full_path:
+            path = full_path.group(1)
+            for symbol in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", cells[1]):
+                if symbol in {"noqa", "outliers_presets"}:
+                    continue
+                pairs.append((path, symbol))
             continue
-        path = path_match.group(1)
-        for symbol in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", cells[1]):
-            # The cell also mentions lint pragmas and sibling modules in
-            # backticks; they are not imported names of the path.
-            if symbol in {"noqa", "outliers_presets"}:
-                continue
-            pairs.append((path, symbol))
+
+        if len(cells) < 8:
+            continue
+        new_path, status = cells[4], cells[5]
+        if status not in ("public", "deprecated"):
+            continue
+        if not re.search(r"`?automl_contracts\.", new_path):
+            continue
+        for shorthand in re.findall(
+            r"`(\.\.\.(?:training_engine\.)?config\.[a-z_]+\.[A-Za-z_][A-Za-z0-9_]*)`",
+            cells[3],
+        ):
+            match = re.fullmatch(
+                r"\.\.\.(?:training_engine\.)?config\.([a-z_]+)\."
+                r"([A-Za-z_][A-Za-z0-9_]*)",
+                shorthand,
+            )
+            assert match is not None, shorthand
+            section, symbol = match.groups()
+            pairs.append(
+                (
+                    "configurable_automl_engine.training_engine.config." + section,
+                    symbol,
+                )
+            )
     return pairs
 
 

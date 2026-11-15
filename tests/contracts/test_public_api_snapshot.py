@@ -122,8 +122,16 @@ def test_documented_symbol_type_matches_the_matrix(name: str, type_text: str) ->
         assert isinstance(value, dict), name
     elif type_text.strip() == "`float`":
         assert isinstance(value, float), name
+    elif type_text.strip() == "`int`":
+        assert isinstance(value, int), name
     elif type_text.strip() == "`str` (код ошибки)":
         assert isinstance(value, str), name
+    elif "функция" in lowered:
+        assert callable(value) and not isinstance(value, type), name
+    elif isinstance(value, BaseModel):
+        assert not isinstance(value, type), name
+    else:
+        pytest.fail(f"unhandled documented type {type_text!r} for {name}")
 
 
 def test_protocols_are_documented_and_structural() -> None:
@@ -133,6 +141,10 @@ def test_protocols_are_documented_and_structural() -> None:
     assert ScorerCallable._is_protocol
     assert automl_contracts.MetricFunction is MetricFunction
     assert automl_contracts.ScorerCallable is ScorerCallable
+    call = load_golden()["symbols"]["MetricFunction"]["call"]
+    assert "**kwargs" in call, (
+        "a keyword-only/positional change must alter the snapshot"
+    )
 
 
 def test_release_history_pins_the_current_api_digest() -> None:
@@ -140,12 +152,14 @@ def test_release_history_pins_the_current_api_digest() -> None:
 
     golden = load_golden()
     history = load_release_history()
-    assert history[golden["contract_version"]] == golden["api_digest"]
+    current = history[golden["contract_version"]]
+    assert current["schema_version"] == golden["schema_version"]
+    assert current["api_digest"] == golden["api_digest"]
     versions = [Version(version) for version in history]
     assert versions == sorted(versions)
     for previous_version, current_version in itertools.pairwise(versions):
-        previous_digest = history[str(previous_version)]
-        current_digest = history[str(current_version)]
+        previous_digest = history[str(previous_version)]["api_digest"]
+        current_digest = history[str(current_version)]["api_digest"]
         if previous_digest == current_digest:
             continue
         assert current_version.major > previous_version.major or (

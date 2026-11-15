@@ -1,5 +1,47 @@
 {
   "paths": {
+    "configurable_automl_engine.training_engine.config.general": [
+      "GeneralCfg",
+      "ComparisonMetric",
+      "AUTO_HOLDOUT_FRACTION",
+      "AUTO_HOLDOUT_MIN_ROWS",
+      "InfPolicy",
+      "DatetimePolicy",
+      "SplitAggregation"
+    ],
+    "configurable_automl_engine.training_engine.config.phases": [
+      "HPOPhaseAction",
+      "SelectStrategy",
+      "SelectOutput",
+      "PruningCfg",
+      "PruningStrategy",
+      "HPOPhaseCfg",
+      "DEFAULT_PHASE_N_TRIALS",
+      "ERR_REMOVED_REFINE_WINNER"
+    ],
+    "configurable_automl_engine.training_engine.config.sanity_gate": [
+      "SanityGateCfg",
+      "CorridorMode",
+      "GeneralizationGapMode",
+      "ERR_REMOVED_SANITY_GATE_MODE"
+    ],
+    "configurable_automl_engine.training_engine.config.complexity_guard": [
+      "ComplexityGuardCfg",
+      "ComplexityGuardMode",
+      "ComplexityGuardUserRangePolicy",
+      "ComplexityGuardSizeBasis"
+    ],
+    "configurable_automl_engine.training_engine.config.ensemble": [
+      "EnsembleCfg",
+      "EnsembleWeightMethod"
+    ],
+    "configurable_automl_engine.training_engine.config.algorithms": [
+      "AlgoCfg",
+      "OversamplingCfg",
+      "OversamplingAlgorithm",
+      "AlgorithmsConfig",
+      "ERR_REMOVED_PLUGIN_KEY"
+    ],
     "configurable_automl_engine": [
       "AlgorithmRun",
       "AutoMLExperiment",
