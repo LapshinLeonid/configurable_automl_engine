@@ -448,6 +448,8 @@ def _expression_calls(
 
 
 def _resolve_possible_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
+    if isinstance(node, ast.NamedExpr):
+        return _resolve_possible_names(node.value, aliases)
     if isinstance(node, ast.Name):
         return aliases.get(node.id, frozenset({node.id}))
     if isinstance(node, ast.Attribute):
@@ -1267,6 +1269,8 @@ def _is_path_expression(
     node: ast.AST, aliases: dict[str, str], path_names: set[str]
 ) -> bool:
     """Recognise Path factories and Path-preserving method chains."""
+    if isinstance(node, ast.NamedExpr):
+        return _is_path_expression(node.value, aliases, path_names)
     if isinstance(node, ast.Name):
         return (
             node.id in path_names or aliases.get(node.id, node.id) in PATH_CLASS_NAMES
@@ -1415,6 +1419,40 @@ def _shadowed_names_by_node(tree: ast.Module) -> dict[int, set[str]]:
     return result
 
 
+def _literal_runtime_target(node: ast.Call, aliases: FlowAliases) -> str | None:
+    func = node.func
+    if isinstance(func, ast.Call):
+        names = _resolve_possible_names(func.func, aliases)
+        if not names & {"getattr", "builtins.getattr"} or len(func.args) < 2:
+            return None
+        bases = _resolve_possible_names(func.args[0], aliases)
+        attribute = func.args[1]
+        if not bases or not isinstance(attribute, ast.Constant):
+            return None
+        if not isinstance(attribute.value, str):
+            return None
+        return next(iter(sorted(f"{base}.{attribute.value}" for base in bases)))
+    if isinstance(func, ast.Subscript) and isinstance(func.value, ast.Attribute):
+        if func.value.attr != "__dict__":
+            return None
+        bases = _resolve_possible_names(func.value.value, aliases)
+        attribute = func.slice
+        if not bases or not isinstance(attribute, ast.Constant):
+            return None
+        if not isinstance(attribute.value, str):
+            return None
+        return next(iter(sorted(f"{base}.{attribute.value}" for base in bases)))
+    return None
+
+
+def _is_forbidden_runtime_name(name: str) -> bool:
+    return (
+        name == "open"
+        or name.startswith(RUNTIME_CALL_PREFIXES)
+        or (name.startswith("Path.") and name.split(".", 1)[1] not in PATH_PURE_METHODS)
+    )
+
+
 def scan_contract_runtime_access(
     contract_src: Path = CONTRACT_SRC,
 ) -> list[Violation]:
@@ -1439,7 +1477,11 @@ def scan_contract_runtime_access(
             if isinstance(node, ast.Attribute):
                 if _root_name(node) in shadow:
                     continue
-                attribute_name = _resolve_callable_name(node, static)
+                if isinstance(node.value, ast.NamedExpr):
+                    base_name = _resolve_callable_name(node.value.value, static)
+                    attribute_name = f"{base_name}.{node.attr}" if base_name else None
+                else:
+                    attribute_name = _resolve_callable_name(node, static)
                 if attribute_name in RUNTIME_ATTRIBUTES:
                     violations.append(
                         _runtime_violation(path, node.lineno, attribute_name)
@@ -1447,6 +1489,12 @@ def scan_contract_runtime_access(
         for node, aliases, path_names in _iter_calls_with_aliases(
             tree.body, dict(initial), module_paths, final
         ):
+            literal_target = _literal_runtime_target(node, aliases)
+            if literal_target is not None and _is_forbidden_runtime_name(
+                literal_target
+            ):
+                violations.append(_runtime_violation(path, node.lineno, literal_target))
+                continue
             if isinstance(node.func, ast.Attribute) and _is_path_expression(
                 node.func.value, static, path_names
             ):
@@ -1456,16 +1504,7 @@ def scan_contract_runtime_access(
                     )
                 continue
             possible = _resolve_possible_names(node.func, aliases)
-            forbidden = {
-                name
-                for name in possible
-                if name == "open"
-                or name.startswith(RUNTIME_CALL_PREFIXES)
-                or (
-                    name.startswith("Path.")
-                    and name.split(".", 1)[1] not in PATH_PURE_METHODS
-                )
-            }
+            forbidden = {name for name in possible if _is_forbidden_runtime_name(name)}
             if forbidden:
                 violations.append(_runtime_violation(path, node.lineno, min(forbidden)))
     return violations

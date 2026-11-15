@@ -517,6 +517,87 @@ def test_named_expression_assign_value_is_tracked(tmp_path: Path) -> None:
     assert "os.system" in violations[0].message
 
 
+def test_named_expression_as_callee_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        (f := os.system)("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_named_expression_as_attribute_base_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        (m := os).system("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_named_expression_as_import_callee_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        (f := __import__)("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_named_expression_as_path_base_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        (p := Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_named_expression_bound_path_method_alias_is_tracked(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        read = (p := Path("x")).read_text
+        read()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_named_expression_runtime_attribute_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import sys
+
+        (s := sys).platform
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
 def test_named_expression_in_assert_is_tracked(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -705,6 +786,32 @@ def test_io_and_process_identity_are_reported(tmp_path: Path) -> None:
     violations = scan_contract_runtime_access(tmp_path)
     assert len(violations) == 5
     assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_literal_getattr_runtime_access_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        getattr(os, "system")("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_literal_dict_runtime_access_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        os.__dict__["system"]("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
 def test_stdlib_filesystem_modules_are_reported(tmp_path: Path) -> None:

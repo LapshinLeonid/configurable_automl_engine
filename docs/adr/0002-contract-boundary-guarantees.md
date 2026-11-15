@@ -71,6 +71,8 @@ configurable_automl_engine ───────▶ automl_contracts
   вычисления выражения, включая `(f := os.system) and f(...)`, `Expr`,
   `assert`, `return`, `raise` и аргументы вызовов; tuple-значения
   отслеживаются через имена (`pair = (os.system, None); f, _ = pair`).
+  Walrus-значение разрешается и как callee/base: `(f := os.system)(...)`,
+  `(m := os).system(...)`, `(p := Path(...)).read_text()`.
   Разрешён только `importlib.metadata.version` для получения версии
   установленного дистрибутива;
 - строковая ссылка внутри параметризованного type-alias
@@ -136,6 +138,8 @@ AST-проверка импортов использует белый списо
   `dbm.*`, `shelve.*`, `fileinput.*`, `mmap.*`, `webbrowser.*`,
   `posixpath.*`/`ntpath.*` (файловые проверки), `shutil.make_archive`,
   `shutil.unpack_archive`, `shutil.chown`;
+- литеральная индирекция к runtime-callable (`getattr(os, "system")`,
+  `os.__dict__["system"]`) также запрещена;
 - обращения к `sys.argv`, `sys.path`, `sys.modules`, `sys.stdin`, `sys.stdout`,
   `sys.stderr`, `sys.executable`, `sys.prefix` и аналогичным
   environment-зависимым атрибутам;
@@ -173,7 +177,9 @@ Path-имена учитываются по
 в ADR. Также запрещены импортированные ссылки вроде `from os import environ` и
 `from sys import platform`. Проверка runtime-атрибутов учитывает лексическое
 затенение: параметр или локальная переменная `sys`/`os`/`platform` не считается
-модулем.
+модулем. Переприсваивание модуля в локальную переменную
+(`alias = sys; alias.platform`) не гарантируется: runtime-атрибуты разрешаются
+через импорт-алиасы и лексическое затенение.
 
 Строковые значения внутри `Literal[...]` и metadata `Annotated[...]`
 (`Field(description="numpy bound")`) являются данными, а не type-alias, и не
