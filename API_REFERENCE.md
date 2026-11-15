@@ -1506,8 +1506,8 @@ The stable public submodules are:
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
-| `automl_contracts.preprocessing` | `ImputationStrategy`, `ObjectScalingSpec`, `ScalingSpec`, scaling specifications, outlier specifications, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NO_OUTLIERS`, the deprecated `ScalingType` alias |
-| `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult` |
+| `automl_contracts.preprocessing` | `ImputationStrategy`, `ObjectScalingSpec`, `StringScaling`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ScalingSpec`, `OutlierSpec`, `ObjectOutlierSpec`, `StringOutlierSpec`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NO_OUTLIERS`, the deprecated `ScalingType` alias |
+| `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult`, `MetricDirection`, `RunPhaseAction`, `RunStatus`, `RunStepStatus` |
 | `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` |
 | `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS` |
 | `automl_contracts.config.phases` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningCfg`, `PruningStrategy`, `HPOPhaseCfg`, `DEFAULT_PHASE_N_TRIALS`, `ERR_REMOVED_REFINE_WINNER` |

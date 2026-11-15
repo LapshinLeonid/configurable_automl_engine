@@ -47,6 +47,7 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: .
+          AUTOML_RUN_NETWORK_TESTS: "1"
         run: pytest --cov=src --cov-report=xml
 
       # Regression benchmark of the Sanity Gate on the target pipeline — a mandatory

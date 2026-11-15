@@ -415,4 +415,5 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  4. RUN TESTS AND COVERAGE (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
+                export AUTOML_RUN_NETWORK_TESTS=1
                 python3.11 -m pytest --cov=src

@@ -1,0 +1,103 @@
+{
+  "run_id": "7f0f4e9a-7d8e-4f0b-8e0e-5a5f5f1b4c2d",
+  "label": "reference-run",
+  "engine_version": "0.6.0",
+  "started_at": "2026-11-15T10:00:00Z",
+  "finished_at": "2026-11-15T10:00:12.500000Z",
+  "duration_seconds": 12.5,
+  "status": "completed",
+  "config": {
+    "general": {
+      "comparison_metric": "r2",
+      "validation_strategy": "k_fold",
+      "n_folds": 3
+    },
+    "algorithms": {
+      "ridge": {
+        "enable": true
+      }
+    }
+  },
+  "resolved_validation": "k_fold",
+  "resolved_n_folds": 3,
+  "resolved_test_size": 0.2,
+  "random_state": 42,
+  "metric_user": "r2",
+  "metric_sklearn": "r2",
+  "metric_direction": "maximize",
+  "runs": [
+    {
+      "algorithm": "ridge",
+      "phase_name": "search",
+      "phase_action": "all_algorithms",
+      "status": "completed",
+      "score_raw": 0.91,
+      "score": 0.91,
+      "params": {
+        "alpha": 0.1
+      },
+      "n_trials_requested": 5,
+      "n_trials_evaluated": 5,
+      "n_trials_completed": 5,
+      "n_trials_pruned": 0,
+      "n_trials_failed": 0,
+      "duration_seconds": 8.25,
+      "error": null
+    }
+  ],
+  "winner": "ridge",
+  "winner_score": 0.91,
+  "score_std": 0.01,
+  "winner_params": {
+    "alpha": 0.1
+  },
+  "model_path": "artifacts/best_model.joblib",
+  "additional_metrics": {
+    "mae": 3.2
+  },
+  "disqualified_algorithms": {
+    "random_forest": "circuit A: constant predictions"
+  },
+  "sanity_gate": {
+    "select": {
+      "corridor": "multiplicative",
+      "members": [
+        "ridge"
+      ]
+    }
+  },
+  "complexity_guard": {
+    "mode": "apply",
+    "size": "small"
+  },
+  "ensemble": {
+    "enable": true,
+    "members": [
+      {
+        "rank": 1,
+        "algorithm": "ridge",
+        "score": 0.91,
+        "weight": 1.0
+      }
+    ],
+    "effective_size": 1,
+    "weight_method": "equal",
+    "model_path": "artifacts/ensemble.joblib"
+  },
+  "explanations": {
+    "method": "permutation_importance",
+    "features": [
+      {
+        "feature": "bmi",
+        "importance": 0.4
+      }
+    ]
+  },
+  "oof_score": 0.9,
+  "oof_score_std": 0.02,
+  "holdout_score": 0.88,
+  "bbc_score": 0.89,
+  "n_repeats": 2,
+  "n_trials_evaluated": 5,
+  "error": null
+}
