@@ -2,7 +2,7 @@
   "$defs": {
     "AlgoCfg": {
       "additionalProperties": false,
-      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, the overridden search space\nand the preprocessing preset override.\nAttributes:\n    enable (bool): Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters (bool): Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters (Dict | None): Custom parameter bounds\n        overriding the default values.",
+      "description": "Technical configuration of a specific ML algorithm in the pipeline.\n\nStores the algorithm enablement settings, the overridden search space\nand the preprocessing preset override.\nAttributes:\n    enable: Flag for the algorithm's participation in the current experiment.\n    limit_hyperparameters: Restrict the search to the user-listed\n        hyperparameters only (no DEFAULT_SPACES entries).\n    hyperparameters: Custom parameter bounds\n        overriding the default values.",
       "properties": {
         "enable": {
           "default": true,
@@ -377,7 +377,7 @@
     },
     "CustomMetricSpec": {
       "additionalProperties": false,
-      "description": "The declaration of one custom metric or scorer.\n\nValidation imports the callable named by ``path`` and checks that it is\ncallable, that its signature accepts the calling convention of ``kind``\n(plus ``kwargs``) and that the direction is known.\n\nAttributes:\n    path: Dotted import path of the callable (``\"pkg.mod:attr\"`` or\n        ``\"pkg.mod.attr\"``).\n    kind: ``\"metric\"`` — ``fn(y_true, y_pred, **kwargs) -> float``\n        returning the natural metric value; ``\"scorer\"`` — an sklearn\n        scorer ``scorer(estimator, X, y) -> float``.\n    greater_is_better: The natural direction of the returned value.\n        Required for ``kind=\"metric\"``. For a ``make_scorer`` scorer the\n        direction is taken from the scorer (an explicit value must agree\n        with it); a plain callable scorer defaults to ``True``.\n    additive: ``True`` — the CV estimate is the mean of the per-fold\n        values (valid for per-sample means such as MAE); ``False`` — the\n        value over the pooled out-of-fold vector (always correct).\n    kwargs: Static keyword arguments of the metric function (for a\n        ``make_scorer`` scorer they are merged into its kwargs).",
+      "description": "The declaration of one custom metric or scorer.\n\nAttributes:\n    path: Dotted import path of the callable (``\"pkg.mod:attr\"`` or\n        ``\"pkg.mod.attr\"``).\n    kind: ``\"metric\"`` for a ``(y_true, y_pred, **kwargs)`` function;\n        ``\"scorer\"`` for an ``(estimator, X, y)`` scorer.\n    greater_is_better: The natural direction of the returned value. It is\n        required by the engine for ``kind=\"metric\"`` and checked against\n        the scorer direction for sklearn scorers.\n    additive: ``True`` when the CV estimate is the mean of per-fold\n        values; ``False`` when the pooled out-of-fold value is required.\n    kwargs: Static keyword arguments of the metric function.",
       "properties": {
         "path": {
           "description": "Dotted import path of the callable: 'package.module:attribute' (preferred) or 'package.module.attribute'.",
@@ -460,7 +460,7 @@
     },
     "FeatureSelectionCfg": {
       "additionalProperties": false,
-      "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode (FeatureSelectionMode): Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method (FeatureSelectionMethod): Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile (float): Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features (int): Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold (float): Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators (int): Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
+      "description": "Settings of the feature selection mechanism.\n\nAttributes:\n    mode: Operation mode: 'disabled', 'always'\n        or 'auto'.\n    method: Selection algorithm: 'importance',\n        'percentile', 'mutual_info' or 'variance'.\n    percentile: Percentage of the best features to keep\n        (0 < percentile <= 100) for the 'percentile' and 'mutual_info'\n        methods.\n    min_features: Guaranteed minimum number of features (>= 1),\n        protects against an empty feature matrix.\n    variance_threshold: Minimum feature variance (>= 0.0)\n        for the 'variance' method.\n    n_estimators: Number of trees in the ensemble (>= 10)\n        for the 'importance' method.",
       "properties": {
         "mode": {
           "$ref": "#/$defs/FeatureSelectionMode",
@@ -574,7 +574,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/CustomMetricSpec"
           },
-          "description": "User-defined metrics and scorers, keyed by the metric name that comparison_metric / additional_metrics refer to. A name must match ^[a-z][a-z0-9_]*$ and must not be a built-in or sklearn metric name. Each entry names a callable by its dotted import path ('package.module:attribute'); the callable is imported and its signature is checked at config validation time.",
+          "description": "User-defined metrics and scorers, keyed by the metric name that comparison_metric / additional_metrics refer to. A name must match ^[a-z][a-z0-9_]*$ and must not be a built-in metric name. Each entry names a callable by its dotted import path ('package.module:attribute'); the callable itself is imported and checked by the engine at the public entry points.",
           "title": "Custom Metrics",
           "type": "object"
         },
@@ -1090,7 +1090,7 @@
     },
     "OversamplingCfg": {
       "additionalProperties": false,
-      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable (bool): Global flag enabling oversampling.\n    multiplier (float): Target sample-increase factor.\n    algorithm (OversamplingAlgorithm): Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins (int): Number of quantile bins for the regression path.\n    add_noise (bool): Whether to add Gaussian noise to the numeric\n        features of the oversampled training set.\n    noise_level (float): Noise standard deviation as a fraction of each\n        column's standard deviation.",
+      "description": "Class balancing and data synthesis parameters.\n\nProvides configuration of methods for resolving the target-variable imbalance.\nUses an aliases mechanism to map flat YAML keys into a structured object.\nAttributes:\n    enable: Global flag enabling oversampling.\n    multiplier: Target sample-increase factor.\n    algorithm: Selected generation method\n        (SMOTE, ADASYN, etc.).\n    target_bins: Number of quantile bins for the regression path.\n    add_noise: Whether to add Gaussian noise to the numeric\n        features of the oversampled training set.\n    noise_level: Noise standard deviation as a fraction of each\n        column's standard deviation.",
       "properties": {
         "data_oversampling": {
           "default": false,
@@ -1135,6 +1135,7 @@
       "type": "object"
     },
     "ParallelStrategy": {
+      "description": "Parallelization strategy of the engine.",
       "enum": [
         "algorithms"
       ],
@@ -1615,7 +1616,7 @@
       "type": "object"
     },
     "SearchSpaceEntry": {
-      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\nAttributes:\n    config (Union[CategoricalSpace, FloatSpace, IntSpace]): Validated\n        object of a concrete distribution type.\n\nThe internal ``explicit_type`` flag records whether the distribution type\nwas written explicitly in the source config (``[low, high, \"float\"]``) or\ninferred from the boundary numbers. Inferred types are re-resolved\nagainst the parameter type (the default search space or the model\nsignature) by :func:`normalize_hyperparameter_entry` — e.g. an\nintegral-looking ``[1, 50]`` for a real-valued parameter stays a real\nrange.",
+      "description": "Description of the search space for an individual hyperparameter.\n\nA universal container supporting both categorical lists and numeric\nranges. Implements transparent conversion logic from the shorthand\nYAML notation into typed distribution objects.\n\nAttributes:\n    config: Validated object of a concrete distribution type.\n    explicit_type: Whether the distribution type was written explicitly in\n        the source config rather than inferred from the boundary numbers.\n\nThe internal ``explicit_type`` flag records whether the distribution type\nwas written explicitly in the source config (``[low, high, \"float\"]``) or\ninferred from the boundary numbers. Inferred types are re-resolved\nagainst the parameter type (the default search space or the model\nsignature) by :func:`normalize_hyperparameter_entry` — e.g. an\nintegral-looking ``[1, 50]`` for a real-valued parameter stays a real\nrange.",
       "properties": {
         "config": {
           "discriminator": {
@@ -1648,7 +1649,7 @@
       "type": "object"
     },
     "SerializationFormat": {
-      "description": "Supported model serialization formats.\nRationale: Provides typing and a single source of truth for choosing\nbetween the standard pickle and joblib optimized for heavy weights.",
+      "description": "Supported model serialization formats.",
       "enum": [
         "pickle",
         "joblib"
@@ -1672,7 +1673,7 @@
       "type": "object"
     },
     "TargetTransform": {
-      "description": "Target transformations applied inside the model step of the pipeline.\n\nThe transformation wraps the regressor in a\n``TransformedTargetRegressor``: the model is trained on the transformed\n``y`` and ``predict`` returns values in the original scale\n(``TargetTransformer.inverse_transform``, with clipping to the\ntransformed train range).\n\nRequirements for ``y``:\n\n* ``none`` — no transformation; any numeric ``y``;\n* ``log1p`` — ``log(1 + y)``; requires ``min(y) > -1``\n  (validated before training, see\n  ``preprocessing.target_transform.validate_target_for_transform``);\n* ``boxcox`` — the Box-Cox power transformation; requires strictly\n  positive ``y``: ``min(y) > 0`` (validated before training);\n* ``yeo-johnson`` — the Yeo-Johnson power transformation; any real\n  ``y`` (no domain restrictions);\n* ``auto`` — the engine decides from the target skewness\n  (``skew(y)``): a sufficiently skewed ``y`` selects ``log1p`` when\n  ``min(y) > -1``, otherwise ``yeo-johnson``; an (almost) symmetric\n  ``y`` keeps ``none``. The decision point follows the estimation\n  design: with a reserved outer hold-out the resolved concrete method\n  — never ``auto`` itself — is what the rest of the pipeline (HPO,\n  the final trainer, the metadata, the ``ExperimentResult``) sees\n  (see ``preprocessing.target_transform.resolve_target_transform``);\n  without an outer hold-out the placeholder reaches the trainers and\n  every fold resolves its own method from its own ``y_train`` (see\n  ``preprocessing.target_transform.AutoTargetTransformer``).",
+      "description": "Target transformations supported by the engine.\n\n``none`` applies no transformation, ``log1p`` requires ``min(y) > -1``,\n``boxcox`` requires strictly positive ``y``, ``yeo-johnson`` accepts any\nreal target and ``auto`` lets the engine choose from the target\nskewness.",
       "enum": [
         "none",
         "log1p",
@@ -1684,7 +1685,7 @@
       "type": "string"
     },
     "ValidationStrategy": {
-      "description": "Allowed validation strategies for hyperopt.",
+      "description": "Allowed validation strategies for hyperparameter optimization.",
       "enum": [
         "train_test_split",
         "k_fold",
@@ -1696,7 +1697,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Root object of the whole AutoML configuration system.\n\nAggregates all configuration sections and performs the final validation\nof the parameter graph integrity, including system dependency checks.\nAttributes:\n    general (GeneralCfg): General experiment parameters.\n    oversampling (OversamplingCfg): Data preprocessing settings.\n    algorithms (AlgorithmsConfig): Registry of available and active algorithms.",
+  "description": "Root object of the AutoML configuration contract.\n\nAggregates the configuration sections and validates their structure,\nfield types, allowed values and pure cross-field rules. Checks that need\nthe installed environment (algorithm packages, estimator signatures,\nruntime custom-metric callables, platform limits) are applied by the\nengine's ``validate_runtime_config`` function.\n\nAttributes:\n    general: General experiment parameters.\n    oversampling: Data preprocessing settings.\n    algorithms: Registry of available and active algorithms.",
   "properties": {
     "general": {
       "$ref": "#/$defs/GeneralCfg",

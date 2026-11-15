@@ -46,6 +46,9 @@ from configurable_automl_engine.common.metrics import (
 from configurable_automl_engine.trainer import ModelTrainer, TrainingError
 from configurable_automl_engine.training_engine import train_best_model
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.config_runtime import (
+    validate_runtime_config,
+)
 from configurable_automl_engine.tuner import optimize
 
 from . import custom_metric_fixtures as fx
@@ -174,9 +177,10 @@ def test_spec_metric_valid_with_kwargs():
     ],
 )
 def test_spec_validation_errors(kwargs, code):
-    with pytest.raises(ValidationError) as exc_info:
-        CustomMetricSpec(**kwargs)
-    assert _error_type(exc_info.value) == code
+    spec = CustomMetricSpec(**kwargs)
+    with pytest.raises(ValueError) as exc_info:
+        cm.validate_custom_metric_spec(spec)
+    assert exc_info.value.type == code
 
 
 def test_spec_rejects_unknown_fields_and_empty_path():
@@ -188,18 +192,18 @@ def test_spec_rejects_unknown_fields_and_empty_path():
 
 def test_spec_make_scorer_direction_taken_from_scorer():
     spec = _spec("neg_mae_scorer", kind="scorer")
-    assert spec.natural_greater_is_better is False
+    assert cm.natural_greater_is_better(spec) is False
     agreeing = _spec("neg_mae_scorer", kind="scorer", greater_is_better=False)
-    assert agreeing.natural_greater_is_better is False
+    assert cm.natural_greater_is_better(agreeing) is False
 
 
 def test_spec_plain_scorer_without_additive_warns(caplog):
     with caplog.at_level(logging.WARNING):
-        _spec("plain_scorer", kind="scorer")
+        cm.validate_custom_metric_spec(_spec("plain_scorer", kind="scorer"))
     assert "pooled out-of-fold" in caplog.text
     caplog.clear()
     with caplog.at_level(logging.WARNING):
-        _spec("plain_scorer", kind="scorer", additive=True)
+        cm.validate_custom_metric_spec(_spec("plain_scorer", kind="scorer", additive=True))
     assert "pooled out-of-fold" not in caplog.text
 
 
@@ -427,22 +431,23 @@ def test_config_unknown_metric_lists_custom_names():
 
 
 def test_config_spec_error_names_the_entry():
-    with pytest.raises(ValidationError) as exc_info:
-        Config.model_validate(
-            _cfg({"custom_metrics": {"my_mae": {"path": f"{FX}:custom_mae"}}})
-        )
-    err = exc_info.value.errors()[0]
-    assert err["type"] == cm.ERR_DIRECTION_REQUIRED
-    assert err["loc"] == ("general", "custom_metrics", "my_mae")
+    cfg = Config.model_validate(
+        _cfg({"custom_metrics": {"my_mae": {"path": f"{FX}:custom_mae"}}})
+    )
+    with pytest.raises(ValueError) as exc_info:
+        validate_runtime_config(cfg)
+    assert exc_info.value.type == cm.ERR_DIRECTION_REQUIRED
+    assert "general.custom_metrics.my_mae" in str(exc_info.value)
 
 
 def test_config_reserved_name_reported_before_import():
     """A reserved name fails even when its path cannot be imported."""
-    with pytest.raises(ValidationError) as exc_info:
-        Config.model_validate(
-            _cfg({"custom_metrics": {"rmse": {"path": "no_such_pkg_xyz:f"}}})
-        )
-    assert exc_info.value.errors()[0]["type"] == metrics_mod.ERR_CUSTOM_NAME_COLLISION
+    cfg = Config.model_validate(
+        _cfg({"custom_metrics": {"rmse": {"path": "no_such_pkg_xyz:f"}}})
+    )
+    with pytest.raises(ValueError) as exc_info:
+        validate_runtime_config(cfg)
+    assert exc_info.value.type == metrics_mod.ERR_CUSTOM_NAME_COLLISION
 
 
 def test_config_unused_custom_metric_warns(caplog):

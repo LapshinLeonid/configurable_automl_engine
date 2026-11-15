@@ -1,353 +1,48 @@
-"""Adaptive feature preprocessing presets.
+"""Adaptive feature preprocessing presets: engine tables and resolution.
 
-Implements automatic selection of the feature preprocessing strategy
-depending on the selected regression algorithm (the user-facing description
-lives in API_REFERENCE.md, "Adaptive Feature Preprocessing").
-
-Key concepts:
-
-    * **Preprocessing preset** (:class:`PreprocessingPreset`) — a declaratively
-      described set of rules for processing numeric features: the missing value
-      imputation strategy (:data:`ImputationStrategy`), the scaling
-      configuration (:class:`ScalingSpec`) and the outlier handling
-      (:class:`OutlierSpec` — winsorization of the extreme values before the
-      imputer; the definitions live in
-      :mod:`configurable_automl_engine.outliers_presets` and are re-exported
-      here).
-    * **Algorithm class** (:class:`AlgorithmClass`) — a group of regression
-      algorithms with common preprocessing requirements.
-    * **Mapping table** :data:`ALGORITHM_CLASS_MAPPING` — fixes
-      the class membership of every supported algorithm. Adding a new algorithm
-      does not require changing the core preprocessing logic —
-      it is enough to register it in the table.
-
-Selection rules: the algorithm name is normalized and checked against the
-registry (an unknown name is rejected with :class:`ValueError`); a supported
-algorithm without explicit registration falls back to the ``default`` class;
-every preset field is resolved with the precedence order (later items win)
-"class preset < run-level default override < per-algorithm user override" —
-a field set at a higher level replaces the whole field from the lower level
-(nested values are never merged).
-
-Scaling configuration (:class:`ScalingSpec`) is an object with a ``type``
-discriminator (``StandardScaling`` / ``RobustScaling`` / ``QuantileScaling`` /
-``NoScaling``); the string shorthand (``"robust"``) is accepted everywhere and
-normalized to its object form by a ``BeforeValidator``, so existing configs and
-API calls keep working. The outlier configuration (:class:`OutlierSpec`)
-follows the same pattern (``NoOutliers`` / ``QuantileOutliers`` / ``IqrOutliers``
-with the ``"quantile"`` / ``"iqr"`` shorthands).
-
-The single function :func:`resolve_preprocessing_preset` is used at every stage
-of the lifecycle — the HPO phase, final training and prediction — which
-guarantees consistent application of the preset. :func:`merge_preprocessing_overrides`
-is the public merge point that folds the run-level (``general.preprocessing``)
-and per-algorithm override blocks into the single ``preprocessing_override``
-argument of ``ModelTrainer`` / ``tuner.optimize``.
+The configuration models (scaling/outlier specs, ``PreprocessingPreset``,
+``PreprocessingOverride`` and the merge helper) live in
+:mod:`automl_contracts.preprocessing` and are re-exported here. This module
+keeps the algorithm-to-class tables, the preset resolution and the runtime
+helpers.
 """
 
 from __future__ import annotations
 
 import logging
-from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any
 
-from pydantic import (
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Discriminator,
-    Field,
-    Tag,
-    TypeAdapter,
-    model_validator,
+from automl_contracts.preprocessing import (
+    NO_OUTLIERS,
+    AlgorithmClass,
+    ImputationStrategy,
+    IqrOutliers,
+    NoOutliers,
+    NoScaling,
+    ObjectOutlierSpec,
+    ObjectScalingSpec,
+    OutlierSpec,
+    PreprocessingOverride,
+    PreprocessingPreset,
+    QuantileOutliers,
+    QuantileScaling,
+    RobustScaling,
+    ScalingSpec,
+    ScalingType,
+    StandardScaling,
+    StringOutlierSpec,
+    StringScaling,
+    coerce_outliers,
+    coerce_scaling,
+    format_outliers,
+    merge_preprocessing_overrides,
+    scaling_type,
 )
 
 from configurable_automl_engine.models import (
     AVAILABLE_ALGORITHMS,
     resolve_algorithm_name,
 )
-
-#: Missing value imputation strategies for numeric features.
-ImputationStrategy = Literal["mean", "median"]
-
-#: Deprecated alias of the string shorthand of :class:`ScalingSpec` (kept for
-#: backward compatibility of imports; the canonical string form is
-#: :data:`StringScaling`).
-ScalingType = Literal["standard", "robust", "quantile", "none"]
-
-
-def _coerce_scaling_spec(value: Any) -> Any:
-    """Normalize a string shorthand into the object form of a scaling spec.
-
-    Args:
-        value: ``"standard"`` / ``"robust"`` / ``"none"`` (the string
-            shorthand) or an already-object form (a dict or a
-            :class:`ScalingSpec` member).
-
-    Returns:
-        The object form: ``{"type": <shorthand>}`` for a string, the input
-        value otherwise.
-    """
-    if isinstance(value, str):
-        return {"type": value}
-    return value
-
-
-def _discriminate_scaling_type(value: Any) -> Any:
-    """Extract the ``type`` discriminator tag of a scaling spec value.
-
-    Args:
-        value: A scaling spec in any pre-coercion form (a dict, the object
-            form or ``None``/garbage — anything non-dict/object yields
-            ``None`` and is rejected by the union).
-
-    Returns:
-        The ``type`` tag (``'standard'`` / ``'robust'`` / ``'none'``) or
-        ``None`` when it cannot be determined.
-    """
-    if isinstance(value, dict):
-        return value.get("type")
-    return getattr(value, "type", None)
-
-
-def _scaling_tag(t: type[BaseModel]) -> str:
-    """Return the discriminator tag of a scaling spec model class."""
-    return t.model_fields["type"].default  # type: ignore[return-value]
-
-
-class StandardScaling(BaseModel):
-    """Standard scaling: :class:`sklearn.preprocessing.StandardScaler`.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        type: The scaling type discriminator (always ``"standard"``).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["standard"] = Field(
-        default="standard",
-        description="The scaling type: StandardScaler (zero mean, unit variance).",
-    )
-
-
-class RobustScaling(BaseModel):
-    """Robust scaling: :class:`sklearn.preprocessing.RobustScaler`.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        type: The scaling type discriminator (always ``"robust"``).
-        quantile_range: The ``(low, high)`` quantiles used by the scaler:
-            ``0 <= low < high <= 100``.
-        with_centering: Whether to center the data with the median before
-            scaling.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["robust"] = Field(
-        default="robust",
-        description=(
-            "The scaling type: RobustScaler (median centering and quantile "
-            "range; robust to outliers)."
-        ),
-    )
-    quantile_range: tuple[float, float] = Field(
-        default=(25.0, 75.0),
-        description=(
-            "The (low, high) quantiles of RobustScaler: 0 <= low < high <= 100."
-        ),
-    )
-    with_centering: bool = Field(
-        default=True,
-        description="Center the data with the median before scaling.",
-    )
-
-    @model_validator(mode="after")
-    def _validate_quantile_range(self) -> RobustScaling:
-        """Validate the quantile range bounds (``0 <= lo < hi <= 100``).
-
-        Returns:
-            The validated model instance.
-
-        Raises:
-            ValueError: If the quantile range is outside the [0, 100] bounds
-                or the bounds are not strictly increasing.
-        """
-        lo, hi = self.quantile_range
-        if not (0.0 <= lo < hi <= 100.0):
-            raise ValueError(
-                f"quantile_range must satisfy 0 <= low < high <= 100, got ({lo}, {hi})."
-            )
-        return self
-
-
-class QuantileScaling(BaseModel):
-    """Quantile scaling: :class:`sklearn.preprocessing.QuantileTransformer`.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        type: The scaling type discriminator (always ``"quantile"``).
-        output_distribution: The marginal distribution of the transformed
-            data: ``"uniform"`` or ``"normal"``.
-        n_quantiles: The number of quantiles to compute (``>= 10``).
-        subsample: The maximum number of samples used to estimate the
-            quantiles (``>= n_quantiles``).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["quantile"] = Field(
-        default="quantile",
-        description=(
-            "The scaling type: QuantileTransformer (non-parametric transform "
-            "to a uniform or normal distribution)."
-        ),
-    )
-    output_distribution: Literal["uniform", "normal"] = Field(
-        default="uniform",
-        description=(
-            "Marginal distribution of the transformed data: 'uniform' or 'normal'."
-        ),
-    )
-    n_quantiles: int = Field(
-        default=1000,
-        ge=10,
-        description="Number of quantiles to compute (>= 10).",
-    )
-    subsample: int = Field(
-        default=100_000,
-        ge=1,
-        description=(
-            "Maximum number of samples used to estimate the quantiles "
-            "for computational efficiency (>= n_quantiles). The value is "
-            "always forwarded to sklearn (the sklearn default is 10_000), "
-            "so the behavior is stable against upstream default changes."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _validate_subsample(self) -> QuantileScaling:
-        """Validate that ``subsample`` is not smaller than ``n_quantiles``.
-
-        Returns:
-            The validated model instance.
-
-        Raises:
-            ValueError: If ``subsample < n_quantiles`` (sklearn would reject
-                such a combination in ``fit`` with a ValueError; the
-                mismatch is reported at the config-validation stage).
-        """
-        if self.subsample < self.n_quantiles:
-            raise ValueError(
-                f"subsample ({self.subsample}) must be >= n_quantiles "
-                f"({self.n_quantiles})."
-            )
-        return self
-
-
-class NoScaling(BaseModel):
-    """No scaling: numeric features are passed to the model unscaled.
-
-    The spec is a frozen value object: parameters cannot be mutated after
-    creation, so module-level defaults stay safe to share.
-
-    Attributes:
-        type: The scaling type discriminator (always ``"none"``).
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    type: Literal["none"] = Field(
-        default="none",
-        description="The scaling type: no scaling is applied.",
-    )
-
-
-#: The object form of a scaling configuration: a union of the per-type
-#: models discriminated explicitly by the ``type`` field (``Tag`` +
-#: :class:`~pydantic.Discriminator`), so validation errors are precise
-#: (no cross-type union noise) and the scaler parameters are checked in the
-#: branch of their own type only.
-ObjectScalingSpec = Annotated[
-    Annotated[StandardScaling, Tag(_scaling_tag(StandardScaling))]
-    | Annotated[RobustScaling, Tag(_scaling_tag(RobustScaling))]
-    | Annotated[QuantileScaling, Tag(_scaling_tag(QuantileScaling))]
-    | Annotated[NoScaling, Tag(_scaling_tag(NoScaling))],
-    Discriminator(_discriminate_scaling_type),
-]
-
-#: String shorthand of a scaling type (e.g. ``"robust"``): accepted wherever
-#: a :class:`ScalingSpec` is expected, and rendered as a plain string
-#: (``enum``) alternative in the JSON schema. During validation the shorthand
-#: is normalized to its object form by :func:`_coerce_scaling_spec`, so this
-#: member effectively only documents/renders the schema alternative.
-StringScaling = Literal["standard", "robust", "quantile", "none"]
-
-ScalingSpec = Annotated[
-    ObjectScalingSpec | StringScaling,
-    BeforeValidator(_coerce_scaling_spec),
-    Field(
-        description=(
-            "Scaling of numeric features: a string shorthand "
-            "('standard' | 'robust' | 'quantile' | 'none') or an object "
-            "({'type': 'standard'} | {'type': 'robust', 'quantile_range': "
-            "[low, high], 'with_centering': bool} | {'type': 'quantile', "
-            "'output_distribution': 'uniform'|'normal', 'n_quantiles': int, "
-            "'subsample': int} | {'type': 'none'})."
-        ),
-    ),
-]
-
-#: Validated accessor for a single :class:`ScalingSpec` value (used by
-#: :func:`coerce_scaling` and the builder).
-_SCALING_SPEC_ADAPTER: TypeAdapter[ObjectScalingSpec] = TypeAdapter(ObjectScalingSpec)
-
-
-def coerce_scaling(spec: ScalingSpec) -> ObjectScalingSpec:
-    """Coerce a scaling specification into its object form.
-
-    Args:
-        spec: A :class:`ScalingSpec` member, a string shorthand
-            (``"standard"`` / ``"robust"`` / ``"quantile"`` / ``"none"``) or
-            an object-form dict.
-
-    Returns:
-        The object form of the scaling spec.
-
-    Raises:
-        ValueError: If the value is not a valid scaling spec (delegated to
-            Pydantic validation, a :class:`~pydantic.ValidationError`
-            subclass).
-    """
-    coerced: Any = _coerce_scaling_spec(spec)
-    if isinstance(
-        coerced, (StandardScaling, RobustScaling, QuantileScaling, NoScaling)
-    ):
-        return coerced
-    obj: ObjectScalingSpec = _SCALING_SPEC_ADAPTER.validate_python(coerced)
-    return obj
-
-
-def scaling_type(spec: ScalingSpec) -> ScalingType:
-    """The string type of a scaling spec (``'standard'`` / ``'robust'`` /
-    ``'quantile'`` / ``'none'``).
-
-    Args:
-        spec: A scaling specification in any accepted form.
-
-    Returns:
-        The scaling type string.
-    """
-    obj = coerce_scaling(spec)
-    result: ScalingType = obj.type
-    return result
 
 
 def log_tree_class_scaling_ineffective(
@@ -356,18 +51,9 @@ def log_tree_class_scaling_ineffective(
 ) -> None:
     """Log one INFO line when a tree-class preset applies a non-``none`` scaler.
 
-    The shared wording point used by both call sites that resolve a preset and
-    build a preprocessor (the trainer and the HPO trial pipeline), so the
-    message cannot drift between the trainer and HPO logs. A split-based model
-    is invariant to monotone per-feature transforms, so a user-forced scaler
-    does not change the splits — the line is purely informational. The line is
-    emitted under the caller's logger (every module logs under its own name);
-    no line is emitted for a ``none`` scaling or a non-``trees`` class.
-
     Args:
-        preset: The resolved preprocessing preset (with its algorithm class
-            and scaling spec).
-        logger: The logger of the calling module.
+        preset: The resolved preprocessing preset.
+        logger: The logger that receives the informational record.
     """
     if (
         preset.algorithm_class == AlgorithmClass.TREES
@@ -379,193 +65,6 @@ def log_tree_class_scaling_ineffective(
             "per-feature transforms.",
             scaling_type(preset.scaling),
         )
-
-
-# Outlier-handling specs: the definitions live in
-# :mod:`configurable_automl_engine.outliers_presets` (the module keeps
-# ``preprocessing_presets`` within the structural line limit), and the names
-# are re-exported here, so the public import path stays the same. The import
-# sits mid-file on purpose: moving it to the top would create an import
-# cycle (outliers_presets -> preprocessing package -> builder ->
-# preprocessing_presets). If the E402 rule is ever enabled in ruff, this
-# import needs a per-line noqa.
-from configurable_automl_engine.outliers_presets import (
-    NO_OUTLIERS,
-    IqrOutliers,
-    NoOutliers,
-    ObjectOutlierSpec,
-    OutlierSpec,
-    QuantileOutliers,
-    StringOutlierSpec,
-    coerce_outliers,
-    format_outliers,
-)
-
-__all__ = [
-    "NO_OUTLIERS",
-    "IqrOutliers",
-    "NoOutliers",
-    "ObjectOutlierSpec",
-    "OutlierSpec",
-    "QuantileOutliers",
-    "StringOutlierSpec",
-    "coerce_outliers",
-    "format_outliers",
-]
-
-
-class AlgorithmClass(str, Enum):
-    """Classes of regression algorithms with common preprocessing requirements.
-
-    Attributes:
-        SCALE_SENSITIVE: Scale-sensitive models (linear, kernel-based,
-            distance-based) — scaling is mandatory, missing values are filled
-            with the standard strategy.
-        TREES: Trees and tree ensembles — scaling is not required and should
-            not be applied; missing value imputation is robust to outliers.
-        GLM_SKEWED: Generalized linear models with skewed distributions —
-            missing value imputation that accounts for data skewness; special
-            scaling requirements.
-        UNIVARIATE: Specialized univariate algorithms — non-standard
-            preprocessing (no scaling).
-        DEFAULT: Default behavior for algorithms without explicit registration.
-    """
-
-    SCALE_SENSITIVE = "scale_sensitive"
-    TREES = "trees"
-    GLM_SKEWED = "glm_skewed"
-    UNIVARIATE = "univariate"
-    DEFAULT = "default"
-
-
-class PreprocessingPreset(BaseModel):
-    """A declaratively described feature preprocessing preset.
-
-    Attributes:
-        algorithm_class: The algorithm class for which the preset is defined.
-        imputation_strategy: The missing value imputation strategy for numeric
-            features: ``'mean'`` (standard) or ``'median'``
-            (robust to outliers, accounts for skewness).
-        scaling: The scaling configuration of numeric features (a
-            :class:`ScalingSpec`: ``StandardScaling``, ``RobustScaling`` with
-            its ``quantile_range``/``with_centering`` parameters,
-            ``QuantileScaling`` with its ``output_distribution``/
-            ``n_quantiles``/``subsample`` parameters, or ``NoScaling``).
-        description: A human-readable description of the preset.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    algorithm_class: AlgorithmClass = Field(
-        default=AlgorithmClass.DEFAULT,
-        description="The algorithm class for which the preset is defined.",
-    )
-    imputation_strategy: ImputationStrategy = Field(
-        default="mean",
-        description=(
-            "Missing value imputation strategy for numeric features: "
-            "'mean' or 'median'."
-        ),
-    )
-    scaling: ScalingSpec = Field(
-        default_factory=StandardScaling,
-        description=(
-            "Scaling of numeric features: a string shorthand "
-            "('standard', 'robust', 'quantile' or 'none') or an object "
-            "({'type': 'robust', 'quantile_range': [low, high], ...}). "
-            "The shorthand is normalized to its object form."
-        ),
-    )
-    outliers: OutlierSpec = Field(
-        default=NO_OUTLIERS,
-        description=(
-            "Outlier handling for numeric features: a string shorthand "
-            "('none', 'quantile' or 'iqr') or an object "
-            "({'method': 'quantile', 'lower_quantile': float, "
-            "'upper_quantile': float} | {'method': 'iqr', "
-            "'iqr_multiplier': float}). The shorthand is normalized to its "
-            "object form."
-        ),
-    )
-    description: str = Field(
-        default="",
-        description="A human-readable description of the preset.",
-    )
-
-    def __str__(self) -> str:
-        """Compact string for logging the selected preset."""
-        return (
-            f"PreprocessingPreset(class={self.algorithm_class.value!r}, "
-            f"imputation_strategy={self.imputation_strategy!r}, "
-            f"scaling={_format_scaling(self.scaling)}, "
-            f"outliers={format_outliers(self.outliers)})"
-        )
-
-    __repr__ = __str__
-
-
-def _format_scaling(spec: ScalingSpec) -> str:
-    """Format a scaling spec for the preset's log string.
-
-    Args:
-        spec: A scaling specification in any accepted form.
-
-    Returns:
-        ``'standard'`` / ``'none'`` as-is; for a robust spec the parameters
-        are shown, e.g. ``robust(q=(10.0, 90.0))`` (a non-default
-        ``with_centering=False`` is appended as ``, centering=False``); for
-        a quantile spec the parameters are shown, e.g.
-        ``quantile(dist=normal, n=1000)``.
-    """
-    obj = coerce_scaling(spec)
-    if obj.type == "robust":
-        text = f"robust(q={obj.quantile_range})"
-        if not obj.with_centering:
-            text += ", centering=False"
-        return text
-    if obj.type == "quantile":
-        text = f"quantile(dist={obj.output_distribution}, n={obj.n_quantiles})"
-        if obj.subsample != QuantileScaling.model_fields["subsample"].default:
-            text += f", subsample={obj.subsample}"
-        return text
-    return repr(obj.type)
-
-
-class PreprocessingOverride(BaseModel):
-    """An explicit user override of the preprocessing preset.
-
-    It may be specified partially or fully: ``None`` in a field means "keep the
-    automatically selected value". Invalid values are rejected at the config
-    validation stage (Pydantic) with a clear message.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    imputation_strategy: ImputationStrategy | None = Field(
-        default=None,
-        description=(
-            "Override of the missing value imputation strategy "
-            "('mean' or 'median'). None — automatic selection."
-        ),
-    )
-    scaling: ScalingSpec | None = Field(
-        default=None,
-        description=(
-            "Scaling override: a string shorthand ('standard', 'robust', "
-            "'quantile' or 'none'), an object ({'type': 'robust', "
-            "'quantile_range': [low, high], ...}) or None (automatic "
-            "selection). The shorthand is normalized to its object form."
-        ),
-    )
-    outliers: OutlierSpec | None = Field(
-        default=None,
-        description=(
-            "Outlier handling override: a string shorthand ('none', "
-            "'quantile' or 'iqr'), an object ({'method': 'quantile', ...} | "
-            "{'method': 'iqr', ...}) or None (automatic selection). The "
-            "shorthand is normalized to its object form."
-        ),
-    )
 
 
 #: Mapping table "algorithm -> algorithm class".
@@ -655,18 +154,6 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
 }
 
 
-def normalize_algorithm(algorithm: str) -> str:
-    """Normalize an algorithm name: lowercased.
-
-    Args:
-        algorithm: An algorithm name (e.g. ``'Random_Forest'``).
-
-    Returns:
-        The canonical algorithm name used for lookup in the mapping table.
-    """
-    return resolve_algorithm_name(algorithm)
-
-
 def _coerce_override(
     override: PreprocessingOverride | dict[str, Any],
 ) -> PreprocessingOverride:
@@ -681,50 +168,16 @@ def _coerce_override(
     )
 
 
-def merge_preprocessing_overrides(
-    default: PreprocessingOverride | dict[str, Any] | None,
-    specific: PreprocessingOverride | dict[str, Any] | None,
-) -> PreprocessingOverride:
-    """Merge two preprocessing overrides into one ("default" + "specific").
-
-    The public merge point used by the training engine: the run-level
-    ``general.preprocessing`` block (``default``) and the per-algorithm
-    ``algorithms.<name>.preprocessing`` block (``specific``) are merged into
-    a single override before it is handed to ``ModelTrainer`` /
-    ``tuner.optimize`` (which keep their single ``preprocessing_override``
-    argument). Field-wise semantics: a field set at the more specific level
-    replaces the whole field of the default level; a field left as ``None``
-    falls through to the default level. Nested values are never merged —
-    the model only has flat scalar fields.
+def normalize_algorithm(algorithm: str) -> str:
+    """Normalize an algorithm name: lowercased.
 
     Args:
-        default: The run-level (general) override. ``None`` — no default.
-        specific: The algorithm-level override. ``None`` — no specific
-            override (the result is then just the coerced default).
+        algorithm: An algorithm name (e.g. ``'Random_Forest'``).
 
     Returns:
-        PreprocessingOverride: The merged override (a new model instance;
-            the inputs are not mutated).
-
-    Raises:
-        TypeError: If an argument has an unsupported type.
+        The canonical algorithm name used for lookup in the mapping table.
     """
-    default_model = (
-        _coerce_override(default) if default is not None else PreprocessingOverride()
-    )
-    if specific is None:
-        return default_model
-    specific_model = _coerce_override(specific)
-    update: dict[str, Any] = {}
-    if specific_model.imputation_strategy is not None:
-        update["imputation_strategy"] = specific_model.imputation_strategy
-    if specific_model.scaling is not None:
-        update["scaling"] = specific_model.scaling
-    if specific_model.outliers is not None:
-        update["outliers"] = specific_model.outliers
-    if not update:
-        return default_model
-    return default_model.model_copy(update=update)
+    return resolve_algorithm_name(algorithm)
 
 
 def resolve_preprocessing_preset(
@@ -834,3 +287,37 @@ def requires_missing_indicator(algorithm: str) -> bool:
         resolve_preprocessing_preset(algorithm).algorithm_class
         != AlgorithmClass.UNIVARIATE
     )
+
+
+__all__ = [
+    "ALGORITHM_CLASS_MAPPING",
+    "NO_OUTLIERS",
+    "PRESET_BY_CLASS",
+    "AlgorithmClass",
+    "ImputationStrategy",
+    "IqrOutliers",
+    "NoOutliers",
+    "NoScaling",
+    "ObjectOutlierSpec",
+    "ObjectScalingSpec",
+    "OutlierSpec",
+    "PreprocessingOverride",
+    "PreprocessingPreset",
+    "QuantileOutliers",
+    "QuantileScaling",
+    "RobustScaling",
+    "ScalingSpec",
+    "ScalingType",
+    "StandardScaling",
+    "StringOutlierSpec",
+    "StringScaling",
+    "coerce_outliers",
+    "coerce_scaling",
+    "format_outliers",
+    "log_tree_class_scaling_ineffective",
+    "merge_preprocessing_overrides",
+    "normalize_algorithm",
+    "requires_missing_indicator",
+    "resolve_preprocessing_preset",
+    "scaling_type",
+]

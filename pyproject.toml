@@ -1,203 +1,213 @@
-    [build-system]
-    requires = ["setuptools>=64","setuptools-scm>=8", "wheel"]
-    build-backend = "setuptools.build_meta"
+[build-system]
+requires = ["setuptools>=64","setuptools-scm>=8", "wheel"]
+build-backend = "setuptools.build_meta"
 
-    [project]
-    name = "configurable-automl-engine"              # PyPI name (may differ from the module name)
-    dynamic = ["version"]
-    description = "A configuration-driven AutoML orchestrator for tabular regression: automated model selection and multi-step hyperparameter optimization."
-    readme = "README.md"
-    license = "BSD-3-Clause"
-    authors = [
-    { name = "Leonid Lapshin", email = "leonid.lapshin.a@gmail.com" }
-    ]
-    requires-python = ">=3.11"
-    dependencies = [
-        "numpy>=2.4.2",
-        "pandas>=3.0.0",
-        "imbalanced-learn>=0.14.1",
-        "scikit-learn>=1.8.0",
-        "joblib>=1.5.3",
-        "pyyaml>=6.0.3",
-        "scipy>=1.17.0",
-        "optuna>=4.7.0",
-        "pydantic>=2.12.5",
-        "pyarrow>=23.0.0",
-    ]
-    classifiers = [
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
-        "Programming Language :: Python :: 3.14",
-        "Operating System :: OS Independent",
-        "Typing :: Typed",
-        "Intended Audience :: Science/Research",
-        "Intended Audience :: Developers",
-        "Development Status :: 4 - Beta",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Software Development :: Libraries :: Python Modules",
-    ]
-    keywords = [ 
-        "machine-learning", 
-        "data-science", 
-        "data-analysis"
-    ]
+[project]
+name = "configurable-automl-engine"              # PyPI name (may differ from the module name)
+dynamic = ["version"]
+description = "A configuration-driven AutoML orchestrator for tabular regression: automated model selection and multi-step hyperparameter optimization."
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [
+{ name = "Leonid Lapshin", email = "leonid.lapshin.a@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.2",
+    "pandas>=3.0.0",
+    "imbalanced-learn>=0.14.1",
+    "scikit-learn>=1.8.0",
+    "joblib>=1.5.3",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.0",
+    "optuna>=4.7.0",
+    "pydantic>=2.12.5",
+    "pyarrow>=23.0.0",
+    "automl-contracts>=0.1.0,<0.2.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = [
+    "machine-learning",
+    "data-science",
+    "data-analysis"
+]
 
-    [project.optional-dependencies]
+[project.optional-dependencies]
 
-    xgboost = ["xgboost>=3.1.3"]
+xgboost = ["xgboost>=3.1.3"]
 
-    logging = ["concurrent-log-handler>=0.9.25"]
+logging = ["concurrent-log-handler>=0.9.25"]
 
-    mlflow = ["mlflow>=2.0.0"]
+mlflow = ["mlflow>=2.0.0"]
 
-    shap = ["shap>=0.48.0"]
+shap = ["shap>=0.48.0"]
 
-    test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15"]
+test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15"]
 
-    all = ["configurable-automl-engine[xgboost,logging,mlflow,shap]"]
+all = ["configurable-automl-engine[xgboost,logging,mlflow,shap]"]
 
-    dev = ["configurable-automl-engine[all,test]"]
+dev = ["configurable-automl-engine[all,test]"]
 
-    [project.urls]
-    Homepage = "https://github.com/LapshinLeonid/configurable_automl_engine"
-    Issues = "https://github.com/LapshinLeonid/configurable_automl_engine/issues"
+[project.urls]
+Homepage = "https://github.com/LapshinLeonid/configurable_automl_engine"
+Issues = "https://github.com/LapshinLeonid/configurable_automl_engine/issues"
 
-    [tool.setuptools_scm]
-    local_scheme = "no-local-version"
-    write_to = "src/configurable_automl_engine/_version.py"
+[tool.setuptools]
+package-dir = {"" = "src"}
 
-    [tool.setuptools.package-data]
-    configurable_automl_engine = ["py.typed"]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["configurable_automl_engine*"]
 
-    [tool.ruff]
-    line-length = 88
-    target-version = "py311"
-    extend-exclude = ["src/configurable_automl_engine/_version.py"]
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
+write_to = "src/configurable_automl_engine/_version.py"
+tag_regex = "^v(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 
-    [tool.ruff.lint]
-    extend-select = ["C901"]
+[tool.setuptools.package-data]
+configurable_automl_engine = ["py.typed"]
 
-    [tool.ruff.lint.mccabe]
-    max-complexity = 15
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+extend-exclude = ["src/configurable_automl_engine/_version.py"]
 
-    [tool.ruff.format]
-    quote-style = "double"
-    indent-style = "space"
-    line-ending = "auto"
+[tool.ruff.lint]
+extend-select = ["C901"]
 
-    [tool.mypy]
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
-    [[tool.mypy.overrides]]
-    module = [
-        "sklearn.*",
-        "joblib.*",
-        "imblearn",
-        "imblearn.*",
-        "concurrent_log_handler.*",
-    ]
-    ignore_missing_imports = true
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
 
-    [tool.importlinter]
-    root_package = "configurable_automl_engine"
-    exclude_type_checking_imports = false
+[tool.mypy]
 
-    [[tool.importlinter.contracts]]
-    id = "layers"
-    name = "Layers: training_engine -> engines -> building blocks -> common"
-    type = "layers"
-    containers = ["configurable_automl_engine"]
-    # Every module of the package must be assigned to a layer.
-    exhaustive = true
-    ignore_imports = [
-        # The object facade (AutoMLExperiment) sits in the experiment
-        # package but orchestrates the training engine: the facade module
-        # imports the engine lazily inside run() and _adopt_result() (a
-        # permitted exception).
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.trainer",
-        # The explainability component explains the winner's ModelTrainer
-        # pipeline: it consumes the trainer from the experiment package
-        # (both are building blocks; the trainer imports nothing back).
-        "configurable_automl_engine.experiment.explain -> configurable_automl_engine.trainer",
-    ]
-    layers = [
-        # 3 — orchestration
-        "training_engine",
-        # 2 — engines
-        "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_quick : trainer_scoring : trainer_state",
-        # 1 — ML building blocks
-        "models : outliers_presets : preprocessing_presets : preprocessing : oversampling : validation : feature_selection : isotonic : experiment",
-        # 0 — shared utilities
-        "common",
-        # Generated by setuptools-scm at install time.
-        "(_version)",
-    ]
+[[tool.mypy.overrides]]
+module = [
+    "sklearn.*",
+    "joblib.*",
+    "imblearn",
+    "imblearn.*",
+    "concurrent_log_handler.*",
+]
+ignore_missing_imports = true
 
-    [[tool.importlinter.contracts]]
-    id = "hpo-independent-of-trainer"
-    name = "HPO does not import the trainer modules"
-    type = "forbidden"
-    source_modules = ["configurable_automl_engine.hpo"]
-    forbidden_modules = [
-        "configurable_automl_engine.trainer",
-        "configurable_automl_engine.trainer_artifact",
-        "configurable_automl_engine.trainer_data",
-        "configurable_automl_engine.trainer_feature_selection",
-        "configurable_automl_engine.trainer_params",
-        "configurable_automl_engine.trainer_quick",
-        "configurable_automl_engine.trainer_scoring",
-        "configurable_automl_engine.trainer_state",
-    ]
+[tool.importlinter]
+root_package = "configurable_automl_engine"
+exclude_type_checking_imports = false
 
-    [[tool.importlinter.contracts]]
-    id = "trainer-independent-of-hpo"
-    name = "The trainer modules do not import HPO"
-    type = "forbidden"
-    source_modules = [
-        "configurable_automl_engine.trainer",
-        "configurable_automl_engine.trainer_artifact",
-        "configurable_automl_engine.trainer_data",
-        "configurable_automl_engine.trainer_feature_selection",
-        "configurable_automl_engine.trainer_params",
-        "configurable_automl_engine.trainer_quick",
-        "configurable_automl_engine.trainer_scoring",
-        "configurable_automl_engine.trainer_state",
-    ]
-    forbidden_modules = [
-        "configurable_automl_engine.hpo",
-        "configurable_automl_engine.tuner",
-    ]
+[[tool.importlinter.contracts]]
+id = "layers"
+name = "Layers: training_engine -> engines -> building blocks -> common"
+type = "layers"
+containers = ["configurable_automl_engine"]
+# Every module of the package must be assigned to a layer.
+exhaustive = true
+ignore_imports = [
+    # The object facade (AutoMLExperiment) sits in the experiment
+    # package but orchestrates the training engine: the facade module
+    # imports the engine lazily inside run() and _adopt_result() (a
+    # permitted exception).
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.trainer",
+    # The explainability component explains the winner's ModelTrainer
+    # pipeline: it consumes the trainer from the experiment package
+    # (both are building blocks; the trainer imports nothing back).
+    "configurable_automl_engine.experiment.explain -> configurable_automl_engine.trainer",
+]
+layers = [
+    # 3 — orchestration
+    "training_engine",
+    # 2 — engines
+    "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_quick : trainer_scoring : trainer_state",
+    # 1 — ML building blocks
+    "models : outliers_presets : preprocessing_presets : preprocessing : oversampling : validation : feature_selection : isotonic : experiment",
+    # 0 — shared utilities
+    "common",
+    # Generated by setuptools-scm at install time.
+    "(_version)",
+]
 
-    [[tool.importlinter.contracts]]
-    id = "acyclic"
-    name = "No import cycles between sibling modules"
-    type = "acyclic_siblings"
-    ancestors = ["configurable_automl_engine"]
-    # The object facade (experiment.experiment) orchestrates the training
-    # engine via lazy imports inside run(); the engine imports only the
-    # data models of the experiment package (result/store/leaderboard/
-    # reporting), never the facade — the acyclic-siblings view of the two
-    # package siblings ignores the one-directional facade plumbing. The
-    # common.metrics -> common.bbc_cv import is the same one-directional
-    # plumbing: metrics re-exports the BBC-CV names defined in bbc_cv (the
-    # module was split out of metrics.py by the structural line limit), and
-    # bbc_cv imports the metric helpers from metrics — without the ignore
-    # the shared sibling view would report a cycle.
-    ignore_imports = [
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
-        "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
-        "configurable_automl_engine.common.metrics -> configurable_automl_engine.common.bbc_cv",
-    ]
+[[tool.importlinter.contracts]]
+id = "hpo-independent-of-trainer"
+name = "HPO does not import the trainer modules"
+type = "forbidden"
+source_modules = ["configurable_automl_engine.hpo"]
+forbidden_modules = [
+    "configurable_automl_engine.trainer",
+    "configurable_automl_engine.trainer_artifact",
+    "configurable_automl_engine.trainer_data",
+    "configurable_automl_engine.trainer_feature_selection",
+    "configurable_automl_engine.trainer_params",
+    "configurable_automl_engine.trainer_quick",
+    "configurable_automl_engine.trainer_scoring",
+    "configurable_automl_engine.trainer_state",
+]
 
-    [tool.pytest.ini_options]
-    filterwarnings = [
-        # Model fields accessed via __fields__ / model_fields on an instance are deprecated:
-        # __fields__ — PydanticDeprecatedSince20, instance-model_fields —
-        # PydanticDeprecatedSince211
-        "error::pydantic.warnings.PydanticDeprecatedSince20",
-        "error::pydantic.warnings.PydanticDeprecatedSince211",
-    ]
+[[tool.importlinter.contracts]]
+id = "trainer-independent-of-hpo"
+name = "The trainer modules do not import HPO"
+type = "forbidden"
+source_modules = [
+    "configurable_automl_engine.trainer",
+    "configurable_automl_engine.trainer_artifact",
+    "configurable_automl_engine.trainer_data",
+    "configurable_automl_engine.trainer_feature_selection",
+    "configurable_automl_engine.trainer_params",
+    "configurable_automl_engine.trainer_quick",
+    "configurable_automl_engine.trainer_scoring",
+    "configurable_automl_engine.trainer_state",
+]
+forbidden_modules = [
+    "configurable_automl_engine.hpo",
+    "configurable_automl_engine.tuner",
+]
+
+[[tool.importlinter.contracts]]
+id = "acyclic"
+name = "No import cycles between sibling modules"
+type = "acyclic_siblings"
+ancestors = ["configurable_automl_engine"]
+# The object facade (experiment.experiment) orchestrates the training
+# engine via lazy imports inside run(); the engine imports only the
+# data models of the experiment package (result/store/leaderboard/
+# reporting), never the facade — the acyclic-siblings view of the two
+# package siblings ignores the one-directional facade plumbing. The
+# common.metrics -> common.bbc_cv import is the same one-directional
+# plumbing: metrics re-exports the BBC-CV names defined in bbc_cv (the
+# module was split out of metrics.py by the structural line limit), and
+# bbc_cv imports the metric helpers from metrics — without the ignore
+# the shared sibling view would report a cycle.
+ignore_imports = [
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+    "configurable_automl_engine.common.metrics -> configurable_automl_engine.common.bbc_cv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # Model fields accessed via __fields__ / model_fields on an instance are deprecated:
+    # __fields__ — PydanticDeprecatedSince20, instance-model_fields —
+    # PydanticDeprecatedSince211
+    "error::pydantic.warnings.PydanticDeprecatedSince20",
+    "error::pydantic.warnings.PydanticDeprecatedSince211",
+]

@@ -47,6 +47,9 @@ from configurable_automl_engine.training_engine.config_parser import (
     ValidationStrategy,
     read_config,
 )
+from configurable_automl_engine.training_engine.config_runtime import (
+    validate_runtime_config,
+)
 from configurable_automl_engine.validation import make_cv
 
 from .state import PreparedData
@@ -107,14 +110,14 @@ def load_config(
     # If a string or Path is passed, read the file.
     # If a Config object or dict is passed, process it.
     if isinstance(config, Config):
-        cfg = config
+        cfg = validate_runtime_config(config)
     elif isinstance(config, dict):
         _LOG.debug("CONFIG TYPE: %s", type(config))
         _LOG.debug(
             "ALGORITHMS: %s",
             (config.get("algorithms") if isinstance(config, dict) else "N/A"),
         )
-        cfg = Config.model_validate(config)
+        cfg = validate_runtime_config(Config.model_validate(config))
     elif isinstance(config, (str, Path)):
         cfg = read_config(config)
     else:

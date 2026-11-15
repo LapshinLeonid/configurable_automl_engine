@@ -28,6 +28,9 @@ from configurable_automl_engine.hpo.default_spaces import (
     resolve_implicit_range_type,
 )
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.config_runtime import (
+    validate_runtime_config,
+)
 from configurable_automl_engine.tuner import optimize
 from configurable_automl_engine.hpo.plans import PreprocessingPlan, SearchSpacePlan
 from configurable_automl_engine.hpo.search_space import (
@@ -60,7 +63,7 @@ def _config(algo_name: str, hyperparameters: dict) -> Config:
     cfg_data = BASE | {
         "algorithms": {algo_name: {"enable": True, "hyperparameters": hyperparameters}}
     }
-    return Config.model_validate(cfg_data)
+    return validate_runtime_config(Config.model_validate(cfg_data))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -988,7 +991,7 @@ def test_dump_reload_round_trip_explicit_int_preserved():
     """
     cfg = _config("ridge", {"alpha": [1, 50, "int"]})
     dumped = cfg.model_dump(mode="json")
-    cfg_reloaded = Config.model_validate(dumped)
+    cfg_reloaded = validate_runtime_config(Config.model_validate(dumped))
     entry = cfg_reloaded.algorithms.ridge.hyperparameters["alpha"]
     assert entry.dist_type == "int"
     assert isinstance(entry.config, IntSpace)
@@ -999,7 +1002,7 @@ def test_dump_reload_round_trip_explicit_float_log_preserved():
     """An explicit float_log range survives the dump → reload round trip."""
     cfg = _config("ridge", {"alpha": [1e-2, 50.0, "float_log"]})
     dumped = cfg.model_dump(mode="json")
-    cfg_reloaded = Config.model_validate(dumped)
+    cfg_reloaded = validate_runtime_config(Config.model_validate(dumped))
     entry = cfg_reloaded.algorithms.ridge.hyperparameters["alpha"]
     assert entry.dist_type == "float_log"
     assert entry.explicit_type is True
@@ -1014,7 +1017,7 @@ def test_dump_reload_round_trip_inferred_still_retyped():
     cfg = _config("svr", {"C": [1, 50]})
     assert cfg.algorithms.svr.hyperparameters["C"].dist_type == "float_log"
     dumped = cfg.model_dump(mode="json")
-    cfg_reloaded = Config.model_validate(dumped)
+    cfg_reloaded = validate_runtime_config(Config.model_validate(dumped))
     entry = cfg_reloaded.algorithms.svr.hyperparameters["C"]
     assert entry.dist_type == "float_log"
     assert entry.explicit_type is False
@@ -1025,7 +1028,7 @@ def test_dump_reload_round_trip_inferred_ard_float_log_preserved():
     cfg = _config("ardregression", {"alpha_1": [1e-6, 0.1]})
     assert cfg.algorithms.ardregression.hyperparameters["alpha_1"].dist_type == "float_log"
     dumped = cfg.model_dump(mode="json")
-    cfg_reloaded = Config.model_validate(dumped)
+    cfg_reloaded = validate_runtime_config(Config.model_validate(dumped))
     entry = cfg_reloaded.algorithms.ardregression.hyperparameters["alpha_1"]
     assert entry.dist_type == "float_log"
     assert entry.explicit_type is False
@@ -1035,7 +1038,7 @@ def test_dump_reload_round_trip_dict_form_int_preserved():
     """A dict-form entry survives the dump → reload round trip as int."""
     cfg = _config("ridge", {"alpha": {"config": {"type": "int", "low": 1, "high": 50}}})
     dumped = cfg.model_dump(mode="json")
-    cfg_reloaded = Config.model_validate(dumped)
+    cfg_reloaded = validate_runtime_config(Config.model_validate(dumped))
     entry = cfg_reloaded.algorithms.ridge.hyperparameters["alpha"]
     assert entry.dist_type == "int"
     assert entry.explicit_type is True

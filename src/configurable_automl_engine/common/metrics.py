@@ -39,6 +39,13 @@ from functools import lru_cache
 from typing import Any, Literal, cast
 
 import numpy as np
+from automl_contracts.custom_metrics import ERR_CUSTOM_NAME_INVALID
+from automl_contracts.metrics import (
+    ALIAS_TO_SKLEARN,
+    AVAILABLE_METRICS,
+    BUILTIN_METRIC_DIRECTIONS,
+    to_sklearn_name,
+)
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import get_scorer as sklearn_get_scorer
 from sklearn.metrics import (
@@ -54,7 +61,9 @@ from configurable_automl_engine.common.custom_metrics import (
     build_custom_scorer,
     custom_metric_function,
     lookup_custom_metric,
+    natural_greater_is_better,
     register_custom_metric,
+    validate_custom_metric_spec,
 )
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.sklearn_compat import (
@@ -448,8 +457,6 @@ _SCORER_OBJECTS: dict[str, tuple[Callable[..., Any], bool]] = {
     "r2": (make_scorer(r2_score, greater_is_better=True), True),
 }
 
-AVAILABLE_METRICS = list(_SCORER_OBJECTS.keys())
-
 
 # --------------------------------------------------------------------------- #
 #  Public helpers — may be useful externally
@@ -548,7 +555,7 @@ def is_greater_better(name: str) -> bool:
     """
     custom = lookup_custom_metric(name)
     if custom is not None:
-        return custom.natural_greater_is_better
+        return natural_greater_is_better(custom)
     lname = name.lower()
     # 1. Explicit direction from the private registry — no cache.
     if lname in _SCORER_OBJECTS:
@@ -721,37 +728,11 @@ def get_scorer_object(
 
 
 # --------------------------------------------------------------------------- #
-#  Mapping user aliases to what sklearn understands
-# --------------------------------------------------------------------------- #
-_ALIAS_TO_SKLEARN = {
-    # since sklearn optimizes "the higher — the better",
-    # nrmse is registered directly
-    "rmse": "neg_root_mean_squared_error",
-}
-
-
-def to_sklearn_name(name: str) -> str:
-    """Map a user metric alias to the system sklearn name.
-    Conversion logic:
-    1. The name is lowercased.
-    2. A lookup is performed in the `_ALIAS_TO_SKLEARN` dict
-    (e.g. 'rmse' -> 'neg_root_mean_squared_error').
-    3. If the alias is not found, the original lowercased name is returned.
-    Args:
-        name: User-facing metric name.
-    Returns:
-        str: A metric name recognized by sklearn internals.
-    """
-    return _ALIAS_TO_SKLEARN.get(name.lower(), name.lower())
-
-
-# --------------------------------------------------------------------------- #
 #  Custom metrics declared by a dotted import path
 # --------------------------------------------------------------------------- #
 #: A custom metric name: lowercase letters, digits and underscores.
 _CUSTOM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
-ERR_CUSTOM_NAME_INVALID = "custom_metric_invalid_name"
 ERR_CUSTOM_NAME_COLLISION = "custom_metric_name_collision"
 
 
@@ -767,8 +748,8 @@ def reserved_metric_names() -> frozenset[str]:
         {
             *_SCORER_OBJECTS,
             *_METRICS,
-            *_ALIAS_TO_SKLEARN,
-            *_ALIAS_TO_SKLEARN.values(),
+            *ALIAS_TO_SKLEARN,
+            *ALIAS_TO_SKLEARN.values(),
             "global_nrmse",
             *get_scorer_names(),
         }
@@ -823,11 +804,19 @@ def validate_custom_metrics(
     result: dict[str, CustomMetricSpec] = {}
     for name, raw in custom_metrics.items():
         check_custom_metric_name(name)
-        result[name] = (
+        spec = (
             raw
             if isinstance(raw, CustomMetricSpec)
             else CustomMetricSpec.model_validate(raw)
         )
+        try:
+            result[name] = validate_custom_metric_spec(spec)
+        except PydanticCustomError as err:
+            raise PydanticCustomError(
+                err.type,
+                f"general.custom_metrics.{name}: {err.message()}",
+                err.context,
+            ) from err
     return result
 
 
@@ -860,7 +849,10 @@ from configurable_automl_engine.common.bbc_cv import (
 )
 
 __all__ = [
+    "AVAILABLE_METRICS",
     "BBC_MAX_OOF_CELLS",
     "BBC_N_BOOTSTRAP",
+    "BUILTIN_METRIC_DIRECTIONS",
     "bbc_cv_score",
+    "to_sklearn_name",
 ]

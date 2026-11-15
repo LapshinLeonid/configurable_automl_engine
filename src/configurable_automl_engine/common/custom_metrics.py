@@ -1,20 +1,9 @@
-"""User-defined metrics and scorers loaded by a dotted import path.
+"""Runtime support for user-defined metrics and scorers.
 
-``CustomMetricSpec`` is the declaration of one custom metric (the
-``general.custom_metrics.<name>`` config entry): the import path of the
-callable, its calling convention (``kind``), its natural direction and its
-additivity. Validating a spec imports the callable and checks its signature,
-so a broken declaration fails before training starts.
-
-A spec holds data only: it is pickled into the worker processes and into the
-saved artifact without the callable, and every process imports the callable
-again from ``path`` on first use (``build_custom_scorer``, cached per
-process). ``register_custom_metric`` / ``lookup_custom_metric`` keep the
-process-local name → spec registry that ``common.metrics`` consults before
-the built-in metrics; the engine entry points register the specs they
-receive, so the registry is rebuilt in every worker process.
-
-The module must not import any other module of the package.
+The structural declaration (:class:`CustomMetricSpec`) and its kind live in
+:mod:`automl_contracts.custom_metrics`. This module imports the callable by its
+dotted path, validates its signature and direction, builds scorer objects and
+keeps the process-local name registry used by the metric helpers.
 """
 
 from __future__ import annotations
@@ -22,13 +11,16 @@ from __future__ import annotations
 import copy
 import importlib
 import inspect
-import json
 import logging
 import threading
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from automl_contracts.custom_metrics import (
+    ERR_CUSTOM_NAME_INVALID,
+    CustomMetricKind,
+    CustomMetricSpec,
+)
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import make_scorer
 
@@ -40,18 +32,17 @@ from configurable_automl_engine.common.sklearn_compat import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ERR_CUSTOM_NAME_INVALID",
     "CustomMetricKind",
     "CustomMetricSpec",
     "build_custom_scorer",
     "custom_metric_function",
     "lookup_custom_metric",
+    "natural_greater_is_better",
     "register_custom_metric",
     "resolve_dotted_path",
+    "validate_custom_metric_spec",
 ]
-
-#: ``"metric"`` — a function ``(y_true, y_pred, **kwargs) -> float``;
-#: ``"scorer"`` — an sklearn scorer ``(estimator, X, y) -> float``.
-CustomMetricKind = Literal["metric", "scorer"]
 
 ERR_IMPORT = "custom_metric_import_error"
 ERR_NOT_CALLABLE = "custom_metric_not_callable"
@@ -128,172 +119,132 @@ def _check_positional_arity(fn: Any, n_args: int, kwargs: dict[str, Any]) -> str
     return None
 
 
-class CustomMetricSpec(BaseModel):
-    """The declaration of one custom metric or scorer.
+def validate_custom_metric_spec(spec: CustomMetricSpec) -> CustomMetricSpec:
+    """Validate the callable referenced by ``spec`` and return the spec.
 
-    Validation imports the callable named by ``path`` and checks that it is
-    callable, that its signature accepts the calling convention of ``kind``
-    (plus ``kwargs``) and that the direction is known.
+    The structural contract model deliberately does not import user code.
+    The engine performs the import, callability, signature, direction and
+    keyword-argument checks at every public entry point.
 
-    Attributes:
-        path: Dotted import path of the callable (``"pkg.mod:attr"`` or
-            ``"pkg.mod.attr"``).
-        kind: ``"metric"`` — ``fn(y_true, y_pred, **kwargs) -> float``
-            returning the natural metric value; ``"scorer"`` — an sklearn
-            scorer ``scorer(estimator, X, y) -> float``.
-        greater_is_better: The natural direction of the returned value.
-            Required for ``kind="metric"``. For a ``make_scorer`` scorer the
-            direction is taken from the scorer (an explicit value must agree
-            with it); a plain callable scorer defaults to ``True``.
-        additive: ``True`` — the CV estimate is the mean of the per-fold
-            values (valid for per-sample means such as MAE); ``False`` — the
-            value over the pooled out-of-fold vector (always correct).
-        kwargs: Static keyword arguments of the metric function (for a
-            ``make_scorer`` scorer they are merged into its kwargs).
+    Raises:
+        PydanticCustomError: A stable ``ERR_*`` code describing the first
+            failed check.
     """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    path: str = Field(
-        ...,
-        min_length=1,
-        description=(
-            "Dotted import path of the callable: 'package.module:attribute' "
-            "(preferred) or 'package.module.attribute'."
-        ),
-    )
-    kind: CustomMetricKind = Field(
-        default="metric",
-        description=(
-            "'metric' — fn(y_true, y_pred, **kwargs) -> float; "
-            "'scorer' — sklearn scorer(estimator, X, y) -> float."
-        ),
-    )
-    greater_is_better: bool | None = Field(
-        default=None,
-        description=(
-            "Natural direction of the returned value. Required for "
-            "kind='metric'; for a make_scorer scorer it is taken from the "
-            "scorer; a plain callable scorer defaults to true."
-        ),
-    )
-    additive: bool = Field(
-        default=False,
-        description=(
-            "true — the CV estimate is the mean of the per-fold values (only "
-            "valid for per-sample means such as MAE); false (default) — the "
-            "value over the pooled out-of-fold vector."
-        ),
-    )
-    kwargs: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Static keyword arguments passed to the metric function.",
-    )
-
-    @model_validator(mode="after")
-    def _validate_callable(self) -> CustomMetricSpec:
-        """Import the callable and check its shape and direction."""
-        try:
-            obj = resolve_dotted_path(self.path)
-        except ImportError as err:
-            raise PydanticCustomError(
-                ERR_IMPORT,
-                "cannot load custom metric '{path}': {reason}",
-                {"path": self.path, "reason": str(err)},
-            ) from err
-        if not callable(obj):
-            raise PydanticCustomError(
-                ERR_NOT_CALLABLE,
-                "custom metric '{path}' resolves to a non-callable {type}",
-                {"path": self.path, "type": type(obj).__name__},
-            )
-        if self.kind == "metric":
-            self._validate_metric_function(obj)
-        else:
-            self._validate_scorer(obj)
-        return self
-
-    def _validate_metric_function(self, fn: Any) -> None:
-        """Check a ``kind="metric"`` function: two positionals and a direction."""
-        if self.greater_is_better is None:
-            raise PydanticCustomError(
-                ERR_DIRECTION_REQUIRED,
-                "custom metric '{path}' (kind='metric') must set "
-                "greater_is_better: true for scores, false for errors",
-                {"path": self.path},
-            )
-        reason = _check_positional_arity(fn, 2, self.kwargs)
-        if reason is not None:
-            raise PydanticCustomError(
-                ERR_BAD_SIGNATURE,
-                "custom metric '{path}' must accept (y_true, y_pred) and the "
-                "configured kwargs: {reason}",
-                {"path": self.path, "reason": reason},
-            )
-
-    def _validate_scorer(self, obj: Any) -> None:
-        """Check a ``kind="scorer"`` object: three positionals, direction, kwargs."""
-        if _is_sklearn_scorer(obj):
-            scorer_gib = bool((scorer_sign(obj) or 1) > 0)
-            if (
-                self.greater_is_better is not None
-                and self.greater_is_better != scorer_gib
-            ):
-                raise PydanticCustomError(
-                    ERR_DIRECTION_CONFLICT,
-                    "custom scorer '{path}' has greater_is_better={scorer} "
-                    "but the config sets {config}",
-                    {
-                        "path": self.path,
-                        "scorer": scorer_gib,
-                        "config": self.greater_is_better,
-                    },
-                )
-            return
-        if self.kwargs:
-            raise PydanticCustomError(
-                ERR_KWARGS_UNSUPPORTED,
-                "custom scorer '{path}' is a plain callable: kwargs are only "
-                "supported for kind='metric' and make_scorer scorers",
-                {"path": self.path},
-            )
-        reason = _check_positional_arity(obj, 3, {})
-        if reason is not None:
-            raise PydanticCustomError(
-                ERR_BAD_SIGNATURE,
-                "custom scorer '{path}' must accept (estimator, X, y): {reason}",
-                {"path": self.path, "reason": reason},
-            )
-        if not self.additive:
-            logger.warning(
-                "Custom scorer '%s' is a plain callable: its value over the "
-                "pooled out-of-fold vector (and BBC-CV) cannot be computed, "
-                "the per-fold mean is used instead. Set additive: true to "
-                "declare this explicitly, or use a make_scorer scorer / "
-                "kind: metric.",
-                self.path,
-            )
-
-    @property
-    def natural_greater_is_better(self) -> bool:
-        """The natural direction of the metric value (``True`` — a score)."""
-        if self.greater_is_better is not None:
-            return self.greater_is_better
-        obj = resolve_dotted_path(self.path)
-        if _is_sklearn_scorer(obj):
-            return bool((scorer_sign(obj) or 1) > 0)
-        return True
-
-    @property
-    def cache_key(self) -> tuple[str, str, bool | None, bool, str]:
-        """A hashable identity of the spec (the scorer cache key)."""
-        return (
-            self.path,
-            self.kind,
-            self.greater_is_better,
-            self.additive,
-            json.dumps(self.kwargs, sort_keys=True, default=repr),
+    try:
+        obj = resolve_dotted_path(spec.path)
+    except ImportError as err:
+        raise PydanticCustomError(
+            ERR_IMPORT,
+            "cannot load custom metric '{path}': {reason}",
+            {"path": spec.path, "reason": str(err)},
+        ) from err
+    if not callable(obj):
+        raise PydanticCustomError(
+            ERR_NOT_CALLABLE,
+            "custom metric '{path}' resolves to a non-callable {type}",
+            {"path": spec.path, "type": type(obj).__name__},
         )
+    if spec.kind == "metric":
+        _validate_metric_function(spec, obj)
+    else:
+        _validate_scorer(spec, obj)
+    return spec
+
+
+def _validate_metric_function(spec: CustomMetricSpec, fn: Callable[..., Any]) -> None:
+    """Check a ``kind="metric"`` function: two positionals and a direction.
+
+    Args:
+        spec: The contract declaration (path, kwargs and direction).
+        fn: The imported callable ``(y_true, y_pred, **kwargs) -> float``.
+
+    Raises:
+        PydanticCustomError: ``custom_metric_direction_required`` when
+            ``greater_is_better`` is unset; ``custom_metric_bad_signature``
+            when the callable cannot accept the configured call shape.
+    """
+    if spec.greater_is_better is None:
+        raise PydanticCustomError(
+            ERR_DIRECTION_REQUIRED,
+            "custom metric '{path}' (kind='metric') must set "
+            "greater_is_better: true for scores, false for errors",
+            {"path": spec.path},
+        )
+    reason = _check_positional_arity(fn, 2, spec.kwargs)
+    if reason is not None:
+        raise PydanticCustomError(
+            ERR_BAD_SIGNATURE,
+            "custom metric '{path}' must accept (y_true, y_pred) and the "
+            "configured kwargs: {reason}",
+            {"path": spec.path, "reason": reason},
+        )
+
+
+def _validate_scorer(spec: CustomMetricSpec, obj: Callable[..., Any]) -> None:
+    """Check a ``kind="scorer"`` object.
+
+    The function distinguishes a ``make_scorer`` object (direction is read
+    from the scorer and compared with the declaration) from a plain callable
+    scorer (three positional arguments, no kwargs, additivity warning).
+
+    Args:
+        spec: The contract declaration (path, kwargs, direction, additive).
+        obj: The imported scorer object or plain callable.
+
+    Raises:
+        PydanticCustomError: ``custom_metric_direction_conflict`` when the
+            declared direction disagrees with a ``make_scorer`` scorer;
+            ``custom_metric_kwargs_unsupported`` for kwargs on a plain
+            callable; ``custom_metric_bad_signature`` when the call shape is
+            incompatible.
+    """
+    if _is_sklearn_scorer(obj):
+        scorer_gib = bool((scorer_sign(obj) or 1) > 0)
+        if spec.greater_is_better is not None and spec.greater_is_better != scorer_gib:
+            raise PydanticCustomError(
+                ERR_DIRECTION_CONFLICT,
+                "custom scorer '{path}' has greater_is_better={scorer} "
+                "but the config sets {config}",
+                {
+                    "path": spec.path,
+                    "scorer": scorer_gib,
+                    "config": spec.greater_is_better,
+                },
+            )
+        return
+    if spec.kwargs:
+        raise PydanticCustomError(
+            ERR_KWARGS_UNSUPPORTED,
+            "custom scorer '{path}' is a plain callable: kwargs are only "
+            "supported for kind='metric' and make_scorer scorers",
+            {"path": spec.path},
+        )
+    reason = _check_positional_arity(obj, 3, {})
+    if reason is not None:
+        raise PydanticCustomError(
+            ERR_BAD_SIGNATURE,
+            "custom scorer '{path}' must accept (estimator, X, y): {reason}",
+            {"path": spec.path, "reason": reason},
+        )
+    if not spec.additive:
+        logger.warning(
+            "Custom scorer '%s' is a plain callable: its value over the "
+            "pooled out-of-fold vector (and BBC-CV) cannot be computed, "
+            "the per-fold mean is used instead. Set additive: true to "
+            "declare this explicitly, or use a make_scorer scorer / "
+            "kind: metric.",
+            spec.path,
+        )
+
+
+def natural_greater_is_better(spec: CustomMetricSpec) -> bool:
+    """The natural direction of the metric value (``True`` — a score)."""
+    if spec.greater_is_better is not None:
+        return spec.greater_is_better
+    obj = resolve_dotted_path(spec.path)
+    if _is_sklearn_scorer(obj):
+        return bool((scorer_sign(obj) or 1) > 0)
+    return True
 
 
 class _CallableScorer:
@@ -332,7 +283,7 @@ def _build_scorer_uncached(spec: CustomMetricSpec) -> Any:
         merged = copy.copy(obj)
         merged._kwargs = {**obj_kwargs, **spec.kwargs}
         return merged
-    return _CallableScorer(obj, 1 if spec.natural_greater_is_better else -1)
+    return _CallableScorer(obj, 1 if natural_greater_is_better(spec) else -1)
 
 
 def build_custom_scorer(spec: CustomMetricSpec) -> Any:

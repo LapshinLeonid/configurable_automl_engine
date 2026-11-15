@@ -21,6 +21,9 @@ import pytest
 
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.config_runtime import (
+    validate_runtime_config,
+)
 from configurable_automl_engine.training_engine.state import PhaseResult
 
 pytestmark = pytest.mark.skipif(
@@ -113,25 +116,25 @@ def test_timed_out_algorithm_is_disqualified_with_the_reason(tmp_path):
 
 def test_start_method_is_validated():
     base = _config("m.pkl")
-    assert Config.model_validate(base).general.start_method == "fork"
+    assert validate_runtime_config(Config.model_validate(base)).general.start_method == "fork"
     base["general"].pop("start_method")
-    assert Config.model_validate(base).general.start_method is None
+    assert validate_runtime_config(Config.model_validate(base)).general.start_method is None
 
     threads = _config("m.pkl")
     threads["general"]["parallel_mode"] = "threads"
     with pytest.raises(ValueError, match="applies only to parallel_mode='processes'"):
-        Config.model_validate(threads)
+        validate_runtime_config(Config.model_validate(threads))
 
     bad = _config("m.pkl")
     bad["general"]["start_method"] = "vfork"
     with pytest.raises(ValueError):
-        Config.model_validate(bad)
+        validate_runtime_config(Config.model_validate(bad))
 
 
 def test_start_method_unavailable_on_the_platform(monkeypatch):
     monkeypatch.setattr(multiprocessing, "get_all_start_methods", lambda: ["spawn"])
     with pytest.raises(ValueError, match="not available on this platform"):
-        Config.model_validate(_config("m.pkl"))
+        validate_runtime_config(Config.model_validate(_config("m.pkl")))
 
 
 _UNGUARDED_SCRIPT = textwrap.dedent(

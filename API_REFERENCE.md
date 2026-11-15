@@ -16,10 +16,14 @@ setting has a sensible default.
    * [`general`](#general-section) · [Pipeline steps (`phases`)](#pipeline-steps-phases) · [Sanity Gate](#sanity-gate-robust-winner-selection) · [`algorithms`](#algorithms-section) · [`oversampling`](#oversampling-section)
    * Advanced: [early stopping](#early-stopping-pruning) · [additional metrics](#additional-metrics-additional_metrics) · [custom metrics](#custom-metrics-custom_metrics) · [feature selection](#feature-selection-feature_selection) · [complexity guard](#complexity-guard-configuration-complexity_guard) · [preprocessing presets](#adaptive-feature-preprocessing-preprocessing-presets) · [categorical encoding](#categorical-encoding)
 5. [Training results](#training-results) — what `train_best_model` returns.
-6. [Python API](#python-api) — functions and classes.
-7. [Migrating older configs](#migrating-older-configs).
+6. [Contracts package (`automl-contracts`)](#contracts-package-automl-contracts) — the standalone public contract, its install, JSON Schema and import migration.
+7. [Python API](#python-api) — functions and classes.
+8. [Migrating older configs](#migrating-older-configs).
 
 The machine-readable schema of the config is [config.schema.json](config.schema.json).
+The canonical schema ships with the contract as
+`automl_contracts/schemas/config.schema.json`; the root file is its generated
+compatibility mirror.
 A few cross-field rules cannot be expressed in JSON Schema; they live in
 the config modules — the `general` section's in
 [config/general_rules.py](/src/configurable_automl_engine/training_engine/config/general_rules.py),
@@ -1407,6 +1411,354 @@ replayed. Storing the predictions costs `n_trials × n_rows` values; when the
 planned total (sum of `n_trials` of the search steps × enabled algorithms ×
 rows) exceeds 4,000,000, the estimate is skipped with a WARNING.
 
+# Contracts package (`automl-contracts`)
+
+The public data contract is a separate distribution, `automl-contracts`, with
+the importable module `automl_contracts`. It contains the configuration models,
+result DTOs, enumerations, value sets, stable error codes, public exceptions,
+constants, structural `Protocol` interfaces and the JSON Schema. It depends only
+on the Python standard library, Pydantic v2 and `pydantic-core`: installing it
+does not install the engine, scikit-learn, pandas, NumPy, Optuna or PyYAML.
+
+The engine keeps its public import paths as re-exports of the same objects, so
+existing code continues to work. New code should import contract symbols from
+`automl_contracts`; full consumer documentation, installation from the
+SourceCraft PyPI registry, versioning rules and the contract-change process are
+in the [contract package guide](automl-contracts/README.md).
+
+## What belongs to the contract
+
+| Level | Contents |
+|---|---|
+| Public library contract | Configuration models and value sets, result DTOs, run and step statuses, public exceptions, stable `ERR_*` codes, `AVAILABLE_ALGORITHMS`, `AVAILABLE_METRICS`, `WORST_SCORE_THRESHOLD`, `MetricFunction`, `ScorerCallable` and JSON Schema |
+| Configuration contract | Structure of `Config`, field types, defaults, required fields, structural cross-field rules and stable migration error codes |
+| Engine implementation | Training, preprocessing, HPO, selection, artifacts, reports, experiment store, export, explainability, parallel execution, installed-package checks, estimator signature checks, callable imports and environment inspection |
+
+Only definitions and pure Pydantic rules live in the contract. `ModelTrainer`,
+`train_model`, `optimize`, `create_model`, `FeatureSelector`,
+`DataOversampler`, `build_preprocessor`, `DEFAULT_SPACES`, `read_config`,
+reporters, `ExperimentStore`, `export_experiment`, `explain` and the HPO
+runners are engine APIs, not contract APIs. `RunSummary`,
+`LeaderboardEntry`, `FeatureImportance`, `EnsembleMember` and
+`ReporterArtifact` are engine-only while the contract is in the `0.x` series.
+
+The inclusion rules are summarized in the table above; the migration matrix
+below lists every documented engine path and its contract replacement.
+
+## Public imports
+
+The supported top-level facade is `automl_contracts`; its authoritative symbol
+list is `automl_contracts.__all__`.
+
+```python
+from automl_contracts import (
+    # configuration
+    AlgoCfg,
+    AlgorithmsConfig,
+    Config,
+    GeneralCfg,
+    HPOPhaseCfg,
+    SanityGateCfg,
+    ComplexityGuardCfg,
+    EnsembleCfg,
+    OversamplingCfg,
+    # enums, literals and constants
+    AVAILABLE_ALGORITHMS,
+    AVAILABLE_METRICS,
+    EncodingStrategy,
+    MetricDirection,
+    ParallelStrategy,
+    RunPhaseAction,
+    RunStatus,
+    RunStepStatus,
+    SerializationFormat,
+    TargetTransform,
+    ValidationStrategy,
+    WORST_SCORE_THRESHOLD,
+    # results and errors
+    AlgorithmRun,
+    ExperimentResult,
+    InvalidPredictionError,
+    TrainingError,
+    # custom metrics and protocols
+    CustomMetricKind,
+    CustomMetricSpec,
+    MetricFunction,
+    ScorerCallable,
+    # search space and preprocessing
+    CategoricalSpace,
+    FloatSpace,
+    IntSpace,
+    SearchSpaceEntry,
+    PreprocessingPreset,
+    PreprocessingOverride,
+)
+```
+
+The stable public submodules are:
+
+| Module | Public symbols |
+|---|---|
+| `automl_contracts.definitions` | `ValidationStrategy`, `EncodingStrategy`, `SerializationFormat`, `TargetTransform`, `ParallelStrategy`, `RunStatus`, `RunStepStatus`, `RunPhaseAction`, `MetricDirection`, `AVAILABLE_ALGORITHMS`, `WORST_SCORE_THRESHOLD` |
+| `automl_contracts.errors` | `TrainingError`, `InvalidPredictionError` |
+| `automl_contracts.metrics` | `AVAILABLE_METRICS`, `ALIAS_TO_SKLEARN`, `BUILTIN_METRIC_DIRECTIONS`; `to_sklearn_name` is a compatibility helper |
+| `automl_contracts.custom_metrics` | `CustomMetricKind`, `CustomMetricSpec`, `ERR_CUSTOM_NAME_INVALID` |
+| `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
+| `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
+| `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
+| `automl_contracts.preprocessing` | `ImputationStrategy`, `ObjectScalingSpec`, `ScalingSpec`, scaling specifications, outlier specifications, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NO_OUTLIERS`, the deprecated `ScalingType` alias |
+| `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult` |
+| `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` |
+| `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS` |
+| `automl_contracts.config.phases` | `HPOPhaseAction`, `SelectStrategy`, `SelectOutput`, `PruningCfg`, `PruningStrategy`, `HPOPhaseCfg`, `DEFAULT_PHASE_N_TRIALS`, `ERR_REMOVED_REFINE_WINNER` |
+| `automl_contracts.config.sanity_gate` | `SanityGateCfg`, `CorridorMode`, `GeneralizationGapMode`, `ERR_REMOVED_SANITY_GATE_MODE` |
+| `automl_contracts.config.complexity_guard` | `ComplexityGuardCfg`, `ComplexityGuardMode`, `ComplexityGuardUserRangePolicy`, `ComplexityGuardSizeBasis` |
+| `automl_contracts.config.ensemble` | `EnsembleCfg`, `EnsembleWeightMethod` |
+| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` |
+
+`automl_contracts.config.root` and `automl_contracts.config.general_rules`
+are internal modules. `ScalingType` is a deprecated alias in
+`automl_contracts.preprocessing` and is not in the top-level `__all__`.
+
+## Installing the contract
+
+`automl-contracts` is released to the SourceCraft PyPI registry after an
+organization administrator provisions the registry and connects it to this
+repository. The registry identifier is configuration, not a secret, and is
+passed through `SOURCECRAFT_PYPI_REGISTRY_ID`; the token is passed through the
+secret `PYPI_REGISTRY_PAT`.
+
+The registry does not proxy PyPI, so its runtime dependencies are installed
+from the public index first:
+
+```bash
+# SOURCECRAFT_PYPI_REGISTRY_ID is the registry id from the SourceCraft
+# registry page; in CI it is the repository variable of the same name.
+test -n "${SOURCECRAFT_PYPI_REGISTRY_ID:?set the registry id from the SourceCraft registry page}"
+read -rsp "SourceCraft PAT: " PYPI_REGISTRY_PAT
+export PYPI_REGISTRY_PAT
+
+python -m pip install --index-url https://pypi.org/simple \
+  "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
+
+python -m pip install --no-deps \
+  --index-url "https://iam:${PYPI_REGISTRY_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
+  automl-contracts
+```
+
+`--no-deps` is required for a clean environment: without it pip tries to resolve
+`pydantic` and `pydantic-core` against the private registry and fails. Run
+`python -m pip check` afterwards; if the dependencies are already installed,
+skip the first install command.
+
+Do not hardcode a registry identifier or a token in a script, image, README or
+task. In CI, keep `SOURCECRAFT_PYPI_REGISTRY_ID` in a repository variable and
+`PYPI_REGISTRY_PAT` in a secret, interpolate them in the shell step and let the
+platform mask the secret. The registry must be connected to the dependent
+repository by an organization administrator.
+
+Prefer a single trusted `--index-url`. If an additional index is unavoidable,
+pip gives it no priority, so a package with the same name on that index can win
+the resolution. Pin versions and use hash-checked requirements or constraints,
+and do not publish `automl-contracts` under the same name on a public index.
+See [Index configuration and dependency-confusion risk](automl-contracts/README.md#index-configuration-and-dependency-confusion-risk).
+
+## Validating a configuration without the engine
+
+The contract models perform structural validation: field types, required
+fields, unknown keys, value sets and structural cross-field rules.
+
+```python
+from automl_contracts import Config, GeneralCfg, TargetTransform
+
+config = Config.model_validate(
+    {
+        "general": {
+            "comparison_metric": "r2",
+            "target_transform": "log1p",
+        },
+        "algorithms": {
+            "ridge": {},
+            "random_forest": {"enable": True},
+        },
+    }
+)
+
+assert isinstance(config.general, GeneralCfg)
+assert config.general.target_transform is TargetTransform.log1p
+```
+
+Runtime checks that need the engine environment run at the engine entry points:
+installed algorithm packages, valid hyperparameter names for the estimator,
+callable imports and signatures for custom metrics, `start_method`,
+thread/timeout limits and the joblib part of `check_n_folds`. An engine
+consumer still calls `read_config`, `train_best_model` or `AutoMLExperiment`
+for the complete validation. Direct construction of
+`Config`, `GeneralCfg` or the re-exported engine aliases does **not** run those
+checks.
+
+## Custom metrics, protocols and exceptions
+
+```python
+from automl_contracts import CustomMetricSpec, MetricFunction, TrainingError
+
+
+def mape(y_true, y_pred, **kwargs) -> float:
+    ...
+
+
+metric: MetricFunction = mape
+spec = CustomMetricSpec(
+    path="my_project.metrics:mape",
+    kind="metric",
+    greater_is_better=False,
+)
+
+try:
+    ...
+except TrainingError as exc:
+    print(exc)
+```
+
+`CustomMetricSpec` is a data declaration: its constructor does not import the
+callable, check the signature or resolve the direction of an sklearn scorer.
+The engine performs those checks at its public entry points.
+`InvalidPredictionError` is both a `TrainingError` and a `ValueError`.
+`MetricFunction` and `ScorerCallable` are structural protocols for static
+typing; they are not runtime registries and are not `runtime_checkable`.
+
+## JSON Schema without the engine
+
+The canonical schema is package data:
+
+```python
+import json
+from importlib.resources import files
+
+schema = json.loads(
+    files("automl_contracts")
+    .joinpath("schemas/config.schema.json")
+    .read_text(encoding="utf-8")
+)
+```
+
+The same object is available as `Config.model_json_schema()`. The file is
+generated from the contract models and must not be edited by hand. After a
+model change, regenerate the canonical file and the root compatibility mirror:
+
+```bash
+python automl-contracts/scripts/generate_schema.py
+python schema_generator.py
+```
+
+The release gate requires a schema reproducibility check: regenerate the schema
+in a temporary location and require a byte-for-byte match with the checked-in
+canonical file. The check and the golden schema test must be wired into CI
+before the first contract release.
+
+## What the engine re-exports
+
+The engine keeps the documented old paths as re-exports of contract objects.
+All aliases are identical objects (`is`), not duplicate definitions. The
+complete migration matrix, including the `training_engine.config.*` shims and
+the engine-only symbols, is in the next section. The inclusion decisions and
+stability statuses are reflected in that matrix and in the
+[contract package guide](automl-contracts/README.md#package-contents-and-stable-import-paths).
+
+## Migration from engine imports
+
+New code imports contract symbols from `automl_contracts` or a stable
+submodule. Old engine paths remain for the whole `0.x` contract line. The table
+below is the complete migration matrix for the documented engine paths.
+"Stays engine-only" means the symbol remains at its old path and has no
+contract replacement.
+
+| Old engine path | Contract replacement | Symbols that stay engine-only |
+|---|---|---|
+| `configurable_automl_engine` | `automl_contracts` (root) | `AutoMLExperiment`, `ModelTrainer`, `train_best_model`, `__version__` |
+| `configurable_automl_engine.common.definitions` | `automl_contracts.definitions` or the root | `ALGO_PACKAGE_MAPPING` |
+| `configurable_automl_engine.common.errors` | `automl_contracts.errors` or the root | — |
+| `configurable_automl_engine.training_engine.config_parser` | `automl_contracts`, `automl_contracts.config.*`, `automl_contracts.search_space`, `automl_contracts.feature_selection`; it re-exports `Config`, `GeneralCfg`, `AlgoCfg`, `AlgorithmsConfig`, `OversamplingCfg`, `OversamplingAlgorithm`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, the phase and enum literals, `AUTO_HOLDOUT_*`, `DEFAULT_PHASE_N_TRIALS`, `ERR_*` and `SearchSpaceEntry` | `read_config`, `SanityGateMode` |
+| `configurable_automl_engine.training_engine.config.general` | `automl_contracts.config.general`; the direct `config.*` module is an internal/deprecated shim | — |
+| `configurable_automl_engine.training_engine.config.algorithms` | `automl_contracts.config.algorithms`; the direct `config.*` module is an internal/deprecated shim | `ALGO_PACKAGE_MAPPING`, `AlgorithmsConfigType`; `REMOVED_ALGORITHM_KEYS` is an internal contract symbol |
+| `configurable_automl_engine.training_engine.config.phases` | `automl_contracts.config.phases`; the direct `config.*` module is an internal/deprecated shim | — |
+| `configurable_automl_engine.training_engine.config.sanity_gate` | `automl_contracts.config.sanity_gate`; the direct `config.*` module is an internal/deprecated shim | `SanityGateMode` |
+| `configurable_automl_engine.training_engine.config.complexity_guard` | `automl_contracts.config.complexity_guard`; the direct `config.*` module is an internal/deprecated shim | — |
+| `configurable_automl_engine.training_engine.config.ensemble` | `automl_contracts.config.ensemble`; the stable shim re-exports `EnsembleCfg` and `EnsembleWeightMethod` | — |
+| `configurable_automl_engine.feature_selection` | `automl_contracts.feature_selection` for `FeatureSelectionCfg`, `FeatureSelectionMethod`, `FeatureSelectionMode` | `FeatureSelector` |
+| `configurable_automl_engine.preprocessing_presets` | `automl_contracts.preprocessing` for the scaling and outlier specifications, `PreprocessingPreset`, `PreprocessingOverride`, `AlgorithmClass`, `merge_preprocessing_overrides`, `ScalingType` (deprecated alias) | `ALGORITHM_CLASS_MAPPING`, `PRESET_BY_CLASS`, `resolve_preprocessing_preset`, `coerce_scaling`, `scaling_type`, `normalize_algorithm`, `requires_missing_indicator` |
+| `configurable_automl_engine.outliers_presets` | `automl_contracts.preprocessing` for `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` | `coerce_outliers`, `format_outliers` |
+| `configurable_automl_engine.hpo.default_spaces` | `automl_contracts.search_space` for `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` | `DEFAULT_SPACES`, `align_*`, `compute_svr_epsilon_bounds`, `clip_search_space`, `normalize_hyperparameter_entry`, `infer_param_numeric_type` |
+| `configurable_automl_engine.experiment.result` | `automl_contracts.result` for `AlgorithmRun`, `ExperimentResult`, `MetricDirection`, `RunPhaseAction`, `RunStatus`, `RunStepStatus` | `ScoreValue`, `ScoreValueOrNone` |
+| `configurable_automl_engine.experiment` | `automl_contracts.result` for the result DTOs and enums | `AutoMLExperiment`, reporters, `ExperimentStore`, `Leaderboard`, `export_experiment`, explain helpers |
+| `configurable_automl_engine.models` | `automl_contracts.definitions` or the root for `AVAILABLE_ALGORITHMS` | `create_model` and the HPO runtime helpers |
+| `configurable_automl_engine.common.metrics` | `automl_contracts.metrics` for `AVAILABLE_METRICS`, `ALIAS_TO_SKLEARN`, `BUILTIN_METRIC_DIRECTIONS` and `to_sklearn_name` (internal helper; old path kept); `automl_contracts.custom_metrics` for `ERR_CUSTOM_NAME_INVALID` | `ERR_CUSTOM_NAME_COLLISION`, `reserved_metric_names`, `user_direction`, `is_error_metric`, `is_greater_better`, `get_scorer_object`, `oof_rmse`, `to_user_value` and the other runtime metric helpers |
+| `configurable_automl_engine.common.custom_metrics` | `automl_contracts.custom_metrics` for `CustomMetricSpec`, `CustomMetricKind`, `ERR_CUSTOM_NAME_INVALID` | `validate_custom_metrics`, `validate_custom_metric_spec`, `natural_greater_is_better`, `build_custom_scorer` and the runtime scorer cache |
+| `configurable_automl_engine.trainer` | `automl_contracts.errors` for `TrainingError` | `ModelTrainer`, `train_model` |
+| `configurable_automl_engine.trainer_params` | `automl_contracts.errors` for `TrainingError` | The trainer parameter validation helpers |
+| `configurable_automl_engine.tuner` | `automl_contracts.definitions` or the root for `WORST_SCORE_THRESHOLD` | `optimize`, `OptimizeResult`, `TrialStats`, the HPO exceptions, `HPO_WORST_SCORE` |
+| `configurable_automl_engine.preprocessing` | `automl_contracts.definitions` or the root for `EncodingStrategy` | Runtime transformers and preprocessing helpers |
+| `configurable_automl_engine.training_engine` | No contract replacement | `train_best_model`, `last_experiment_result`, `execute_phases` |
+| `configurable_automl_engine.training_engine.thread_pool` | No contract replacement | `run_parallel`, `run_parallel_outcomes` |
+| `configurable_automl_engine.training_engine.component` | No contract replacement | `train_best_model`, `last_experiment_result`, `execute_phases` |
+| `configurable_automl_engine.experiment.explain` | No contract replacement | `explain_permutation_importance`, `explain_shap`, `aggregate_to_original_features`, `render_importance_markdown` |
+| `configurable_automl_engine.experiment.store` | No contract replacement | `ExperimentStore`, `RunSummary`, `DuplicateRunError`, `ExperimentStoreError` |
+| `configurable_automl_engine.oversampling` | No contract replacement | `DataOversampler`, `oversample` and the public package names |
+
+These engine APIs keep their old paths and are not part of the contract:
+`read_config`, `train_best_model`, `AutoMLExperiment`, `ModelTrainer`,
+`train_model`, `optimize`, `create_model`, `FeatureSelector`,
+`DataOversampler`, `DEFAULT_SPACES`, reporters, `ExperimentStore`,
+`export_experiment` and `explain`. The internal `load_config` helper is used by
+the engine but is not a documented public entry point.
+
+Re-export policy:
+
+- all old documented paths stay importable during the `0.x` contract line;
+- classes, enums and exceptions are the same objects (`is`); aliases and
+  constants have equal values and types;
+- direct imports from `training_engine.config.*` are de facto test paths, not
+  public API: they are kept through compatibility shims and documented as
+  internal/deprecated;
+- `ScalingType` is a deprecated alias; use `StringScaling`;
+- removing an old path is a MAJOR engine change, preceded by a deprecation
+  period and recorded in the changelog with the replacement.
+
+## Versioning and compatibility
+
+`automl-contracts` has its own SemVer version and its own `contracts-v*` tags,
+independent of the engine's `v*` tags. The version is static in
+`automl-contracts/pyproject.toml`; `automl_contracts.__version__` is read from
+the installed distribution metadata.
+
+During `0.x`, potentially incompatible changes get a MINOR version and a
+`BREAKING` changelog entry with a migration note; PATCH is reserved for
+strictly compatible fixes. From `1.0.0`, incompatible changes require MAJOR.
+
+Adding a value to an `Enum` or a closed `Literal` set is classified by its real
+producer/consumer impact: a consumer that rejects an unknown value turns the
+addition into a MAJOR change, not a harmless MINOR one. A new optional field
+with a safe default is MINOR; a new required field, a removed value or a
+changed type/semantics is MAJOR. Description-only or field-order-only schema
+changes are PATCH; schema changes that break producers or consumers are MAJOR.
+
+The engine declares `automl-contracts>=0.1.0,<0.2.0`:
+
+| `automl-contracts` | `configurable-automl-engine` | Status |
+|---|---|---|
+| `0.1.x` | Releases declaring `>=0.1.0,<0.2.0` | Supported; compatibility is part of the release gate |
+| `<0.1.0` | Any | Not supported |
+| `>=0.2.0,<1.0.0` | The current engine line | Requires a new engine release with an updated range |
+| `>=1.0.0,<2.0.0` | A future engine declaring `>=1.0.0,<2.0.0` | Supported after the policy and range update |
+
+A combination outside the declared range is unsupported even if an import
+happens to work. A contract change and the engine change that consumes it are
+made in one PR: both builds run, the contract version is bumped by SemVer, the
+engine range is updated atomically and the schema and `CHANGELOG.md` are
+updated. The full process is in the
+[contract package guide](automl-contracts/README.md#changing-the-contract); the
+registry requirements are in its installation section.
+
 # Python API
 
 ## `train_best_model(config, df, target, model_path_override)`
@@ -1426,7 +1778,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 **Returns:** `dict[str, Any]` — the winner, its scores and diagnostic reports. See [Training results](#training-results) for every key.
 
-**Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for an invalid config; `ValueError` for unusable data (for example a missing or non-numeric target column); `RuntimeError` if no algorithm succeeds.
+**Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for structural config errors; `ValueError` for runtime config checks that need the installed environment (algorithm dependencies, hyperparameter compatibility, custom-metric imports and signatures, process/thread limits) and for unusable data (for example a missing or non-numeric target column); custom-metric runtime checks may raise a `pydantic_core.PydanticCustomError`; `RuntimeError` if no algorithm succeeds. The contract models alone perform only the structural part — see [Contracts package](#contracts-package-automl-contracts).
 
 **Experiment result.** Alongside the dict, the full run history is assembled into the `ExperimentResult` model (per-algorithm / per-phase records with raw and user-semantic scores, trial statistics, phase and run timings, the resolved validation settings, the circuit-breaker map, and the report sections) and stored in `configurable_automl_engine.training_engine.component.last_experiment_result` after every call — including a failed run (`status: "failed"` with the error message and the records of the completed phases). The model is a pure serializable Pydantic model (`ExperimentResult.to_json()` / `ExperimentResult.from_json()`); the winner, its user-semantic score and the params are taken from the same sources as the dict keys `algorithm` / `score` / `params`, so the two cannot diverge.
 
@@ -1882,7 +2234,7 @@ experiment.explain()         # feature importance of the winner model
 
 **Methods:**
 
-* `run() -> ExperimentResult` — performs the full training cycle (delegates to the instrumented `train_best_model`), registers the result in the store and returns it. Engine config/data validation errors (`TypeError`, pydantic `ValidationError`, `ValueError`) propagate unchanged; `RuntimeError` — when the orchestration failed (the failed `ExperimentResult` is still stored).
+* `run() -> ExperimentResult` — performs the full training cycle (delegates to the instrumented `train_best_model`), registers the result in the store and returns it. Engine config/data validation errors propagate unchanged: `TypeError`, pydantic `ValidationError` for structural config errors, `ValueError` for runtime config checks and unusable data, and `PydanticCustomError` for custom-metric runtime checks. `RuntimeError` — when the orchestration failed (the failed `ExperimentResult` is still stored).
 * `leaderboard(print_table=False) -> Leaderboard` — the algorithm ranking table of the last run (see [`build_leaderboard`](#leaderboard--build_leaderboard)); `print_table=True` additionally prints the table to stdout.
 * `best_model() -> ModelTrainer` — the trained winner model: loaded from the artifact path of the result (the serialization format is determined by the extension, with a joblib → pickle fallback), so it always matches the accepted result.
 * `ensemble_model() -> EnsembleModel` — the experimental top-K ensemble (see [`general.ensemble`](#experimental-ensemble-generalensemble)): loaded from the artifact path of the result's `ensemble` section. `RuntimeError` when the ensemble was not built (the feature is off, the run failed or the step was skipped).
