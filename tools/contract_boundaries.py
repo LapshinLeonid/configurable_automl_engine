@@ -14,9 +14,10 @@ import sys
 import tarfile
 import tomllib
 import zipfile
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_ROOT = REPO_ROOT / "automl-contracts"
@@ -50,10 +51,24 @@ FORBIDDEN_LIBRARY_ROOTS = frozenset(
         "yaml",
     }
 )
+DYNAMIC_GETATTR_NAMES = frozenset(
+    {
+        "__import__",
+        "eval",
+        "exec",
+        "find_spec",
+        "import_module",
+        "spec_from_file_location",
+    }
+)
 DYNAMIC_IMPORT_CALLS = frozenset(
     {
         "__import__",
         "builtins.__import__",
+        "builtins.eval",
+        "builtins.exec",
+        "eval",
+        "exec",
         "import_module",
         "importlib.__import__",
         "importlib.import_module",
@@ -75,6 +90,13 @@ RUNTIME_CALL_PREFIXES = (
     "os.cpu_count",
     "os.getcwd",
     "os.get_exec_path",
+    "os.getegid",
+    "os.geteuid",
+    "os.getgid",
+    "os.getlogin",
+    "os.getpid",
+    "os.getppid",
+    "os.getuid",
     "os.getenv",
     "os.getenvb",
     "os.listdir",
@@ -149,6 +171,7 @@ RUNTIME_CALL_PREFIXES = (
     "ftplib.",
     "http.",
     "httplib.",
+    "io.",
     "platform.",
     "psutil.",
     "requests.",
@@ -171,6 +194,36 @@ RUNTIME_CALL_PREFIXES = (
     "subprocess.",
     "sqlite3.",
     "tempfile.",
+)
+TYPE_CONSTRUCTOR_NAMES = frozenset(
+    {
+        "Annotated",
+        "AsyncIterator",
+        "Callable",
+        "ClassVar",
+        "Coroutine",
+        "Dict",
+        "Final",
+        "FrozenSet",
+        "Generator",
+        "Iterable",
+        "Iterator",
+        "List",
+        "Literal",
+        "Mapping",
+        "Optional",
+        "Sequence",
+        "Set",
+        "Tuple",
+        "Type",
+        "Union",
+        "dict",
+        "frozenset",
+        "list",
+        "set",
+        "tuple",
+        "type",
+    }
 )
 PATH_PURE_METHODS = frozenset(
     {
@@ -219,6 +272,9 @@ RUNTIME_ATTRIBUTES = frozenset(
     {
         "os.environ",
         "os.name",
+        "sys.__stderr__",
+        "sys.__stdin__",
+        "sys.__stdout__",
         "sys.argv",
         "sys.base_prefix",
         "sys.exec_prefix",
@@ -230,6 +286,9 @@ RUNTIME_ATTRIBUTES = frozenset(
         "sys.path_hooks",
         "sys.platform",
         "sys.prefix",
+        "sys.stderr",
+        "sys.stdin",
+        "sys.stdout",
         "sys.version_info",
     }
 )
@@ -307,29 +366,197 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
-def _callable_aliases(tree: ast.Module) -> dict[str, str]:
-    """Resolve simple ``name = target`` callable aliases to a fixed point."""
-    aliases = _import_aliases(tree)
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                targets = node.targets
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                targets = [node.target]
-            else:
-                continue
-            if not isinstance(node.value, (ast.Name, ast.Attribute)):
-                continue
-            resolved = _resolve_callable_name(node.value, aliases)
-            if resolved is None:
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in aliases:
-                    aliases[target.id] = resolved
-                    changed = True
-    return aliases
+def _calls_in_expression(
+    node: ast.AST, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            yield child, dict(aliases)
+
+
+def _remove_target_aliases(targets: Sequence[ast.AST], aliases: dict[str, str]) -> None:
+    for target in targets:
+        if isinstance(target, ast.Name):
+            aliases.pop(target.id, None)
+
+
+def _assign_target_aliases(
+    targets: Sequence[ast.AST], value: ast.AST, aliases: dict[str, str]
+) -> None:
+    resolved = None
+    if isinstance(value, (ast.Name, ast.Attribute)):
+        resolved = _resolve_callable_name(value, aliases)
+    for target in targets:
+        if not isinstance(target, ast.Name):
+            continue
+        if resolved is None:
+            aliases.pop(target.id, None)
+        else:
+            aliases[target.id] = resolved
+
+
+def _apply_scope_import(stmt: ast.stmt, aliases: dict[str, str]) -> None:
+    if isinstance(stmt, ast.Import):
+        for alias in stmt.names:
+            local = alias.asname or alias.name.split(".")[0]
+            aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
+    elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
+        for alias in stmt.names:
+            aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+
+
+def _iter_function_calls(
+    stmt: ast.FunctionDef | ast.AsyncFunctionDef, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    for decorator in stmt.decorator_list:
+        yield from _calls_in_expression(decorator, aliases)
+    for default in stmt.args.defaults:
+        yield from _calls_in_expression(default, aliases)
+    for kw_default in stmt.args.kw_defaults:
+        if kw_default is not None:
+            yield from _calls_in_expression(kw_default, aliases)
+    inner = dict(aliases)
+    arguments = [
+        *stmt.args.posonlyargs,
+        *stmt.args.args,
+        *stmt.args.kwonlyargs,
+        stmt.args.vararg,
+        stmt.args.kwarg,
+    ]
+    for argument in arguments:
+        if argument is not None:
+            inner.pop(argument.arg, None)
+    yield from _iter_calls_with_aliases(stmt.body, inner)
+
+
+def _iter_class_calls(
+    stmt: ast.ClassDef, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    for decorator in stmt.decorator_list:
+        yield from _calls_in_expression(decorator, aliases)
+    for base in stmt.bases:
+        yield from _calls_in_expression(base, aliases)
+    for keyword in stmt.keywords:
+        yield from _calls_in_expression(keyword.value, aliases)
+    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+
+
+def _iter_assign_calls(
+    stmt: ast.Assign, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.value, aliases)
+    _assign_target_aliases(stmt.targets, stmt.value, aliases)
+
+
+def _iter_ann_assign_calls(
+    stmt: ast.AnnAssign, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    if stmt.value is not None:
+        yield from _calls_in_expression(stmt.value, aliases)
+        _assign_target_aliases([stmt.target], stmt.value, aliases)
+    else:
+        _remove_target_aliases([stmt.target], aliases)
+
+
+def _iter_aug_assign_calls(
+    stmt: ast.AugAssign, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.value, aliases)
+    _remove_target_aliases([stmt.target], aliases)
+
+
+def _iter_if_calls(
+    stmt: ast.If, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.test, aliases)
+    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+
+
+def _iter_for_calls(
+    stmt: ast.For | ast.AsyncFor, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.iter, aliases)
+    inner = dict(aliases)
+    _remove_target_aliases([stmt.target], inner)
+    yield from _iter_calls_with_aliases(stmt.body, inner)
+    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+
+
+def _iter_while_calls(
+    stmt: ast.While, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.test, aliases)
+    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+
+
+def _iter_with_calls(
+    stmt: ast.With | ast.AsyncWith, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    for item in stmt.items:
+        yield from _calls_in_expression(item.context_expr, aliases)
+    inner = dict(aliases)
+    for item in stmt.items:
+        if item.optional_vars is not None:
+            _remove_target_aliases([item.optional_vars], inner)
+    yield from _iter_calls_with_aliases(stmt.body, inner)
+
+
+def _iter_try_calls(
+    stmt: ast.Try, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+    for handler in stmt.handlers:
+        yield from _iter_calls_with_aliases(handler.body, dict(aliases))
+    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+    yield from _iter_calls_with_aliases(stmt.finalbody, dict(aliases))
+
+
+def _iter_match_calls(
+    stmt: ast.Match, aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    yield from _calls_in_expression(stmt.subject, aliases)
+    for case in stmt.cases:
+        if case.guard is not None:
+            yield from _calls_in_expression(case.guard, aliases)
+        yield from _iter_calls_with_aliases(case.body, dict(aliases))
+
+
+ScopeHandler = Callable[
+    [Any, dict[str, str]], Iterator[tuple[ast.Call, dict[str, str]]]
+]
+_SCOPE_HANDLERS: dict[type[ast.stmt], ScopeHandler] = {
+    ast.AsyncFunctionDef: _iter_function_calls,
+    ast.FunctionDef: _iter_function_calls,
+    ast.ClassDef: _iter_class_calls,
+    ast.Assign: _iter_assign_calls,
+    ast.AnnAssign: _iter_ann_assign_calls,
+    ast.AugAssign: _iter_aug_assign_calls,
+    ast.If: _iter_if_calls,
+    ast.AsyncFor: _iter_for_calls,
+    ast.For: _iter_for_calls,
+    ast.While: _iter_while_calls,
+    ast.AsyncWith: _iter_with_calls,
+    ast.With: _iter_with_calls,
+    ast.Try: _iter_try_calls,
+    ast.Match: _iter_match_calls,
+}
+
+
+def _iter_calls_with_aliases(
+    statements: list[ast.stmt], aliases: dict[str, str]
+) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    """Yield calls together with aliases visible at that point in the scope."""
+    for stmt in statements:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            _apply_scope_import(stmt, aliases)
+            continue
+        handler = _SCOPE_HANDLERS.get(type(stmt))
+        if handler is None:
+            yield from _calls_in_expression(stmt, aliases)
+        else:
+            yield from handler(stmt, aliases)
 
 
 def _absolute_imports(tree: ast.Module) -> Iterator[tuple[int, str]]:
@@ -457,6 +684,31 @@ def _is_type_alias_annotation(annotation: ast.AST, aliases: dict[str, str]) -> b
     return name is not None and name.rsplit(".", 1)[-1] == "TypeAlias"
 
 
+def _is_type_constructor(node: ast.AST, aliases: dict[str, str]) -> bool:
+    if not isinstance(node, ast.Subscript):
+        return False
+    base = _resolve_callable_name(node.value, aliases)
+    if base is None:
+        return False
+    last = base.rsplit(".", 1)[-1]
+    return last in TYPE_CONSTRUCTOR_NAMES or base.startswith(
+        ("typing.", "collections.abc.")
+    )
+
+
+def _is_type_expression(node: ast.AST, aliases: dict[str, str]) -> bool:
+    if _is_type_constructor(node, aliases):
+        return True
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.BitOr)
+        and (
+            _is_type_expression(node.left, aliases)
+            or _is_type_expression(node.right, aliases)
+        )
+    )
+
+
 def _looks_like_type_reference(value: str) -> bool:
     """Separate qualified type names from ordinary dotted string data."""
     if ENGINE_MODULE in value:
@@ -480,7 +732,9 @@ def _assigned_type_strings(
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 if _looks_like_type_reference(value.value):
                     constants = [value]
-            elif isinstance(value, (ast.Subscript, ast.BinOp)):
+            elif isinstance(value, (ast.Subscript, ast.BinOp)) and _is_type_expression(
+                value, aliases
+            ):
                 constants = list(_type_expression_strings(value, aliases))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             if _is_type_alias_annotation(node.annotation, aliases):
@@ -494,13 +748,10 @@ def _assigned_type_strings(
     return violations
 
 
-def _call_type_strings(
-    path: Path, tree: ast.Module, aliases: dict[str, str]
-) -> list[Violation]:
+def _call_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
     violations: list[Violation] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
+    initial = _import_aliases(tree)
+    for node, aliases in _iter_calls_with_aliases(tree.body, initial):
         name = _resolve_callable_name(node.func, aliases)
         if name is None:
             continue
@@ -525,15 +776,24 @@ def scan_contract_type_strings(contract_src: Path = CONTRACT_SRC) -> list[Violat
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _callable_aliases(tree)
+        aliases = _import_aliases(tree)
         for annotation in _annotation_nodes(tree):
             for constant in _type_expression_strings(annotation, aliases):
                 violation = _string_type_violation(path, constant, "string-annotation")
                 if violation is not None:
                     violations.append(violation)
         violations.extend(_assigned_type_strings(path, tree, aliases))
-        violations.extend(_call_type_strings(path, tree, aliases))
+        violations.extend(_call_type_strings(path, tree))
     return violations
+
+
+def _literal_getattr_target(node: ast.Call) -> str | None:
+    if len(node.args) < 2:
+        return None
+    argument = node.args[1]
+    if not isinstance(argument, ast.Constant) or not isinstance(argument.value, str):
+        return None
+    return argument.value if argument.value in DYNAMIC_GETATTR_NAMES else None
 
 
 def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Violation]:
@@ -541,19 +801,27 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _callable_aliases(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
+        initial = _import_aliases(tree)
+        for node, aliases in _iter_calls_with_aliases(tree.body, initial):
             name = _resolve_callable_name(node.func, aliases)
             if name in DYNAMIC_IMPORT_CALLS:
+                message = (
+                    f"dynamic execution through {name!r} is forbidden in the "
+                    "contract; use a static import"
+                )
+                violations.append(
+                    Violation("dynamic-import", path, node.lineno, message)
+                )
+            elif (
+                name in {"getattr", "builtins.getattr"}
+                and (target := _literal_getattr_target(node)) is not None
+            ):
                 violations.append(
                     Violation(
                         "dynamic-import",
                         path,
                         node.lineno,
-                        f"dynamic import through {name!r} is forbidden in the "
-                        "contract; use a static import",
+                        f"dynamic access to {target!r} is forbidden in the contract",
                     )
                 )
     return violations
@@ -569,9 +837,29 @@ def _runtime_violation(path: Path, line: int, name: str) -> Violation:
     )
 
 
-def _is_path_annotation(annotation: ast.AST, aliases: dict[str, str]) -> bool:
+def _annotation_contains_path(annotation: ast.AST, aliases: dict[str, str]) -> bool:
     name = _resolve_callable_name(annotation, aliases)
-    return name is not None and name.rsplit(".", 1)[-1] == "Path"
+    if name is not None and name.rsplit(".", 1)[-1] == "Path":
+        return True
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _annotation_contains_path(annotation.left, aliases) or (
+            _annotation_contains_path(annotation.right, aliases)
+        )
+    if isinstance(annotation, ast.Subscript):
+        base = _resolve_callable_name(annotation.value, aliases)
+        base_name = base.rsplit(".", 1)[-1] if base else ""
+        elements = (
+            annotation.slice.elts
+            if isinstance(annotation.slice, ast.Tuple)
+            else [annotation.slice]
+        )
+        if base_name == "Annotated" and elements:
+            return _annotation_contains_path(elements[0], aliases)
+        if base_name in {"Optional", "Union"}:
+            return any(
+                _annotation_contains_path(element, aliases) for element in elements
+            )
+    return False
 
 
 def _is_path_expression(
@@ -596,6 +884,8 @@ def _is_path_expression(
         return node.attr == "parent" and _is_path_expression(
             node.value, aliases, path_names
         )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return _is_path_expression(node.left, aliases, path_names)
     if not isinstance(node, ast.Call):
         return False
     name = _resolve_callable_name(node.func, aliases)
@@ -608,43 +898,48 @@ def _is_path_expression(
     return False
 
 
+def _add_path_names(targets: Sequence[ast.AST], names: set[str]) -> bool:
+    changed = False
+    for target in targets:
+        if isinstance(target, ast.Name) and target.id not in names:
+            names.add(target.id)
+            changed = True
+        elif (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id in {"self", "cls"}
+            and target.attr not in names
+        ):
+            names.add(target.attr)
+            changed = True
+    return changed
+
+
 def _path_names(tree: ast.Module, aliases: dict[str, str]) -> set[str]:
-    """Collect variables that hold a Path, including simple reassignment."""
+    """Collect variables and annotated attributes that hold a Path."""
     names: set[str] = set()
     changed = True
     while changed:
         changed = False
         for node in ast.walk(tree):
-            targets: list[ast.AST] = []
-            value: ast.AST | None = None
             if isinstance(node, ast.Assign):
-                targets = list(node.targets)
-                value = node.value
+                if _is_path_expression(node.value, aliases, names):
+                    changed |= _add_path_names(node.targets, names)
             elif isinstance(node, ast.AnnAssign):
-                targets = [node.target]
-                value = node.value
-                if value is None and _is_path_annotation(node.annotation, aliases):
-                    value = node.annotation
+                if _annotation_contains_path(node.annotation, aliases):
+                    changed |= _add_path_names([node.target], names)
+                if node.value is not None and _is_path_expression(
+                    node.value, aliases, names
+                ):
+                    changed |= _add_path_names([node.target], names)
             elif (
                 isinstance(node, ast.arg)
                 and node.annotation is not None
-                and _is_path_annotation(node.annotation, aliases)
+                and _annotation_contains_path(node.annotation, aliases)
+                and node.arg not in names
             ):
-                targets = [ast.Name(id=node.arg, ctx=ast.Store())]
-            if value is None or not _is_path_expression(value, aliases, names):
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name) and target.id not in names:
-                    names.add(target.id)
-                    changed = True
-                elif (
-                    isinstance(target, ast.Attribute)
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id in {"self", "cls"}
-                    and target.attr not in names
-                ):
-                    names.add(target.attr)
-                    changed = True
+                names.add(node.arg)
+                changed = True
     return names
 
 
@@ -655,23 +950,21 @@ def scan_contract_runtime_access(
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _callable_aliases(tree)
-        path_names = _path_names(tree, aliases)
+        initial = _import_aliases(tree)
+        path_names = _path_names(tree, initial)
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
-                name = aliases.get(node.id, node.id)
+                name = initial.get(node.id, node.id)
                 if name in RUNTIME_ATTRIBUTES:
                     violations.append(_runtime_violation(path, node.lineno, name))
                 continue
             if isinstance(node, ast.Attribute):
-                attribute_name = _resolve_callable_name(node, aliases)
+                attribute_name = _resolve_callable_name(node, initial)
                 if attribute_name in RUNTIME_ATTRIBUTES:
                     violations.append(
                         _runtime_violation(path, node.lineno, attribute_name)
                     )
-                continue
-            if not isinstance(node, ast.Call):
-                continue
+        for node, aliases in _iter_calls_with_aliases(tree.body, initial):
             if isinstance(node.func, ast.Attribute) and _is_path_expression(
                 node.func.value, aliases, path_names
             ):

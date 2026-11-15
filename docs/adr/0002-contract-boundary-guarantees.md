@@ -57,11 +57,14 @@ configurable_automl_engine ───────▶ automl_contracts
 - строковая аннотация, содержащая `configurable_automl_engine`, считается
   нарушением: она создаёт связь контракта со структурой движка;
 - динамический импорт через `importlib.import_module`, `importlib.__import__`,
-  `__import__`, `builtins.__import__`, `find_spec` или
-  `spec_from_file_location` запрещён в контракте полностью, в том числе через
-  импорт-алиас и простое присваивание (`f = __import__; f(...)`). Разрешён
-  только `importlib.metadata.version` для получения версии установленного
-  дистрибутива;
+  `__import__`, `builtins.__import__`, `exec`, `eval`, `find_spec`,
+  `spec_from_file_location` или литеральный
+  `getattr(importlib, "import_module")` запрещён в контракте полностью, в том
+  числе через импорт-алиас и присваивание (`f = __import__; f(...)`).
+  Присваивания callable анализируются по областям видимости и в порядке
+  выполнения, поэтому одинаковые имена в разных функциях не смешиваются.
+  Разрешён только `importlib.metadata.version` для получения версии
+  установленного дистрибутива;
 - строковая ссылка внутри параметризованного type-alias
   (`Alias: TypeAlias = list["configurable_automl_engine.Config"]`) и
   type-alias, импортированный под другим именем, также считаются нарушением;
@@ -119,10 +122,12 @@ AST-проверка импортов использует белый списо
   `Path.is_symlink`, `Path.is_socket`, `Path.is_fifo`, `Path.is_block_device`,
   `Path.is_char_device` и аналогичные;
 - процессы и сеть: `os.system`, `os.popen`, `os.fork`, `os.exec*`, `os.kill`,
-  `os.get_exec_path`, `subprocess.*`, `socket.*`, `urllib.*`, `http.*`,
-  `smtplib.*`, `ftplib.*`, `tempfile.*`, `sqlite3.*`;
-- обращения к `sys.argv`, `sys.path`, `sys.executable`, `sys.prefix` и
-  аналогичным environment-зависимым атрибутам;
+  `os.getpid`, `os.getppid`, `os.getuid`, `os.getgid`, `os.get_exec_path`,
+  `subprocess.*`, `socket.*`, `urllib.*`, `http.*`, `smtplib.*`, `ftplib.*`,
+  `tempfile.*`, `sqlite3.*`, `io.*`;
+- обращения к `sys.argv`, `sys.path`, `sys.stdin`, `sys.stdout`, `sys.stderr`,
+  `sys.executable`, `sys.prefix` и аналогичным environment-зависимым
+  атрибутам;
 - присваивание запрещённого callable локальному имени
   (`run = os.system; run(...)`, `read = open; read(...)`) не обходит проверку;
 - динамический импорт, перечисленный в разделе 3.
@@ -136,9 +141,12 @@ AST-проверка импортов использует белый списо
 аналогичные). Любой другой метод экземпляра `Path` считается runtime-доступом,
 включая `read_text`, `write_text`, `open`, `exists`, `is_symlink`, `resolve`,
 `cwd`, `home`, а также цепочки
-(`Path(...).joinpath(...).read_text()`), простые переменные
+(`Path(...).joinpath(...).read_text()`), композиция через `/`
+(`(base / "model.json").read_text()`), простые переменные
 (`p = Path(...); p.read_text()`) и атрибуты объектов
-(`self.path.read_text()` для `path: Path`). Проверка переменных является
+(`self.path.read_text()` для `path: Path`). Аннотированные поля и параметры
+`Path`, `Path | None`, `Optional[Path]` и `Annotated[Path, ...]`, включая
+`Field(default=...)`, также попадают в taint. Проверка переменных является
 консервативным taint-анализом простых присваиваний и аннотированных атрибутов
 в пределах модуля; сложные потоки данных могут потребовать явного ограничения
 в ADR. Также запрещены импортированные ссылки вроде `from os import environ` и
@@ -148,7 +156,10 @@ AST-проверка импортов использует белый списо
 (`Field(description="numpy bound")`) являются данными, а не type-alias, и не
 считаются нарушением. Эвристика отделения dotted-данных от type-ссылки
 применяется только к прямому строковому присваиванию; внутри параметризованного
-type-alias строка всегда считается типовой ссылкой.
+type-alias строка всегда считается типовой ссылкой. Индексация обычного
+mapping (`DEFAULT = MAPPING["numpy.float32"]`) не считается type-alias:
+параметризованные alias распознаются только по известным type-конструкторам
+(`list`, `dict`, `Optional`, `Union`, `Annotated` и аналогичным).
 
 Граница «контрактная валидация ↔ runtime-валидация» остаётся такой, как
 зафиксировано в [ADR 0001](0001-contracts-package.md#10-граница-контрактной-и-runtime-валидации).

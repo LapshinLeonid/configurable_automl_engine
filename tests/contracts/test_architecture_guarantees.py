@@ -272,6 +272,44 @@ def test_assignment_aliases_of_runtime_calls_are_reported(tmp_path: Path) -> Non
     assert {violation.rule for violation in violations} == {"runtime-access"}
 
 
+def test_callable_alias_is_scoped_per_function(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def harmless():
+            f = len
+            f([])
+
+        def dangerous():
+            f = os.system
+            f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_callable_alias_reassignment_is_ordered(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def run():
+            f = len
+            f([])
+            f = os.system
+            f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
 def test_os_file_io_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -297,6 +335,32 @@ def test_imported_os_open_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_exec_and_eval_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        exec("import configurable_automl_engine")
+        eval("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert len(violations) == 2
+    assert {violation.rule for violation in violations} == {"dynamic-import"}
+
+
+def test_literal_getattr_dynamic_import_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        getattr(importlib, "import_module")("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
 
 
 def test_runtime_environment_access_is_reported(tmp_path: Path) -> None:
@@ -368,6 +432,26 @@ def test_tempfile_and_environment_surface_are_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert len(violations) == 4
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_io_and_process_identity_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import io
+        import os
+        import sys
+
+        io.FileIO("x")
+        os.getpid()
+        sys.stdin
+        sys.stdout
+        sys.stderr
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 5
     assert {violation.rule for violation in violations} == {"runtime-access"}
 
 
@@ -525,6 +609,53 @@ def test_unbound_path_io_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
+def test_path_field_with_default_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        from pydantic import BaseModel, Field
+
+        class Model(BaseModel):
+            path: Path = Field(default=Path("model.bin"))
+
+            def load(self) -> str:
+                return self.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_optional_path_annotation_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def load(path: Path | None) -> str | None:
+            return None if path is None else path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_path_slash_composition_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        base = Path("x")
+        (base / "model.json").read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
 def test_pure_path_operations_are_allowed(tmp_path: Path) -> None:
     _write(
         tmp_path / "good.py",
@@ -668,6 +799,17 @@ def test_chained_string_alias_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_type_strings(tmp_path)
     assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_data_subscript_is_not_a_type_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        MAPPING = {"key": "numpy.float32"}
+        DEFAULT = MAPPING["numpy.float32"]
+        """,
+    )
+    assert scan_contract_type_strings(tmp_path) == []
 
 
 def test_nested_type_aliases_are_reported(tmp_path: Path) -> None:
