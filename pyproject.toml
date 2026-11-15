@@ -54,7 +54,7 @@ mlflow = ["mlflow>=2.0.0"]
 
 shap = ["shap>=0.48.0"]
 
-test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15"]
+test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15", "jsonschema>=4.18"]
 
 all = ["configurable-automl-engine[xgboost,logging,mlflow,shap]"]
 

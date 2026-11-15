@@ -1,0 +1,123 @@
+{
+  "general": {
+    "comparison_metric": "r2",
+    "additional_metrics": [
+      "mae",
+      "scaled_mae"
+    ],
+    "custom_metrics": {
+      "scaled_mae": {
+        "path": "tests.custom_metric_fixtures:scaled_r2",
+        "kind": "metric",
+        "greater_is_better": true,
+        "kwargs": {
+          "scale": 2.0
+        }
+      }
+    },
+    "path_to_model": "artifacts/best_model.joblib",
+    "serialization_format": "joblib",
+    "phases": [
+      {
+        "name": "search",
+        "n_trials": 5,
+        "action": "all_algorithms"
+      },
+      {
+        "name": "final_select",
+        "n_trials": 1,
+        "action": "select",
+        "strategy": "cv_best",
+        "output": "winner"
+      }
+    ],
+    "validation_strategy": "k_fold",
+    "n_folds": 3,
+    "n_repeats": 2,
+    "split_aggregation": "median",
+    "random_state": 42,
+    "categorical_encoding": "one_hot",
+    "parallel_mode": "threads",
+    "feature_selection": {
+      "mode": "always",
+      "method": "percentile",
+      "percentile": 25.0,
+      "min_features": 4,
+      "variance_threshold": 0.0,
+      "n_estimators": 30
+    },
+    "preprocessing": {
+      "imputation_strategy": "median",
+      "scaling": {
+        "type": "robust",
+        "quantile_range": [
+          10.0,
+          90.0
+        ],
+        "with_centering": false
+      },
+      "outliers": {
+        "method": "iqr",
+        "iqr_multiplier": 2.0
+      }
+    },
+    "sanity_gate": {
+      "top_k_candidates": 2,
+      "corridor_delta": 0.2,
+      "corridor_mode": "auto",
+      "generalization_gap_mode": "reject"
+    },
+    "complexity_guard": {
+      "mode": "apply",
+      "user_range_policy": "engine_wins",
+      "size_basis": "rows"
+    },
+    "ensemble": {
+      "enable": true,
+      "k": 2,
+      "weight_method": "equal"
+    },
+    "target_transform": "yeo-johnson",
+    "target_transform_skew_threshold": 1.5,
+    "inf_policy": "as_missing",
+    "datetime_policy": "expand"
+  },
+  "oversampling": {
+    "data_oversampling": true,
+    "data_oversampling_multiplier": 2.0,
+    "data_oversampling_algorithm": "smote",
+    "data_oversampling_target_bins": 4,
+    "data_oversampling_add_noise": true,
+    "data_oversampling_noise_level": 0.05
+  },
+  "algorithms": {
+    "ridge": {
+      "enable": true,
+      "hyperparameters": {
+        "alpha": [
+          0.01,
+          100.0,
+          "float_log"
+        ]
+      }
+    },
+    "random_forest": {
+      "enable": false,
+      "limit_hyperparameters": true,
+      "hyperparameters": {
+        "n_estimators": [
+          [
+            10,
+            50,
+            100
+          ],
+          "categorical"
+        ]
+      },
+      "preprocessing": {
+        "scaling": "none",
+        "outliers": "quantile"
+      }
+    }
+  }
+}

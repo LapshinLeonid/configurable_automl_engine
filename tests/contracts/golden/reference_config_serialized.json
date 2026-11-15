@@ -1,0 +1,210 @@
+{
+  "general": {
+    "custom_metrics": {
+      "scaled_mae": {
+        "path": "tests.custom_metric_fixtures:scaled_r2",
+        "kind": "metric",
+        "greater_is_better": true,
+        "additive": false,
+        "kwargs": {
+          "scale": 2.0
+        }
+      }
+    },
+    "comparison_metric": "r2",
+    "additional_metrics": [
+      "mae",
+      "scaled_mae"
+    ],
+    "path_to_model": "artifacts/best_model.joblib",
+    "serialization_format": "joblib",
+    "log_to_file": null,
+    "phases": [
+      {
+        "name": "search",
+        "n_trials": 5,
+        "action": "all_algorithms",
+        "strategy": null,
+        "output": null,
+        "k": null
+      },
+      {
+        "name": "final_select",
+        "n_trials": 1,
+        "action": "select",
+        "strategy": "cv_best",
+        "output": "winner",
+        "k": null
+      }
+    ],
+    "validation_strategy": "k_fold",
+    "n_folds": 3,
+    "n_repeats": 2,
+    "split_aggregation": "median",
+    "random_state": 42,
+    "holdout_fraction": "auto",
+    "categorical_encoding": "one_hot",
+    "high_cardinality_threshold": 50,
+    "high_cardinality_encoding": "frequency",
+    "hashing_n_components": 16,
+    "target_encoding_smoothing": 20.0,
+    "target_encoding_fallback": null,
+    "parallel_strategy": "algorithms",
+    "max_workers": null,
+    "parallel_mode": "threads",
+    "start_method": null,
+    "phase_timeout": null,
+    "task_timeout": null,
+    "pruning": {
+      "enable": false,
+      "strategy": "median",
+      "min_steps": 1,
+      "n_startup_trials": 5,
+      "reduction_factor": 3
+    },
+    "feature_selection": {
+      "mode": "always",
+      "method": "percentile",
+      "percentile": 25.0,
+      "min_features": 4,
+      "variance_threshold": 0.0,
+      "n_estimators": 30
+    },
+    "sanity_gate": {
+      "top_k_candidates": 2,
+      "corridor_delta": 0.2,
+      "corridor_mode": "auto",
+      "enforce_family_diversity": false,
+      "algorithm_families": null,
+      "allowed_families": null,
+      "family_diversity_multiplier": 1.5,
+      "min_prediction_diversity": 0.15,
+      "adaptive_diversity": true,
+      "min_unique_count": 5,
+      "min_unique_ratio": 0.05,
+      "max_dead_feature_ratio": 0.4,
+      "dead_features_require_low_diversity": true,
+      "zero_coef_tolerance": 1e-12,
+      "max_generalization_gap": 1.5,
+      "generalization_gap_mode": "reject",
+      "check_permutation_sensitivity": true,
+      "permutation_max_rows": 5000,
+      "permutation_max_features": 100,
+      "permutation_repeats": 3,
+      "permutation_seed": 42,
+      "permutation_tolerance": 0.001,
+      "audit_time_budget_seconds": 0.0,
+      "check_diversity": true,
+      "check_unique": true,
+      "check_dead_features": true,
+      "check_generalization_gap": true
+    },
+    "complexity_guard": {
+      "mode": "apply",
+      "lossless": true,
+      "regularize": true,
+      "user_range_policy": "engine_wins",
+      "small_n_threshold": 50,
+      "small_np_ratio_threshold": 5.0,
+      "medium_n_threshold": 300,
+      "medium_np_ratio_threshold": 20.0,
+      "size_basis": "rows"
+    },
+    "ensemble": {
+      "enable": true,
+      "k": 2,
+      "weight_method": "equal"
+    },
+    "preprocessing": {
+      "imputation_strategy": "median",
+      "scaling": {
+        "type": "robust",
+        "quantile_range": [
+          10.0,
+          90.0
+        ],
+        "with_centering": false
+      },
+      "outliers": {
+        "method": "iqr",
+        "iqr_multiplier": 2.0
+      }
+    },
+    "inf_policy": "as_missing",
+    "datetime_policy": "expand",
+    "drop_id_like_columns": false,
+    "target_transform": "yeo-johnson",
+    "target_transform_skew_threshold": 1.5
+  },
+  "oversampling": {
+    "enable": true,
+    "multiplier": 2.0,
+    "algorithm": "smote",
+    "target_bins": 4,
+    "add_noise": true,
+    "noise_level": 0.05
+  },
+  "algorithms": {
+    "elasticnet": null,
+    "sgdregressor": null,
+    "decision_tree": null,
+    "random_forest": {
+      "enable": false,
+      "limit_hyperparameters": true,
+      "hyperparameters": {
+        "n_estimators": {
+          "config": {
+            "type": "categorical",
+            "options": [
+              10,
+              50,
+              100
+            ]
+          },
+          "explicit_type": false
+        }
+      },
+      "preprocessing": {
+        "imputation_strategy": null,
+        "scaling": {
+          "type": "none"
+        },
+        "outliers": {
+          "method": "quantile",
+          "lower_quantile": 0.01,
+          "upper_quantile": 0.99
+        }
+      }
+    },
+    "extra_trees": null,
+    "gradient_boosting": null,
+    "adaboost": null,
+    "poissonregressor": null,
+    "gammaregressor": null,
+    "tweedieregressor": null,
+    "gaussian_process_regression": null,
+    "isotonic_regression": null,
+    "nearest_neighbors_regression": null,
+    "svr": null,
+    "ardregression": null,
+    "glm": null,
+    "ridge": {
+      "enable": true,
+      "limit_hyperparameters": false,
+      "hyperparameters": {
+        "alpha": {
+          "config": {
+            "type": "float_log",
+            "low": 0.01,
+            "high": 100.0,
+            "step": null
+          },
+          "explicit_type": true
+        }
+      },
+      "preprocessing": null
+    },
+    "lasso": null,
+    "xgboosting": null
+  }
+}

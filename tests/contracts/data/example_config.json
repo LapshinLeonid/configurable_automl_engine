@@ -1,0 +1,10 @@
+{
+  "general": {
+    "comparison_metric": "r2",
+    "path_to_model": "diabetes_model.pkl"
+  },
+  "algorithms": {
+    "ridge": {},
+    "random_forest": {}
+  }
+}
