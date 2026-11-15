@@ -81,7 +81,11 @@ DYNAMIC_IMPORT_CALLS = frozenset(
 RUNTIME_CALL_PREFIXES = (
     "builtins.open",
     "ctypes.",
+    "dbm.",
+    "fileinput.",
+    "glob.",
     "io.open",
+    "mmap.",
     "multiprocessing.",
     "os.access",
     "os.chdir",
@@ -185,15 +189,20 @@ RUNTIME_CALL_PREFIXES = (
     "urllib.",
     "urllib2.",
     "xmlrpc.",
+    "shelve.",
     "shutil.copy",
     "shutil.copy2",
+    "shutil.disk_usage",
     "shutil.move",
     "shutil.rmtree",
     "shutil.which",
     "socket.",
     "subprocess.",
     "sqlite3.",
+    "tarfile.",
     "tempfile.",
+    "webbrowser.",
+    "zipfile.",
 )
 TYPE_CONSTRUCTOR_NAMES = frozenset(
     {
@@ -366,56 +375,141 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
+FlowAliases = dict[str, frozenset[str]]
+CallContext = tuple[ast.Call, FlowAliases, set[str]]
+
+
 def _calls_in_expression(
-    node: ast.AST, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    node: ast.AST, aliases: FlowAliases, path_names: set[str]
+) -> Iterator[CallContext]:
     for child in ast.walk(node):
         if isinstance(child, ast.Call):
-            yield child, dict(aliases)
+            yield child, dict(aliases), set(path_names)
 
 
-def _remove_target_aliases(targets: Sequence[ast.AST], aliases: dict[str, str]) -> None:
+def _resolve_possible_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, frozenset({node.id}))
+    if isinstance(node, ast.Attribute):
+        bases = _resolve_possible_names(node.value, aliases)
+        return frozenset(f"{base}.{node.attr}" for base in bases)
+    return frozenset()
+
+
+def _remove_target_aliases(targets: Sequence[ast.AST], aliases: FlowAliases) -> None:
     for target in targets:
         if isinstance(target, ast.Name):
             aliases.pop(target.id, None)
 
 
 def _assign_target_aliases(
-    targets: Sequence[ast.AST], value: ast.AST, aliases: dict[str, str]
+    targets: Sequence[ast.AST], value: ast.AST, aliases: FlowAliases
 ) -> None:
-    resolved = None
+    resolved: frozenset[str] = frozenset()
     if isinstance(value, (ast.Name, ast.Attribute)):
-        resolved = _resolve_callable_name(value, aliases)
+        resolved = _resolve_possible_names(value, aliases)
     for target in targets:
-        if not isinstance(target, ast.Name):
-            continue
-        if resolved is None:
-            aliases.pop(target.id, None)
-        else:
+        if isinstance(target, ast.Name):
             aliases[target.id] = resolved
 
 
-def _apply_scope_import(stmt: ast.stmt, aliases: dict[str, str]) -> None:
+def _iterable_callable_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        result: set[str] = set()
+        for element in node.elts:
+            result.update(_resolve_possible_names(element, aliases))
+        return frozenset(result)
+    return frozenset()
+
+
+def _apply_scope_import(stmt: ast.stmt, aliases: FlowAliases) -> None:
     if isinstance(stmt, ast.Import):
         for alias in stmt.names:
             local = alias.asname or alias.name.split(".")[0]
-            aliases[local] = alias.name if alias.asname else alias.name.split(".")[0]
+            resolved = alias.name if alias.asname else alias.name.split(".")[0]
+            aliases[local] = frozenset({resolved})
     elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
         for alias in stmt.names:
-            aliases[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+            aliases[alias.asname or alias.name] = frozenset(
+                {f"{stmt.module}.{alias.name}"}
+            )
+
+
+def _merge_alias_sets(target: FlowAliases, *branches: FlowAliases) -> None:
+    keys: set[str] = set(target)
+    for branch in branches:
+        keys.update(branch)
+    for key in keys:
+        values: set[str] = set()
+        for branch in branches:
+            if key in branch:
+                values.update(branch[key])
+            else:
+                values.update(target.get(key, frozenset({key})))
+        target[key] = frozenset(values)
+
+
+def _scope_nodes(body: Sequence[ast.stmt]) -> Iterator[ast.AST]:
+    stack: list[ast.AST] = list(reversed(body))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def _scope_path_names(
+    body: Sequence[ast.stmt], aliases: dict[str, str], inherited: set[str]
+) -> set[str]:
+    names = set(inherited)
+    changed = True
+    while changed:
+        changed = False
+        for node in _scope_nodes(body):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.returns is not None
+                and _annotation_contains_path(node.returns, aliases)
+                and node.name not in names
+            ):
+                names.add(node.name)
+                changed = True
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.ClassDef):
+                continue
+            if isinstance(node, ast.Assign):
+                if _is_path_expression(node.value, aliases, names):
+                    changed |= _add_path_names(node.targets, names)
+            elif isinstance(node, ast.AnnAssign):
+                if _annotation_contains_path(node.annotation, aliases):
+                    changed |= _add_path_names([node.target], names)
+                if node.value is not None and _is_path_expression(
+                    node.value, aliases, names
+                ):
+                    changed |= _add_path_names([node.target], names)
+    return names
 
 
 def _iter_function_calls(
-    stmt: ast.FunctionDef | ast.AsyncFunctionDef, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    stmt: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
     for decorator in stmt.decorator_list:
-        yield from _calls_in_expression(decorator, aliases)
+        yield from _calls_in_expression(decorator, aliases, path_names)
     for default in stmt.args.defaults:
-        yield from _calls_in_expression(default, aliases)
+        yield from _calls_in_expression(default, aliases, path_names)
     for kw_default in stmt.args.kw_defaults:
         if kw_default is not None:
-            yield from _calls_in_expression(kw_default, aliases)
-    inner = dict(aliases)
+            yield from _calls_in_expression(kw_default, aliases, path_names)
+    base_aliases = dict(global_aliases if global_aliases is not None else aliases)
+    inner_paths = set(path_names)
     arguments = [
         *stmt.args.posonlyargs,
         *stmt.args.args,
@@ -424,107 +518,192 @@ def _iter_function_calls(
         stmt.args.kwarg,
     ]
     for argument in arguments:
-        if argument is not None:
-            inner.pop(argument.arg, None)
-    yield from _iter_calls_with_aliases(stmt.body, inner)
+        if argument is None:
+            continue
+        base_aliases.pop(argument.arg, None)
+        if argument.annotation is not None and _annotation_contains_path(
+            argument.annotation, _import_aliases_from_alias_sets(aliases)
+        ):
+            inner_paths.add(argument.arg)
+        else:
+            inner_paths.discard(argument.arg)
+    inner_paths = _scope_path_names(
+        stmt.body, _import_aliases_from_alias_sets(aliases), inner_paths
+    )
+    yield from _iter_calls_with_aliases(
+        stmt.body, base_aliases, inner_paths, global_aliases
+    )
+
+
+def _import_aliases_from_alias_sets(aliases: FlowAliases) -> dict[str, str]:
+    return {
+        name: next(iter(values)) for name, values in aliases.items() if len(values) == 1
+    }
 
 
 def _iter_class_calls(
-    stmt: ast.ClassDef, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    stmt: ast.ClassDef,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
     for decorator in stmt.decorator_list:
-        yield from _calls_in_expression(decorator, aliases)
+        yield from _calls_in_expression(decorator, aliases, path_names)
     for base in stmt.bases:
-        yield from _calls_in_expression(base, aliases)
+        yield from _calls_in_expression(base, aliases, path_names)
     for keyword in stmt.keywords:
-        yield from _calls_in_expression(keyword.value, aliases)
-    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+        yield from _calls_in_expression(keyword.value, aliases, path_names)
+    class_paths = _scope_path_names(
+        stmt.body, _import_aliases_from_alias_sets(aliases), path_names
+    )
+    yield from _iter_calls_with_aliases(
+        stmt.body, dict(aliases), class_paths, global_aliases
+    )
 
 
 def _iter_assign_calls(
-    stmt: ast.Assign, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.value, aliases)
+    stmt: ast.Assign,
+    aliases: FlowAliases,
+    path_names: set[str],
+    _global: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.value, aliases, path_names)
     _assign_target_aliases(stmt.targets, stmt.value, aliases)
 
 
 def _iter_ann_assign_calls(
-    stmt: ast.AnnAssign, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    stmt: ast.AnnAssign,
+    aliases: FlowAliases,
+    path_names: set[str],
+    _global: FlowAliases | None,
+) -> Iterator[CallContext]:
     if stmt.value is not None:
-        yield from _calls_in_expression(stmt.value, aliases)
+        yield from _calls_in_expression(stmt.value, aliases, path_names)
         _assign_target_aliases([stmt.target], stmt.value, aliases)
     else:
         _remove_target_aliases([stmt.target], aliases)
 
 
 def _iter_aug_assign_calls(
-    stmt: ast.AugAssign, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.value, aliases)
+    stmt: ast.AugAssign,
+    aliases: FlowAliases,
+    path_names: set[str],
+    _global: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.value, aliases, path_names)
     _remove_target_aliases([stmt.target], aliases)
 
 
 def _iter_if_calls(
-    stmt: ast.If, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.test, aliases)
-    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
-    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+    stmt: ast.If,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.test, aliases, path_names)
+    body = dict(aliases)
+    yield from _iter_calls_with_aliases(stmt.body, body, path_names, global_aliases)
+    orelse = dict(aliases)
+    yield from _iter_calls_with_aliases(stmt.orelse, orelse, path_names, global_aliases)
+    _merge_alias_sets(aliases, body, orelse)
 
 
 def _iter_for_calls(
-    stmt: ast.For | ast.AsyncFor, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.iter, aliases)
+    stmt: ast.For | ast.AsyncFor,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.iter, aliases, path_names)
     inner = dict(aliases)
-    _remove_target_aliases([stmt.target], inner)
-    yield from _iter_calls_with_aliases(stmt.body, inner)
-    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+    if isinstance(stmt.target, ast.Name):
+        inner[stmt.target.id] = _iterable_callable_names(stmt.iter, aliases)
+    else:
+        _remove_target_aliases([stmt.target], inner)
+    yield from _iter_calls_with_aliases(stmt.body, inner, path_names, global_aliases)
+    orelse = dict(aliases)
+    yield from _iter_calls_with_aliases(stmt.orelse, orelse, path_names, global_aliases)
+    _merge_alias_sets(aliases, inner, orelse)
 
 
 def _iter_while_calls(
-    stmt: ast.While, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.test, aliases)
-    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
-    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
+    stmt: ast.While,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.test, aliases, path_names)
+    body = dict(aliases)
+    yield from _iter_calls_with_aliases(stmt.body, body, path_names, global_aliases)
+    orelse = dict(aliases)
+    yield from _iter_calls_with_aliases(stmt.orelse, orelse, path_names, global_aliases)
+    _merge_alias_sets(aliases, body, orelse)
 
 
 def _iter_with_calls(
-    stmt: ast.With | ast.AsyncWith, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
+    stmt: ast.With | ast.AsyncWith,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
     for item in stmt.items:
-        yield from _calls_in_expression(item.context_expr, aliases)
+        yield from _calls_in_expression(item.context_expr, aliases, path_names)
     inner = dict(aliases)
     for item in stmt.items:
         if item.optional_vars is not None:
             _remove_target_aliases([item.optional_vars], inner)
-    yield from _iter_calls_with_aliases(stmt.body, inner)
+    yield from _iter_calls_with_aliases(stmt.body, inner, path_names, global_aliases)
+    _merge_alias_sets(aliases, inner)
 
 
 def _iter_try_calls(
-    stmt: ast.Try, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _iter_calls_with_aliases(stmt.body, dict(aliases))
+    stmt: ast.Try,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
+    branches: list[FlowAliases] = []
+    body = dict(aliases)
+    branches.append(body)
+    yield from _iter_calls_with_aliases(stmt.body, body, path_names, global_aliases)
     for handler in stmt.handlers:
-        yield from _iter_calls_with_aliases(handler.body, dict(aliases))
-    yield from _iter_calls_with_aliases(stmt.orelse, dict(aliases))
-    yield from _iter_calls_with_aliases(stmt.finalbody, dict(aliases))
+        branch = dict(aliases)
+        branches.append(branch)
+        yield from _iter_calls_with_aliases(
+            handler.body, branch, path_names, global_aliases
+        )
+    orelse = dict(aliases)
+    branches.append(orelse)
+    yield from _iter_calls_with_aliases(stmt.orelse, orelse, path_names, global_aliases)
+    finalbody = dict(aliases)
+    branches.append(finalbody)
+    yield from _iter_calls_with_aliases(
+        stmt.finalbody, finalbody, path_names, global_aliases
+    )
+    _merge_alias_sets(aliases, *branches)
 
 
 def _iter_match_calls(
-    stmt: ast.Match, aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    yield from _calls_in_expression(stmt.subject, aliases)
+    stmt: ast.Match,
+    aliases: FlowAliases,
+    path_names: set[str],
+    global_aliases: FlowAliases | None,
+) -> Iterator[CallContext]:
+    yield from _calls_in_expression(stmt.subject, aliases, path_names)
+    branches: list[FlowAliases] = []
     for case in stmt.cases:
         if case.guard is not None:
-            yield from _calls_in_expression(case.guard, aliases)
-        yield from _iter_calls_with_aliases(case.body, dict(aliases))
+            yield from _calls_in_expression(case.guard, aliases, path_names)
+        branch = dict(aliases)
+        branches.append(branch)
+        yield from _iter_calls_with_aliases(
+            case.body, branch, path_names, global_aliases
+        )
+    _merge_alias_sets(aliases, *branches)
 
 
 ScopeHandler = Callable[
-    [Any, dict[str, str]], Iterator[tuple[ast.Call, dict[str, str]]]
+    [Any, FlowAliases, set[str], FlowAliases | None], Iterator[CallContext]
 ]
 _SCOPE_HANDLERS: dict[type[ast.stmt], ScopeHandler] = {
     ast.AsyncFunctionDef: _iter_function_calls,
@@ -545,18 +724,22 @@ _SCOPE_HANDLERS: dict[type[ast.stmt], ScopeHandler] = {
 
 
 def _iter_calls_with_aliases(
-    statements: list[ast.stmt], aliases: dict[str, str]
-) -> Iterator[tuple[ast.Call, dict[str, str]]]:
-    """Yield calls together with aliases visible at that point in the scope."""
+    statements: list[ast.stmt],
+    aliases: FlowAliases,
+    path_names: set[str] | None = None,
+    global_aliases: FlowAliases | None = None,
+) -> Iterator[CallContext]:
+    """Yield calls with aliases and lexical Path names visible at that point."""
+    current_paths = set() if path_names is None else path_names
     for stmt in statements:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             _apply_scope_import(stmt, aliases)
             continue
         handler = _SCOPE_HANDLERS.get(type(stmt))
         if handler is None:
-            yield from _calls_in_expression(stmt, aliases)
+            yield from _calls_in_expression(stmt, aliases, current_paths)
         else:
-            yield from handler(stmt, aliases)
+            yield from handler(stmt, aliases, current_paths, global_aliases)
 
 
 def _absolute_imports(tree: ast.Module) -> Iterator[tuple[int, str]]:
@@ -748,23 +931,39 @@ def _assigned_type_strings(
     return violations
 
 
+def _initial_flow_aliases(tree: ast.Module) -> FlowAliases:
+    return {name: frozenset({target}) for name, target in _import_aliases(tree).items()}
+
+
+def _module_final_aliases(tree: ast.Module, initial: FlowAliases) -> FlowAliases:
+    final = dict(initial)
+    for _ in _iter_calls_with_aliases(tree.body, final):
+        pass
+    return final
+
+
+def _module_path_names(tree: ast.Module, aliases: dict[str, str]) -> set[str]:
+    return _scope_path_names(tree.body, aliases, set())
+
+
 def _call_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
     violations: list[Violation] = []
-    initial = _import_aliases(tree)
-    for node, aliases in _iter_calls_with_aliases(tree.body, initial):
-        name = _resolve_callable_name(node.func, aliases)
-        if name is None:
-            continue
-        if name.rsplit(".", 1)[-1] not in {
-            "ForwardRef",
-            "NewType",
-            "TypeVar",
-            "cast",
-        }:
+    static = _import_aliases(tree)
+    initial = _initial_flow_aliases(tree)
+    final = _module_final_aliases(tree, initial)
+    paths = _module_path_names(tree, static)
+    for node, aliases, _ in _iter_calls_with_aliases(
+        tree.body, dict(initial), paths, final
+    ):
+        possible = _resolve_possible_names(node.func, aliases)
+        if not any(
+            name.rsplit(".", 1)[-1] in {"ForwardRef", "NewType", "TypeVar", "cast"}
+            for name in possible
+        ):
             continue
         arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
         for argument in arguments:
-            for constant in _type_expression_strings(argument, aliases):
+            for constant in _type_expression_strings(argument, static):
                 violation = _string_type_violation(path, constant, "string-annotation")
                 if violation is not None:
                     violations.append(violation)
@@ -801,19 +1000,25 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        initial = _import_aliases(tree)
-        for node, aliases in _iter_calls_with_aliases(tree.body, initial):
-            name = _resolve_callable_name(node.func, aliases)
-            if name in DYNAMIC_IMPORT_CALLS:
+        static = _import_aliases(tree)
+        initial = _initial_flow_aliases(tree)
+        final = _module_final_aliases(tree, initial)
+        paths = _module_path_names(tree, static)
+        for node, aliases, _ in _iter_calls_with_aliases(
+            tree.body, dict(initial), paths, final
+        ):
+            possible = _resolve_possible_names(node.func, aliases)
+            dynamic = possible & DYNAMIC_IMPORT_CALLS
+            if dynamic:
                 message = (
-                    f"dynamic execution through {name!r} is forbidden in the "
-                    "contract; use a static import"
+                    f"dynamic execution through {sorted(dynamic)!r} is "
+                    "forbidden in the contract; use a static import"
                 )
                 violations.append(
                     Violation("dynamic-import", path, node.lineno, message)
                 )
             elif (
-                name in {"getattr", "builtins.getattr"}
+                possible & {"getattr", "builtins.getattr"}
                 and (target := _literal_getattr_target(node)) is not None
             ):
                 violations.append(
@@ -889,9 +1094,15 @@ def _is_path_expression(
     if not isinstance(node, ast.Call):
         return False
     name = _resolve_callable_name(node.func, aliases)
-    if name in PATH_CLASS_NAMES:
+    if name in PATH_CLASS_NAMES or name in path_names:
         return True
     if isinstance(node.func, ast.Attribute):
+        if (
+            isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"self", "cls"}
+            and node.func.attr in path_names
+        ):
+            return True
         return node.func.attr in PATH_RETURNING_METHODS and _is_path_expression(
             node.func.value, aliases, path_names
         )
@@ -915,34 +1126,6 @@ def _add_path_names(targets: Sequence[ast.AST], names: set[str]) -> bool:
     return changed
 
 
-def _path_names(tree: ast.Module, aliases: dict[str, str]) -> set[str]:
-    """Collect variables and annotated attributes that hold a Path."""
-    names: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                if _is_path_expression(node.value, aliases, names):
-                    changed |= _add_path_names(node.targets, names)
-            elif isinstance(node, ast.AnnAssign):
-                if _annotation_contains_path(node.annotation, aliases):
-                    changed |= _add_path_names([node.target], names)
-                if node.value is not None and _is_path_expression(
-                    node.value, aliases, names
-                ):
-                    changed |= _add_path_names([node.target], names)
-            elif (
-                isinstance(node, ast.arg)
-                and node.annotation is not None
-                and _annotation_contains_path(node.annotation, aliases)
-                and node.arg not in names
-            ):
-                names.add(node.arg)
-                changed = True
-    return names
-
-
 def scan_contract_runtime_access(
     contract_src: Path = CONTRACT_SRC,
 ) -> list[Violation]:
@@ -950,34 +1133,41 @@ def scan_contract_runtime_access(
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        initial = _import_aliases(tree)
-        path_names = _path_names(tree, initial)
+        static = _import_aliases(tree)
+        initial = _initial_flow_aliases(tree)
+        final = _module_final_aliases(tree, initial)
+        module_paths = _module_path_names(tree, static)
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
-                name = initial.get(node.id, node.id)
+                name = static.get(node.id, node.id)
                 if name in RUNTIME_ATTRIBUTES:
                     violations.append(_runtime_violation(path, node.lineno, name))
                 continue
             if isinstance(node, ast.Attribute):
-                attribute_name = _resolve_callable_name(node, initial)
+                attribute_name = _resolve_callable_name(node, static)
                 if attribute_name in RUNTIME_ATTRIBUTES:
                     violations.append(
                         _runtime_violation(path, node.lineno, attribute_name)
                     )
-        for node, aliases in _iter_calls_with_aliases(tree.body, initial):
+        for node, aliases, path_names in _iter_calls_with_aliases(
+            tree.body, dict(initial), module_paths, final
+        ):
             if isinstance(node.func, ast.Attribute) and _is_path_expression(
-                node.func.value, aliases, path_names
+                node.func.value, static, path_names
             ):
                 if node.func.attr not in PATH_PURE_METHODS:
                     violations.append(
                         _runtime_violation(path, node.lineno, f"Path.{node.func.attr}")
                     )
                 continue
-            call_name = _resolve_callable_name(node.func, aliases)
-            if call_name is None:
-                continue
-            if call_name == "open" or call_name.startswith(RUNTIME_CALL_PREFIXES):
-                violations.append(_runtime_violation(path, node.lineno, call_name))
+            possible = _resolve_possible_names(node.func, aliases)
+            forbidden = {
+                name
+                for name in possible
+                if name == "open" or name.startswith(RUNTIME_CALL_PREFIXES)
+            }
+            if forbidden:
+                violations.append(_runtime_violation(path, node.lineno, min(forbidden)))
     return violations
 
 
@@ -1574,7 +1764,12 @@ def _check_ci_block(
     required: dict[str, str],
     label: str,
 ) -> list[Violation]:
-    text = "\n".join(line for line in block if not line.lstrip().startswith("#"))
+    active_lines = []
+    for line in block:
+        without_comment = line.split("#", 1)[0].rstrip()
+        if without_comment:
+            active_lines.append(without_comment)
+    text = "\n".join(active_lines)
     violations: list[Violation] = []
     for token, description in required.items():
         if token not in text:
@@ -1634,40 +1829,49 @@ def scan_ci_configuration(
                 )
             )
     github_path = GITHUB_CI_CONFIG if github_ci_path is None else github_ci_path
-    if github_path.is_file():
-        lines = github_path.read_text(encoding="utf-8").splitlines()
-        found = _block_after_marker(lines, "contracts:", exact=True)
-        if found is None:
-            violations.append(
-                Violation(
-                    "ci-configuration",
-                    github_path,
-                    1,
-                    "GitHub CI has no contracts job",
-                )
+    if not github_path.is_file():
+        violations.append(
+            Violation(
+                "ci-configuration",
+                github_path,
+                1,
+                "GitHub CI configuration is missing",
             )
-        else:
-            block, _ = found
-            violations.extend(
-                _check_ci_block(
-                    github_path,
-                    block,
-                    {
-                        "scripts/check_contract_boundaries.py": "static boundary check",
-                        "scripts/verify_contract_distribution.py": "artifact verification",
-                        "scripts/smoke_contract_install.py": "isolated smoke import",
-                        "python -m build automl-contracts": "contract build",
-                        "twine check": "twine metadata check",
-                        "python -m venv": "isolated environment",
-                        "python -m pytest tests/contracts": "contract tests",
-                        "mypy src": "contract mypy",
-                        "ruff check src/ automl-contracts/src/": "ruff for both packages",
-                        "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
-                        "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
-                    },
-                    "GitHub contracts job",
-                )
+        )
+        return violations
+    lines = github_path.read_text(encoding="utf-8").splitlines()
+    found = _block_after_marker(lines, "contracts:", exact=True)
+    if found is None:
+        violations.append(
+            Violation(
+                "ci-configuration",
+                github_path,
+                1,
+                "GitHub CI has no contracts job",
             )
+        )
+    else:
+        block, _ = found
+        violations.extend(
+            _check_ci_block(
+                github_path,
+                block,
+                {
+                    "scripts/check_contract_boundaries.py": "static boundary check",
+                    "scripts/verify_contract_distribution.py": "artifact verification",
+                    "scripts/smoke_contract_install.py": "isolated smoke import",
+                    "python -m build automl-contracts": "contract build",
+                    "twine check": "twine metadata check",
+                    "python -m venv": "isolated environment",
+                    "python -m pytest tests/contracts": "contract tests",
+                    "mypy src": "contract mypy",
+                    "ruff check src/ automl-contracts/src/": "ruff for both packages",
+                    "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
+                    "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
+                },
+                "GitHub contracts job",
+            )
+        )
     return violations
 
 

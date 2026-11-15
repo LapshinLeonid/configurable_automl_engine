@@ -63,6 +63,9 @@ configurable_automl_engine ───────▶ automl_contracts
   числе через импорт-алиас и присваивание (`f = __import__; f(...)`).
   Присваивания callable анализируются по областям видимости и в порядке
   выполнения, поэтому одинаковые имена в разных функциях не смешиваются.
+  Ветки `if`/`try`/`for`/`while`/`with`/`match` объединяются как наборы
+  возможных целей, а функции видят module-level aliases, определённые после
+  `def`.
   Разрешён только `importlib.metadata.version` для получения версии
   установленного дистрибутива;
 - строковая ссылка внутри параметризованного type-alias
@@ -124,7 +127,8 @@ AST-проверка импортов использует белый списо
 - процессы и сеть: `os.system`, `os.popen`, `os.fork`, `os.exec*`, `os.kill`,
   `os.getpid`, `os.getppid`, `os.getuid`, `os.getgid`, `os.get_exec_path`,
   `subprocess.*`, `socket.*`, `urllib.*`, `http.*`, `smtplib.*`, `ftplib.*`,
-  `tempfile.*`, `sqlite3.*`, `io.*`;
+  `tempfile.*`, `sqlite3.*`, `io.*`, `glob.*`, `zipfile.*`, `tarfile.*`,
+  `dbm.*`, `shelve.*`, `fileinput.*`, `mmap.*`, `webbrowser.*`;
 - обращения к `sys.argv`, `sys.path`, `sys.stdin`, `sys.stdout`, `sys.stderr`,
   `sys.executable`, `sys.prefix` и аналогичным environment-зависимым
   атрибутам;
@@ -146,9 +150,12 @@ AST-проверка импортов использует белый списо
 (`p = Path(...); p.read_text()`) и атрибуты объектов
 (`self.path.read_text()` для `path: Path`). Аннотированные поля и параметры
 `Path`, `Path | None`, `Optional[Path]` и `Annotated[Path, ...]`, включая
-`Field(default=...)`, также попадают в taint. Проверка переменных является
+`Field(default=...)`, также попадают в taint. Path-имена учитываются по
+лексическим областям: параметры и локальные переменные функции не заражают
+другие функции, а `self.<attr>` — только свой класс. Аннотация возврата
+`-> Path` делает вызов функции Path-выражением. Проверка переменных является
 консервативным taint-анализом простых присваиваний и аннотированных атрибутов
-в пределах модуля; сложные потоки данных могут потребовать явного ограничения
+в пределах области; сложные потоки данных могут потребовать явного ограничения
 в ADR. Также запрещены импортированные ссылки вроде `from os import environ` и
 `from sys import platform`.
 
@@ -193,10 +200,11 @@ python -m build automl-contracts --outdir automl-contracts/dist
 python -m build . --outdir dist/engine
 ```
 
-Проверки CI игнорируют закомментированные строки, чтобы наличие команды в
-комментарии не считалось выполнением шага. Присваивания вида
-`Config = automl_contracts.Config` и `Config = contract_module.Config`
-считаются реэкспортом и не считаются дублями.
+Проверки CI игнорируют как целые закомментированные строки, так и хвостовые
+комментарии, чтобы текст команды в комментарии не считался выполнением шага.
+Отсутствие `.github/workflows/CI.yaml` или job `contracts` является нарушением.
+Присваивания вида `Config = automl_contracts.Config` и
+`Config = contract_module.Config` считаются реэкспортом и не считаются дублями.
 
 Проверки артефактов:
 

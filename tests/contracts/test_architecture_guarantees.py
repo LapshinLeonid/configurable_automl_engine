@@ -310,6 +310,74 @@ def test_callable_alias_reassignment_is_ordered(tmp_path: Path) -> None:
     assert "os.system" in violations[0].message
 
 
+def test_if_branch_alias_is_merged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        if True:
+            f = os.system
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_try_finally_alias_is_merged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        try:
+            f = os.system
+        finally:
+            pass
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_for_loop_alias_is_merged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        for f in [os.system]:
+            pass
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_module_alias_after_function_is_visible(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def run():
+            f("id")
+
+        f = os.system
+        run()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
 def test_os_file_io_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -452,6 +520,36 @@ def test_io_and_process_identity_are_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert len(violations) == 5
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_stdlib_filesystem_modules_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import dbm
+        import fileinput
+        import glob
+        import mmap
+        import shelve
+        import shutil
+        import tarfile
+        import webbrowser
+        import zipfile
+
+        glob.glob("/etc/*")
+        zipfile.ZipFile("/etc/passwd")
+        tarfile.open("/etc/passwd")
+        dbm.open("/tmp/x", "c")
+        shelve.open("/tmp/x")
+        fileinput.input()
+        mmap.mmap(0, 1)
+        shutil.disk_usage("/")
+        webbrowser.open("https://example.com")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 9
     assert {violation.rule for violation in violations} == {"runtime-access"}
 
 
@@ -603,6 +701,57 @@ def test_unbound_path_io_is_reported(tmp_path: Path) -> None:
         from pathlib import Path
 
         Path.read_text(Path("x"))
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_path_taint_does_not_leak_between_classes(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        class A:
+            path: Path
+
+        class B:
+            path: str
+
+            def f(self) -> str:
+                return self.path.strip()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_path_taint_does_not_leak_between_functions(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        def a(path: Path) -> None:
+            pass
+
+        def b(path: str) -> str:
+            return path.strip()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_path_return_annotation_is_tainted(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def model_path() -> Path:
+            return Path("x")
+
+        model_path().read_text()
         """,
     )
     violations = scan_contract_runtime_access(tmp_path)
@@ -849,6 +998,61 @@ def test_dotted_data_constant_is_not_a_type_alias(tmp_path: Path) -> None:
     assert scan_contract_type_strings(tmp_path) == []
 
 
+def test_ci_trailing_comment_does_not_satisfy_contracts_task(
+    tmp_path: Path,
+) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: contracts-guarantees
+                cubes:
+                  - name: static
+                    script:
+                      - |
+                        true  # scripts/check_contract_boundaries.py
+                        true  # scripts/verify_contract_distribution.py
+                        true  # scripts/smoke_contract_install.py
+                        true  # python3.11 -m build automl-contracts
+                        true  # twine check
+                        true  # python3.11 -m venv
+                        true  # pytest tests/contracts
+                        true  # mypy src
+                        true  # ruff check src/ automl-contracts/src/
+                        true  # ruff check tools/contract_boundaries.py
+                        true  # mypy tools/contract_boundaries.py
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    assert any("static boundary check" in violation.message for violation in violations)
+
+
+def test_missing_github_workflow_is_reported(tmp_path: Path) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: contracts-guarantees
+                cubes:
+                  - name: static
+                    script:
+                      - |
+                        scripts/check_contract_boundaries.py
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    assert any(
+        "GitHub CI configuration is missing" in violation.message
+        for violation in violations
+    )
+
+
 def test_ci_commented_commands_do_not_satisfy_contracts_task(
     tmp_path: Path,
 ) -> None:
@@ -931,7 +1135,7 @@ def test_ci_checks_commands_inside_contracts_task(tmp_path: Path) -> None:
     )
     violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
     assert violations
-    assert all(
+    assert any(
         "contracts-guarantees task" in violation.message for violation in violations
     )
 
