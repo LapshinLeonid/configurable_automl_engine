@@ -57,9 +57,13 @@ configurable_automl_engine ───────▶ automl_contracts
 - строковая аннотация, содержащая `configurable_automl_engine`, считается
   нарушением: она создаёт связь контракта со структурой движка;
 - динамический импорт через `importlib.import_module`, `importlib.__import__`,
-  `__import__`, `find_spec` или `spec_from_file_location` запрещён в контракте
-  полностью. Разрешён только `importlib.metadata.version` для получения версии
-  установленного дистрибутива;
+  `__import__`, `builtins.__import__`, `find_spec` или
+  `spec_from_file_location` запрещён в контракте полностью, в том числе через
+  импорт-алиас. Разрешён только `importlib.metadata.version` для получения
+  версии установленного дистрибутива;
+- строковая ссылка внутри параметризованного type-alias
+  (`Alias: TypeAlias = list["configurable_automl_engine.Config"]`) и
+  type-alias, импортированный под другим именем, также считаются нарушением;
 - `try/except ImportError` не делает запрещённую зависимость допустимой:
   импорт внутри `try` всё равно попадает в проверку. Опциональных зависимостей
   у контракта нет;
@@ -101,8 +105,11 @@ AST-проверка импортов использует белый списо
 - `sys.platform`, `platform.*` и проверки версии/платформы;
 - `subprocess.*`, `socket.*`, `multiprocessing.*`, `ctypes.*`, `resource.*`,
   `psutil.*`;
-- чтение и запись файлов через `open`, `Path.read_text`, `Path.write_text`,
-  `Path.open` и аналогичные вызовы;
+- чтение и запись файлов через `open`, `os.open`, `os.read`, `os.write`,
+  `Path.read_text`, `Path.write_text`, `Path.open` и аналогичные вызовы;
+- файловые проверки `Path.exists`, `Path.is_file`, `Path.is_dir`,
+  `Path.is_symlink`, `Path.is_socket`, `Path.is_fifo`, `Path.is_block_device`,
+  `Path.is_char_device` и аналогичные;
 - динамический импорт, перечисленный в разделе 3.
 
 `Path("model.pkl")` как значение по умолчанию является частью модели
@@ -110,9 +117,17 @@ AST-проверка импортов использует белый списо
 вызовы ввода-вывода, а не на конструктор `Path`. По той же причине разрешена
 чистая работа с путями: `os.path.join`, `Path(...).joinpath(...)`. Запрещены
 методы экземпляра `Path`, которые читают, изменяют или проверяют файловую
-систему (`read_text`, `write_text`, `open`, `exists` и аналогичные), а также
-импортированные ссылки вроде `from os import environ` и
-`from sys import platform`.
+систему (`read_text`, `write_text`, `open`, `exists`, `is_symlink` и
+аналогичные), в том числе в цепочках
+(`Path(...).joinpath(...).read_text()`) и через простую переменную
+(`p = Path(...); p.read_text()`). Проверка переменных является консервативным
+taint-анализом простых присваиваний в пределах модуля; сложные потоки данных
+могут потребовать явного ограничения в ADR. Также запрещены импортированные
+ссылки вроде `from os import environ` и `from sys import platform`.
+
+Строковые значения внутри `Literal[...]` и metadata `Annotated[...]`
+(`Field(description="numpy bound")`) являются данными, а не type-alias, и не
+считаются нарушением.
 
 Граница «контрактная валидация ↔ runtime-валидация» остаётся такой, как
 зафиксировано в [ADR 0001](0001-contracts-package.md#10-граница-контрактной-и-runtime-валидации).

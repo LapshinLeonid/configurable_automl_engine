@@ -53,6 +53,7 @@ FORBIDDEN_LIBRARY_ROOTS = frozenset(
 DYNAMIC_IMPORT_CALLS = frozenset(
     {
         "__import__",
+        "builtins.__import__",
         "import_module",
         "importlib.__import__",
         "importlib.import_module",
@@ -78,6 +79,24 @@ RUNTIME_CALL_PREFIXES = (
     "os.listdir",
     "os.makedirs",
     "os.mkdir",
+    "os.open",
+    "os.read",
+    "os.write",
+    "os.close",
+    "os.fdopen",
+    "os.pread",
+    "os.pwrite",
+    "os.dup",
+    "os.dup2",
+    "os.fsync",
+    "os.ftruncate",
+    "os.truncate",
+    "os.fchmod",
+    "os.fchown",
+    "os.lseek",
+    "os.sendfile",
+    "os.splice",
+    "os.copy_file_range",
     "os.putenv",
     "os.remove",
     "os.rename",
@@ -129,8 +148,15 @@ PATH_METHODS = frozenset(
         "exists",
         "expanduser",
         "glob",
+        "is_block_device",
+        "is_char_device",
         "is_dir",
+        "is_fifo",
         "is_file",
+        "is_junction",
+        "is_mount",
+        "is_socket",
+        "is_symlink",
         "iterdir",
         "lchmod",
         "lstat",
@@ -154,6 +180,22 @@ PATH_METHODS = frozenset(
     }
 )
 PATH_CLASS_NAMES = frozenset({"Path", "pathlib.Path"})
+PATH_RETURNING_METHODS = frozenset(
+    {
+        "absolute",
+        "cwd",
+        "expanduser",
+        "home",
+        "joinpath",
+        "relative_to",
+        "rename",
+        "replace",
+        "resolve",
+        "with_name",
+        "with_stem",
+        "with_suffix",
+    }
+)
 RUNTIME_ATTRIBUTES = frozenset(
     {
         "os.environ",
@@ -304,10 +346,34 @@ def _annotation_nodes(tree: ast.Module) -> Iterator[ast.AST]:
             yield annotation
 
 
-def _type_strings(node: ast.AST) -> Iterator[ast.Constant]:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            yield child
+def _type_expression_strings(
+    node: ast.AST, aliases: dict[str, str]
+) -> Iterator[ast.Constant]:
+    """Yield string type references, skipping Literal/Annotated metadata."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            yield node
+        return
+    if isinstance(node, ast.Subscript):
+        base = _resolve_callable_name(node.value, aliases)
+        base_name = base.rsplit(".", 1)[-1] if base else ""
+        if base_name == "Literal":
+            return
+        if base_name == "Annotated":
+            if isinstance(node.slice, ast.Tuple) and node.slice.elts:
+                yield from _type_expression_strings(node.slice.elts[0], aliases)
+            else:
+                yield from _type_expression_strings(node.slice, aliases)
+            return
+        yield from _type_expression_strings(node.slice, aliases)
+        return
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        for element in node.elts:
+            yield from _type_expression_strings(element, aliases)
+        return
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        yield from _type_expression_strings(node.left, aliases)
+        yield from _type_expression_strings(node.right, aliases)
 
 
 def _string_type_violation(
@@ -334,40 +400,41 @@ def _string_type_violation(
     return None
 
 
-def _is_type_alias_annotation(annotation: ast.AST) -> bool:
-    name = _dotted_name(annotation)
+def _is_type_alias_annotation(annotation: ast.AST, aliases: dict[str, str]) -> bool:
+    name = _resolve_callable_name(annotation, aliases)
     return name is not None and name.rsplit(".", 1)[-1] == "TypeAlias"
 
 
-def _string_alias_value(node: ast.stmt) -> ast.Constant | None:
-    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-        return node.value
-    if (
-        isinstance(node, ast.AnnAssign)
-        and isinstance(node.value, ast.Constant)
-        and _is_type_alias_annotation(node.annotation)
-    ):
-        return node.value
-    type_alias_node = getattr(ast, "TypeAlias", ())
-    if isinstance(node, type_alias_node) and isinstance(node.value, ast.Constant):
-        return node.value
-    return None
-
-
-def _assigned_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
-    """Check direct string aliases, not ordinary string-valued data."""
+def _assigned_type_strings(
+    path: Path, tree: ast.Module, aliases: dict[str, str]
+) -> list[Violation]:
+    """Check type aliases, not ordinary string-valued data."""
     violations: list[Violation] = []
+    type_alias_node = getattr(ast, "TypeAlias", ())
     for node in tree.body:
-        value = _string_alias_value(node)
-        if value is None or not isinstance(value.value, str):
-            continue
-        violation = _string_type_violation(path, value, "string-annotation")
-        if violation is not None:
-            violations.append(violation)
+        constants: list[ast.Constant] = []
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            value = node.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                if "." in value.value:
+                    constants = [value]
+            elif isinstance(value, (ast.Subscript, ast.BinOp)):
+                constants = list(_type_expression_strings(value, aliases))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            if _is_type_alias_annotation(node.annotation, aliases):
+                constants = list(_type_expression_strings(node.value, aliases))
+        elif isinstance(node, type_alias_node) and isinstance(node.value, ast.AST):
+            constants = list(_type_expression_strings(node.value, aliases))
+        for constant in constants:
+            violation = _string_type_violation(path, constant, "string-annotation")
+            if violation is not None:
+                violations.append(violation)
     return violations
 
 
-def _call_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
+def _call_type_strings(
+    path: Path, tree: ast.Module, aliases: dict[str, str]
+) -> list[Violation]:
     violations: list[Violation] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -384,8 +451,8 @@ def _call_type_strings(path: Path, tree: ast.Module) -> list[Violation]:
             continue
         arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
         for argument in arguments:
-            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                violation = _string_type_violation(path, argument, "string-annotation")
+            for constant in _type_expression_strings(argument, aliases):
+                violation = _string_type_violation(path, constant, "string-annotation")
                 if violation is not None:
                     violations.append(violation)
     return violations
@@ -396,13 +463,14 @@ def scan_contract_type_strings(contract_src: Path = CONTRACT_SRC) -> list[Violat
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
+        aliases = _import_aliases(tree)
         for annotation in _annotation_nodes(tree):
-            for constant in _type_strings(annotation):
+            for constant in _type_expression_strings(annotation, aliases):
                 violation = _string_type_violation(path, constant, "string-annotation")
                 if violation is not None:
                     violations.append(violation)
-        violations.extend(_assigned_type_strings(path, tree))
-        violations.extend(_call_type_strings(path, tree))
+        violations.extend(_assigned_type_strings(path, tree, aliases))
+        violations.extend(_call_type_strings(path, tree, aliases))
     return violations
 
 
@@ -439,11 +507,65 @@ def _runtime_violation(path: Path, line: int, name: str) -> Violation:
     )
 
 
-def _receiver_name(node: ast.AST, aliases: dict[str, str]) -> str | None:
-    """Resolve the object an attribute is read from, including factory calls."""
-    if isinstance(node, ast.Call):
-        return _resolve_callable_name(node.func, aliases)
-    return _resolve_callable_name(node, aliases)
+def _is_path_annotation(annotation: ast.AST, aliases: dict[str, str]) -> bool:
+    name = _resolve_callable_name(annotation, aliases)
+    return name is not None and name.rsplit(".", 1)[-1] == "Path"
+
+
+def _is_path_expression(
+    node: ast.AST, aliases: dict[str, str], path_names: set[str]
+) -> bool:
+    """Recognise Path factories and Path-preserving method chains."""
+    if isinstance(node, ast.Name):
+        return (
+            node.id in path_names or aliases.get(node.id, node.id) in PATH_CLASS_NAMES
+        )
+    if isinstance(node, ast.Attribute):
+        return node.attr == "parent" and _is_path_expression(
+            node.value, aliases, path_names
+        )
+    if not isinstance(node, ast.Call):
+        return False
+    name = _resolve_callable_name(node.func, aliases)
+    if name in PATH_CLASS_NAMES:
+        return True
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr in PATH_RETURNING_METHODS and _is_path_expression(
+            node.func.value, aliases, path_names
+        )
+    return False
+
+
+def _path_names(tree: ast.Module, aliases: dict[str, str]) -> set[str]:
+    """Collect variables that hold a Path, including simple reassignment."""
+    names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+                value = node.value
+                if value is None and _is_path_annotation(node.annotation, aliases):
+                    value = node.annotation
+            elif (
+                isinstance(node, ast.arg)
+                and node.annotation is not None
+                and _is_path_annotation(node.annotation, aliases)
+            ):
+                targets = [ast.Name(id=node.arg, ctx=ast.Store())]
+            if value is None or not _is_path_expression(value, aliases, names):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in names:
+                    names.add(target.id)
+                    changed = True
+    return names
 
 
 def scan_contract_runtime_access(
@@ -454,6 +576,7 @@ def scan_contract_runtime_access(
     for path in python_files(contract_src):
         tree = _parse(path)
         aliases = _import_aliases(tree)
+        path_names = _path_names(tree, aliases)
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
                 name = aliases.get(node.id, node.id)
@@ -466,10 +589,11 @@ def scan_contract_runtime_access(
                     violations.append(
                         _runtime_violation(path, node.lineno, attribute_name)
                     )
-                receiver = _receiver_name(node.value, aliases)
-                if receiver in PATH_CLASS_NAMES and node.attr in PATH_METHODS:
+                if node.attr in PATH_METHODS and _is_path_expression(
+                    node.value, aliases, path_names
+                ):
                     violations.append(
-                        _runtime_violation(path, node.lineno, f"{receiver}.{node.attr}")
+                        _runtime_violation(path, node.lineno, f"Path.{node.attr}")
                     )
                 continue
             if not isinstance(node, ast.Call):
