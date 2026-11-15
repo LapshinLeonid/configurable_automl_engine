@@ -287,6 +287,19 @@ PATH_PURE_METHODS = frozenset(
     }
 )
 
+PATH_PROPERTIES = frozenset(
+    {
+        "anchor",
+        "drive",
+        "name",
+        "parent",
+        "parts",
+        "root",
+        "stem",
+        "suffix",
+        "suffixes",
+    }
+)
 PATH_CLASS_NAMES = frozenset({"Path", "pathlib.Path"})
 PATH_RETURNING_METHODS = frozenset(
     {
@@ -410,9 +423,28 @@ CallContext = tuple[ast.Call, FlowAliases, set[str]]
 def _calls_in_expression(
     node: ast.AST, aliases: FlowAliases, path_names: set[str]
 ) -> Iterator[CallContext]:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
-            yield child, dict(aliases), set(path_names)
+    static = _import_aliases_from_alias_sets(aliases)
+    yield from _expression_calls(node, aliases, path_names, static)
+
+
+def _expression_calls(
+    node: ast.AST,
+    aliases: FlowAliases,
+    path_names: set[str],
+    static: dict[str, str],
+) -> Iterator[CallContext]:
+    if isinstance(node, ast.NamedExpr):
+        yield from _expression_calls(node.value, aliases, path_names, static)
+        _assign_target_aliases([node.target], node.value, aliases, static, path_names)
+        return
+    if isinstance(node, ast.Call):
+        call_aliases = dict(aliases)
+        for child in ast.iter_child_nodes(node):
+            yield from _expression_calls(child, aliases, path_names, static)
+        yield node, call_aliases, set(path_names)
+        return
+    for child in ast.iter_child_nodes(node):
+        yield from _expression_calls(child, aliases, path_names, static)
 
 
 def _resolve_possible_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
@@ -440,18 +472,34 @@ def _remove_target_aliases(targets: Sequence[ast.AST], aliases: FlowAliases) -> 
             aliases[name.id] = frozenset()
 
 
+def _assign_names(
+    target: ast.AST, values: frozenset[str], aliases: FlowAliases
+) -> None:
+    for name in _iter_target_names(target):
+        aliases[name.id] = values
+
+
 def _value_callable_names(
     value: ast.AST,
     aliases: FlowAliases,
     path_aliases: dict[str, str] | None,
     path_names: set[str] | None,
 ) -> frozenset[str]:
+    if isinstance(value, ast.NamedExpr):
+        return _value_callable_names(value.value, aliases, path_aliases, path_names)
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        result: set[str] = set()
+        for element in value.elts:
+            result.update(
+                _value_callable_names(element, aliases, path_aliases, path_names)
+            )
+        return frozenset(result)
     if isinstance(value, ast.Attribute) and path_names is not None:
         static = path_aliases or {}
         if _is_path_expression(value.value, static, path_names):
-            if value.attr not in PATH_PURE_METHODS:
-                return frozenset({f"Path.{value.attr}"})
-            return frozenset()
+            if value.attr in PATH_PROPERTIES or value.attr in PATH_PURE_METHODS:
+                return frozenset()
+            return frozenset({f"Path.{value.attr}"})
     if isinstance(value, (ast.Name, ast.Attribute)):
         return _resolve_possible_names(value, aliases)
     return frozenset()
@@ -477,7 +525,11 @@ def _assign_target(
                     path_names,
                 )
         else:
-            _remove_target_aliases([target], aliases)
+            _assign_names(
+                target,
+                _value_callable_names(value, aliases, path_aliases, path_names),
+                aliases,
+            )
         return
     if isinstance(target, ast.Starred):
         _assign_target(target.value, value, aliases, path_aliases, path_names)
@@ -519,11 +571,18 @@ def _apply_named_expressions(
             )
 
 
-def _iterable_callable_names(node: ast.AST, aliases: FlowAliases) -> frozenset[str]:
+def _iterable_callable_names(
+    node: ast.AST,
+    aliases: FlowAliases,
+    path_aliases: dict[str, str] | None = None,
+    path_names: set[str] | None = None,
+) -> frozenset[str]:
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         result: set[str] = set()
         for element in node.elts:
-            result.update(_resolve_possible_names(element, aliases))
+            result.update(
+                _value_callable_names(element, aliases, path_aliases, path_names)
+            )
         return frozenset(result)
     return frozenset()
 
@@ -607,7 +666,6 @@ def _iter_function_calls(
     path_names: set[str],
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
-    aliases[stmt.name] = frozenset()
     for decorator in stmt.decorator_list:
         yield from _calls_in_expression(decorator, aliases, path_names)
     for default in stmt.args.defaults:
@@ -615,6 +673,7 @@ def _iter_function_calls(
     for kw_default in stmt.args.kw_defaults:
         if kw_default is not None:
             yield from _calls_in_expression(kw_default, aliases, path_names)
+    aliases[stmt.name] = frozenset()
     base_aliases = dict(global_aliases if global_aliases is not None else aliases)
     inner_paths = set(path_names)
     arguments = [
@@ -654,13 +713,13 @@ def _iter_class_calls(
     path_names: set[str],
     global_aliases: FlowAliases | None,
 ) -> Iterator[CallContext]:
-    aliases[stmt.name] = frozenset()
     for decorator in stmt.decorator_list:
         yield from _calls_in_expression(decorator, aliases, path_names)
     for base in stmt.bases:
         yield from _calls_in_expression(base, aliases, path_names)
     for keyword in stmt.keywords:
         yield from _calls_in_expression(keyword.value, aliases, path_names)
+    aliases[stmt.name] = frozenset()
     class_paths = _scope_path_names(
         stmt.body, _import_aliases_from_alias_sets(aliases), path_names
     )
@@ -736,10 +795,8 @@ def _iter_for_calls(
     static = _import_aliases_from_alias_sets(aliases)
     _apply_named_expressions(stmt.iter, aliases, static, path_names)
     inner = dict(aliases)
-    if isinstance(stmt.target, ast.Name):
-        inner[stmt.target.id] = _iterable_callable_names(stmt.iter, aliases)
-    else:
-        _remove_target_aliases([stmt.target], inner)
+    iterable_values = _iterable_callable_names(stmt.iter, aliases, static, path_names)
+    _assign_names(stmt.target, iterable_values, inner)
     yield from _iter_calls_with_aliases(stmt.body, inner, path_names, global_aliases)
     orelse = dict(aliases)
     yield from _iter_calls_with_aliases(stmt.orelse, orelse, path_names, global_aliases)
@@ -1265,6 +1322,99 @@ def _add_path_names(targets: Sequence[ast.AST], names: set[str]) -> bool:
     return changed
 
 
+def _bound_names(statements: Sequence[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for node in _scope_nodes(statements):
+        targets: Sequence[ast.AST] = ()
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            with_targets: list[ast.AST] = []
+            for item in node.items:
+                if item.optional_vars is not None:
+                    with_targets.append(item.optional_vars)
+            targets = with_targets
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        for target in targets:
+            names.update(name.id for name in _iter_target_names(target))
+    return names
+
+
+def _root_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _root_name(node.value)
+    return None
+
+
+def _function_shadow(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, shadow: set[str]
+) -> set[str]:
+    local = set(shadow) | _bound_names(node.body)
+    arguments = [
+        *node.args.posonlyargs,
+        *node.args.args,
+        *node.args.kwonlyargs,
+        node.args.vararg,
+        node.args.kwarg,
+    ]
+    local.update(argument.arg for argument in arguments if argument is not None)
+    return local
+
+
+def _visit_function_shadow(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    shadow: set[str],
+    result: dict[int, set[str]],
+) -> None:
+    for decorator in node.decorator_list:
+        _visit_shadow(decorator, shadow, result)
+    for default in node.args.defaults:
+        _visit_shadow(default, shadow, result)
+    for kw_default in node.args.kw_defaults:
+        if kw_default is not None:
+            _visit_shadow(kw_default, shadow, result)
+    local = _function_shadow(node, shadow)
+    for statement in node.body:
+        _visit_shadow(statement, local, result)
+
+
+def _visit_class_shadow(
+    node: ast.ClassDef, shadow: set[str], result: dict[int, set[str]]
+) -> None:
+    for decorator in node.decorator_list:
+        _visit_shadow(decorator, shadow, result)
+    for base in node.bases:
+        _visit_shadow(base, shadow, result)
+    for keyword in node.keywords:
+        _visit_shadow(keyword.value, shadow, result)
+    local = set(shadow) | _bound_names(node.body)
+    for statement in node.body:
+        _visit_shadow(statement, local, result)
+
+
+def _visit_shadow(node: ast.AST, shadow: set[str], result: dict[int, set[str]]) -> None:
+    result[id(node)] = shadow
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        _visit_function_shadow(node, shadow, result)
+        return
+    if isinstance(node, ast.ClassDef):
+        _visit_class_shadow(node, shadow, result)
+        return
+    for child in ast.iter_child_nodes(node):
+        _visit_shadow(child, shadow, result)
+
+
+def _shadowed_names_by_node(tree: ast.Module) -> dict[int, set[str]]:
+    result: dict[int, set[str]] = {}
+    _visit_shadow(tree, _bound_names(tree.body), result)
+    return result
+
+
 def scan_contract_runtime_access(
     contract_src: Path = CONTRACT_SRC,
 ) -> list[Violation]:
@@ -1276,13 +1426,19 @@ def scan_contract_runtime_access(
         initial = _initial_flow_aliases(tree)
         final = _module_final_aliases(tree, initial)
         module_paths = _module_path_names(tree, static)
+        shadowed = _shadowed_names_by_node(tree)
         for node in ast.walk(tree):
+            shadow = shadowed.get(id(node), set())
             if isinstance(node, ast.Name):
+                if node.id in shadow:
+                    continue
                 name = static.get(node.id, node.id)
                 if name in RUNTIME_ATTRIBUTES:
                     violations.append(_runtime_violation(path, node.lineno, name))
                 continue
             if isinstance(node, ast.Attribute):
+                if _root_name(node) in shadow:
+                    continue
                 attribute_name = _resolve_callable_name(node, static)
                 if attribute_name in RUNTIME_ATTRIBUTES:
                     violations.append(
@@ -1968,6 +2124,11 @@ def scan_ci_configuration(
                         "ruff check src/ automl-contracts/src/": "ruff for both packages",
                         "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
                         "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
+                        "ruff format --check": "ruff format check",
+                        "lint_imports": "import-linter",
+                        "pip check": "pip check",
+                        "--engine-wheel": "engine wheel verification",
+                        "--engine-sdist": "engine sdist verification",
                     },
                     "contracts-guarantees task",
                 )
@@ -2012,6 +2173,11 @@ def scan_ci_configuration(
                     "ruff check src/ automl-contracts/src/": "ruff for both packages",
                     "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
                     "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
+                    "ruff format --check": "ruff format check",
+                    "lint-imports": "import-linter",
+                    "pip check": "pip check",
+                    "--engine-wheel": "engine wheel verification",
+                    "--engine-sdist": "engine sdist verification",
                 },
                 "GitHub contracts job",
             )

@@ -405,6 +405,50 @@ def test_tuple_assignment_import_alias_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["dynamic-import"]
 
 
+def test_tuple_alias_through_name_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        pair = (os.system, None)
+        f, _ = pair
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_tuple_alias_through_name_for_import_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        pair = (__import__, None)
+        f, _ = pair
+        f("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_tuple_for_target_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        for f, _ in [(os.system, None)]:
+            f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert violations
+    assert "os.system" in violations[0].message
+
+
 def test_walrus_alias_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -430,6 +474,60 @@ def test_walrus_import_alias_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_dynamic_imports(tmp_path)
     assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_named_expression_in_same_expression_is_ordered(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        (f := os.system) and f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_named_expression_statement_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        (f := __import__)
+        f("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_named_expression_assign_value_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        f = (g := os.system)
+        f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
+    assert "os.system" in violations[0].message
+
+
+def test_named_expression_in_assert_is_tracked(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        assert (f := os.system) and f("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 1
 
 
 def test_try_star_alias_is_merged(tmp_path: Path) -> None:
@@ -913,6 +1011,58 @@ def test_path_slash_composition_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
+def test_shadowed_runtime_module_is_not_the_import(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import sys
+
+        def f(sys):
+            return sys.platform
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_shadowed_runtime_attribute_is_not_the_import(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from sys import platform
+
+        def f(platform):
+            return platform
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_decorator_runs_before_definition_shadowing(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        @__import__("configurable_automl_engine")
+        def __import__(*args):
+            pass
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_open_decorator_runs_before_definition_shadowing(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        @open("x")
+        def open(*args):
+            pass
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
 def test_shadowed_open_is_not_the_builtin(tmp_path: Path) -> None:
     _write(
         tmp_path / "good.py",
@@ -927,6 +1077,21 @@ def test_shadowed_open_is_not_the_builtin(tmp_path: Path) -> None:
 
         open("x")
         f(lambda value: value)
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_path_property_result_is_not_a_callable_sentinel(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        suffix = Path("model.txt").suffix
+        suffix.upper()
         """,
     )
     assert scan_contract_runtime_access(tmp_path) == []
@@ -1210,6 +1375,43 @@ def test_ci_commented_commands_do_not_satisfy_contracts_task(
     )
     violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
     assert any("static boundary check" in violation.message for violation in violations)
+
+
+def test_ci_requires_pip_check_and_artifact_verification(
+    tmp_path: Path,
+) -> None:
+    ci = tmp_path / "ci.yaml"
+    _write(
+        ci,
+        """
+        workflows:
+          quality-checks:
+            tasks:
+              - name: contracts-guarantees
+                cubes:
+                  - name: static
+                    script:
+                      - |
+                        scripts/check_contract_boundaries.py
+                        scripts/verify_contract_distribution.py
+                        scripts/smoke_contract_install.py
+                        python3.11 -m build automl-contracts
+                        twine check automl-contracts/dist/*
+                        python3.11 -m venv /tmp/venv
+                        pytest tests/contracts
+                        mypy src
+                        ruff check src/ automl-contracts/src/
+                        ruff check tools/contract_boundaries.py
+                        mypy tools/contract_boundaries.py
+                        ruff format --check src/
+                        lint_imports
+        """,
+    )
+    violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
+    messages = {violation.message for violation in violations}
+    assert any("pip check" in message for message in messages)
+    assert any("engine wheel verification" in message for message in messages)
+    assert any("engine sdist verification" in message for message in messages)
 
 
 def test_ci_requires_a_dedicated_contracts_task(tmp_path: Path) -> None:
