@@ -243,6 +243,35 @@ def test_builtins_import_alias_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["dynamic-import"]
 
 
+def test_assignment_alias_of_import_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        f = __import__
+        f("configurable_automl_engine")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_assignment_aliases_of_runtime_calls_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        run = os.system
+        run("id")
+        read = open
+        read("/etc/passwd")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 2
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
 def test_os_file_io_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path / "bad.py",
@@ -320,6 +349,25 @@ def test_process_and_network_access_is_reported(tmp_path: Path) -> None:
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert len(violations) == 9
+    assert {violation.rule for violation in violations} == {"runtime-access"}
+
+
+def test_tempfile_and_environment_surface_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+        import sys
+        import tempfile
+
+        tempfile.NamedTemporaryFile()
+        os.get_exec_path()
+        sys.argv
+        sys.path
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert len(violations) == 4
     assert {violation.rule for violation in violations} == {"runtime-access"}
 
 
@@ -447,6 +495,36 @@ def test_path_variable_io_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
+def test_path_attribute_io_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class Model:
+            path: Path
+
+            def load(self) -> str:
+                return self.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_unbound_path_io_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        Path.read_text(Path("x"))
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
 def test_pure_path_operations_are_allowed(tmp_path: Path) -> None:
     _write(
         tmp_path / "good.py",
@@ -523,6 +601,69 @@ def test_imported_type_alias_name_is_reported(tmp_path: Path) -> None:
         from typing import TypeAlias as TA
 
         ConfigAlias: TA = "configurable_automl_engine.Config"
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_aliased_forward_ref_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from typing import ForwardRef as FR
+
+        Alias = FR("configurable_automl_engine.Config")
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_aliased_type_var_bound_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from typing import TypeVar as TV
+
+        T = TV("T", bound="numpy.float32")
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_aliased_cast_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from typing import cast as c
+
+        value = c("configurable_automl_engine.X", object())
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert [violation.rule for violation in violations] == ["string-annotation"]
+
+
+def test_lowercase_subscript_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        Alias = list["numpy.float32"]
+        Alias2 = dict[str, "numpy.ndarray"]
+        """,
+    )
+    violations = scan_contract_type_strings(tmp_path)
+    assert len(violations) == 2
+    assert {violation.rule for violation in violations} == {"string-annotation"}
+
+
+def test_chained_string_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        Alias = Copy = "configurable_automl_engine.X"
         """,
     )
     violations = scan_contract_type_strings(tmp_path)

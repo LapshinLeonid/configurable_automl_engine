@@ -74,6 +74,7 @@ RUNTIME_CALL_PREFIXES = (
     "os.chown",
     "os.cpu_count",
     "os.getcwd",
+    "os.get_exec_path",
     "os.getenv",
     "os.getenvb",
     "os.listdir",
@@ -168,6 +169,8 @@ RUNTIME_CALL_PREFIXES = (
     "shutil.which",
     "socket.",
     "subprocess.",
+    "sqlite3.",
+    "tempfile.",
 )
 PATH_PURE_METHODS = frozenset(
     {
@@ -216,9 +219,17 @@ RUNTIME_ATTRIBUTES = frozenset(
     {
         "os.environ",
         "os.name",
+        "sys.argv",
+        "sys.base_prefix",
+        "sys.exec_prefix",
+        "sys.executable",
         "sys.getwindowsversion",
         "sys.implementation",
+        "sys.meta_path",
+        "sys.path",
+        "sys.path_hooks",
         "sys.platform",
+        "sys.prefix",
         "sys.version_info",
     }
 )
@@ -293,6 +304,31 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             for alias in node.names:
                 aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _callable_aliases(tree: ast.Module) -> dict[str, str]:
+    """Resolve simple ``name = target`` callable aliases to a fixed point."""
+    aliases = _import_aliases(tree)
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+            else:
+                continue
+            if not isinstance(node.value, (ast.Name, ast.Attribute)):
+                continue
+            resolved = _resolve_callable_name(node.value, aliases)
+            if resolved is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in aliases:
+                    aliases[target.id] = resolved
+                    changed = True
     return aliases
 
 
@@ -439,17 +475,13 @@ def _assigned_type_strings(
     type_alias_node = getattr(ast, "TypeAlias", ())
     for node in ast.walk(tree):
         constants: list[ast.Constant] = []
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+        if isinstance(node, ast.Assign):
             value = node.value
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 if _looks_like_type_reference(value.value):
                     constants = [value]
             elif isinstance(value, (ast.Subscript, ast.BinOp)):
-                constants = [
-                    constant
-                    for constant in _type_expression_strings(value, aliases)
-                    if _looks_like_type_reference(str(constant.value))
-                ]
+                constants = list(_type_expression_strings(value, aliases))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             if _is_type_alias_annotation(node.annotation, aliases):
                 constants = list(_type_expression_strings(node.value, aliases))
@@ -469,7 +501,7 @@ def _call_type_strings(
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        name = _dotted_name(node.func)
+        name = _resolve_callable_name(node.func, aliases)
         if name is None:
             continue
         if name.rsplit(".", 1)[-1] not in {
@@ -493,7 +525,7 @@ def scan_contract_type_strings(contract_src: Path = CONTRACT_SRC) -> list[Violat
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _import_aliases(tree)
+        aliases = _callable_aliases(tree)
         for annotation in _annotation_nodes(tree):
             for constant in _type_expression_strings(annotation, aliases):
                 violation = _string_type_violation(path, constant, "string-annotation")
@@ -509,7 +541,7 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _import_aliases(tree)
+        aliases = _callable_aliases(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -551,6 +583,16 @@ def _is_path_expression(
             node.id in path_names or aliases.get(node.id, node.id) in PATH_CLASS_NAMES
         )
     if isinstance(node, ast.Attribute):
+        if node.attr == "Path":
+            name = _resolve_callable_name(node, aliases)
+            if name in PATH_CLASS_NAMES:
+                return True
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id in {"self", "cls"}
+            and node.attr in path_names
+        ):
+            return True
         return node.attr == "parent" and _is_path_expression(
             node.value, aliases, path_names
         )
@@ -595,6 +637,14 @@ def _path_names(tree: ast.Module, aliases: dict[str, str]) -> set[str]:
                 if isinstance(target, ast.Name) and target.id not in names:
                     names.add(target.id)
                     changed = True
+                elif (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in {"self", "cls"}
+                    and target.attr not in names
+                ):
+                    names.add(target.attr)
+                    changed = True
     return names
 
 
@@ -605,7 +655,7 @@ def scan_contract_runtime_access(
     violations: list[Violation] = []
     for path in python_files(contract_src):
         tree = _parse(path)
-        aliases = _import_aliases(tree)
+        aliases = _callable_aliases(tree)
         path_names = _path_names(tree, aliases)
         for node in ast.walk(tree):
             if isinstance(node, ast.Name):
