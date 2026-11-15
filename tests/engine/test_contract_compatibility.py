@@ -11,7 +11,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import automl_contracts as contracts
 import pytest
@@ -19,6 +19,7 @@ import pytest
 import configurable_automl_engine as engine
 from tests.contracts._contract_snapshot import (
     contract_public_names,
+    expand_import_matrix,
     parse_engine_imports_from_source,
 )
 
@@ -46,7 +47,7 @@ def contract_symbol(name: str) -> Any:
 
 def test_import_matrix_matches_the_documented_compatibility_matrix() -> None:
     documented: dict[str, list[str]] = {}
-    for path, name in parse_engine_imports_from_source():
+    for path, name in expand_import_matrix(parse_engine_imports_from_source()):
         documented.setdefault(path, [])
         if name not in documented[path]:
             documented[path].append(name)
@@ -315,28 +316,14 @@ def test_runtime_config_validation_is_idempotent() -> None:
     assert cfg.model_dump() == first
 
 
-def test_engine_implementations_conform_to_contract_protocols(tmp_path: Path) -> None:
-    """The public engine callables are checked by the static analyzer."""
-    script = tmp_path / "protocol_conformance.py"
-    script.write_text(
-        """
-import numpy
-
-from automl_contracts import CustomMetricSpec
-from automl_contracts.protocols import MetricFunction, ScorerCallable
-from configurable_automl_engine.common.custom_metrics import custom_metric_function
-from configurable_automl_engine.common.metrics import get_global_nrmse_scorer
-
-metric: MetricFunction = custom_metric_function(
-    CustomMetricSpec(path="tests.custom_metric_fixtures:scaled_r2", greater_is_better=True)
-)
-scorer: ScorerCallable = get_global_nrmse_scorer(numpy.array([1.0, 2.0]))
-""",
-        encoding="utf-8",
-    )
+def _run_mypy(
+    tmp_path: Path, name: str, source: str
+) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / name
+    script.write_text(source, encoding="utf-8")
     env = os.environ.copy()
     env["MYPYPATH"] = os.pathsep.join([str(ENGINE_SRC), str(CONTRACT_SRC)])
-    result = subprocess.run(
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -355,12 +342,56 @@ scorer: ScorerCallable = get_global_nrmse_scorer(numpy.array([1.0, 2.0]))
         timeout=300,
         check=False,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_engine_implementations_conform_to_contract_protocols(tmp_path: Path) -> None:
+    """Concrete engine adapters are checked by the static analyzer."""
+    positive = _run_mypy(
+        tmp_path,
+        "protocol_conformance.py",
+        """
+import numpy
+
+from automl_contracts.protocols import MetricFunction, ScorerCallable
+from configurable_automl_engine.common.custom_metrics import (
+    _CallableScorer,
+    _MetricFunctionAdapter,
+)
+from configurable_automl_engine.common.metrics import get_global_nrmse_scorer
+
+metric: MetricFunction = _MetricFunctionAdapter(lambda y_true, y_pred: 0.0, {})
+scorer: ScorerCallable = _CallableScorer(lambda estimator, X, y: 0.0, 1)
+global_scorer: ScorerCallable = get_global_nrmse_scorer(numpy.array([1.0, 2.0]))
+""",
+    )
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+
+    negative = _run_mypy(
+        tmp_path,
+        "protocol_mismatch.py",
+        """
+from automl_contracts.protocols import MetricFunction
+
+
+def bad(y_true: object, y_pred: object, kwargs: object) -> float:
+    return 0.0
+
+
+metric: MetricFunction = bad
+""",
+    )
+    assert negative.returncode != 0
+    assert "Incompatible types in assignment" in negative.stdout
 
 
 def test_protocol_shaped_engine_adapters_behave_at_runtime() -> None:
+    from automl_contracts.protocols import MetricFunction, ScorerCallable
+
     from configurable_automl_engine.common.custom_metrics import custom_metric_function
     from configurable_automl_engine.common.metrics import get_global_nrmse_scorer
+
+    assert get_type_hints(custom_metric_function)["return"] is MetricFunction
+    assert get_type_hints(get_global_nrmse_scorer)["return"] is ScorerCallable
 
     metric = custom_metric_function(
         contracts.CustomMetricSpec(
@@ -369,9 +400,10 @@ def test_protocol_shaped_engine_adapters_behave_at_runtime() -> None:
             kwargs={"scale": 2.0},
         )
     )
-    value = metric([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])
+    assert inspect.signature(metric).bind(1.0, 1.0, scale=3.0)
+    value = metric([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], scale=3.0)
     assert isinstance(value, float)
-    assert value == pytest.approx(2.0)
+    assert value == pytest.approx(3.0)
 
     scorer = get_global_nrmse_scorer(__import__("numpy").array([1.0, 2.0, 3.0]))
     inspect.signature(scorer).bind(object(), [[1.0]], [1.0])

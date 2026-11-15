@@ -545,7 +545,7 @@ def parse_engine_imports_from_source() -> list[tuple[str, str]]:
         full_path = re.search(r"`(configurable_automl_engine[^`]*)`", cells[0])
         if full_path:
             path = full_path.group(1)
-            for symbol in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", cells[1]):
+            for symbol in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*\*?)`", cells[1]):
                 if symbol in {"noqa", "outliers_presets"}:
                     continue
                 pairs.append((path, symbol))
@@ -576,6 +576,24 @@ def parse_engine_imports_from_source() -> list[tuple[str, str]]:
                 )
             )
     return pairs
+
+
+def expand_import_matrix(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Expand ``__all__`` and ``PREFIX_*`` tokens into concrete import names."""
+    expanded: list[tuple[str, str]] = []
+    for path, symbol in pairs:
+        module = importlib.import_module(path)
+        if symbol == "__all__":
+            names = list(getattr(module, "__all__", ()))
+        elif symbol.endswith("*"):
+            prefix = symbol[:-1]
+            names = sorted(name for name in dir(module) if name.startswith(prefix))
+        else:
+            names = [symbol]
+        for name in names:
+            if (path, name) not in expanded:
+                expanded.append((path, name))
+    return expanded
 
 
 def read_engine_contract_version_spec() -> str:

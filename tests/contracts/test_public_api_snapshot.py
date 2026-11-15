@@ -129,7 +129,8 @@ def test_documented_symbol_type_matches_the_matrix(name: str, type_text: str) ->
     elif "функция" in lowered:
         assert callable(value) and not isinstance(value, type), name
     elif isinstance(value, BaseModel):
-        assert not isinstance(value, type), name
+        expected_model = type_text.strip().strip("`")
+        assert type(value).__name__ == expected_model, (name, expected_model)
     else:
         pytest.fail(f"unhandled documented type {type_text!r} for {name}")
 
@@ -147,28 +148,93 @@ def test_protocols_are_documented_and_structural() -> None:
     )
 
 
-def test_release_history_pins_the_current_api_digest() -> None:
+def _semver_violation(history: dict[str, dict]) -> str | None:
     from packaging.version import Version
 
+    versions = [Version(version) for version in history]
+    if versions != sorted(versions):
+        return "release history is not sorted"
+    for previous_version, current_version in itertools.pairwise(versions):
+        previous = history[str(previous_version)]
+        current = history[str(current_version)]
+        if previous["api_digest"] == current["api_digest"]:
+            continue
+        if previous["schema_version"] != current["schema_version"]:
+            continue
+        if current_version.major > previous_version.major:
+            continue
+        if (
+            current_version.major == previous_version.major
+            and current_version.minor > previous_version.minor
+        ):
+            continue
+        return (
+            "A changed public API must bump MINOR or MAJOR, never PATCH: "
+            f"{previous_version} -> {current_version}"
+        )
+    return None
+
+
+def test_release_history_pins_the_current_api_digest() -> None:
     golden = load_golden()
     history = load_release_history()
     current = history[golden["contract_version"]]
     assert current["schema_version"] == golden["schema_version"]
     assert current["api_digest"] == golden["api_digest"]
-    versions = [Version(version) for version in history]
-    assert versions == sorted(versions)
-    for previous_version, current_version in itertools.pairwise(versions):
-        previous_digest = history[str(previous_version)]["api_digest"]
-        current_digest = history[str(current_version)]["api_digest"]
-        if previous_digest == current_digest:
-            continue
-        assert current_version.major > previous_version.major or (
-            current_version.major == previous_version.major
-            and current_version.minor > previous_version.minor
-        ), (
-            "A changed public API must bump MINOR or MAJOR, never PATCH: "
-            f"{previous_version} -> {current_version}"
-        )
+    assert _semver_violation(history) is None
+
+
+@pytest.mark.parametrize(
+    ("history", "violation"),
+    [
+        (
+            {
+                "0.1.0": {"schema_version": 2, "api_digest": "a"},
+                "0.2.0": {"schema_version": 2, "api_digest": "b"},
+            },
+            False,
+        ),
+        (
+            {
+                "0.1.0": {"schema_version": 2, "api_digest": "a"},
+                "0.1.1": {"schema_version": 2, "api_digest": "b"},
+            },
+            True,
+        ),
+        (
+            {
+                "1.0.0": {"schema_version": 2, "api_digest": "a"},
+                "1.1.0": {"schema_version": 2, "api_digest": "b"},
+            },
+            False,
+        ),
+        (
+            {
+                "1.0.0": {"schema_version": 2, "api_digest": "a"},
+                "1.0.1": {"schema_version": 2, "api_digest": "b"},
+            },
+            True,
+        ),
+        (
+            {
+                "0.1.0": {"schema_version": 1, "api_digest": "a"},
+                "0.1.1": {"schema_version": 2, "api_digest": "b"},
+            },
+            False,
+        ),
+        (
+            {
+                "0.2.0": {"schema_version": 2, "api_digest": "a"},
+                "0.1.0": {"schema_version": 2, "api_digest": "b"},
+            },
+            True,
+        ),
+    ],
+)
+def test_semver_rule_is_exercised_on_synthetic_history(
+    history: dict[str, dict], violation: bool
+) -> None:
+    assert (_semver_violation(history) is not None) is violation
 
 
 def test_snapshot_is_json_and_contains_every_public_symbol() -> None:

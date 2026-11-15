@@ -21,6 +21,7 @@ from automl_contracts.custom_metrics import (
     CustomMetricKind,
     CustomMetricSpec,
 )
+from automl_contracts.protocols import MetricFunction
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import make_scorer
 
@@ -315,8 +316,23 @@ def build_custom_scorer(spec: CustomMetricSpec) -> Any:
         return _scorer_cache.setdefault(key, scorer)
 
 
-def custom_metric_function(spec: CustomMetricSpec) -> Callable[..., Any]:
-    """Return the raw ``(y_true, y_pred) -> float`` function of a custom metric.
+class _MetricFunctionAdapter:
+    """Concrete ``MetricFunction`` implementation for a custom metric path."""
+
+    def __init__(self, func: Callable[..., Any], kwargs: dict[str, Any]) -> None:
+        self._func = func
+        self._kwargs = dict(kwargs)
+
+    def __call__(self, y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+        merged = {**self._kwargs, **kwargs}
+        return float(self._func(y_true, y_pred, **merged))
+
+
+def custom_metric_function(spec: CustomMetricSpec) -> MetricFunction:
+    """Return a ``MetricFunction`` for a custom ``kind="metric"`` declaration.
+
+    The returned adapter accepts the contract-shaped keyword arguments and
+    merges them over the statically configured ``spec.kwargs``.
 
     Raises:
         KeyError: If the spec is a scorer (it has no raw metric function).
@@ -324,10 +340,7 @@ def custom_metric_function(spec: CustomMetricSpec) -> Callable[..., Any]:
     if spec.kind != "metric":
         raise KeyError(f"custom scorer '{spec.path}' has no raw metric function")
     fn = resolve_dotted_path(spec.path)
-    if not spec.kwargs:
-        return fn  # type: ignore[no-any-return]
-    kwargs = dict(spec.kwargs)
-    return lambda y_true, y_pred: fn(y_true, y_pred, **kwargs)
+    return _MetricFunctionAdapter(fn, dict(spec.kwargs))
 
 
 _registry_lock = threading.Lock()

@@ -46,6 +46,7 @@ from automl_contracts.metrics import (
     BUILTIN_METRIC_DIRECTIONS,
     to_sklearn_name,
 )
+from automl_contracts.protocols import ScorerCallable
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import get_scorer as sklearn_get_scorer
 from sklearn.metrics import (
@@ -396,7 +397,7 @@ def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -
     return rmse / target_range
 
 
-def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
+def get_global_nrmse_scorer(global_y: np.ndarray) -> ScorerCallable:
     """Create a Scikit-Learn compatible scorer object for the global NRMSE.
     Creation logic:
     1. The minimum and maximum values are computed
@@ -420,7 +421,7 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> Callable[..., Any]:
         _global_nrmse, greater_is_better=False, target_range=target_range
     )
 
-    return cast(Callable[..., Any], scorer)
+    return cast(ScorerCallable, scorer)
 
 
 # --------------------------------------------------------------------------- #

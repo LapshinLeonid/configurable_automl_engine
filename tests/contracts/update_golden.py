@@ -19,6 +19,7 @@ from automl_contracts import Config, ExperimentResult
 
 from tests.contracts._contract_snapshot import (
     GOLDEN_DIR,
+    expand_import_matrix,
     parse_engine_imports_from_source,
     write_golden,
 )
@@ -51,7 +52,7 @@ def write_reference_serializations() -> list[Path]:
 def write_engine_import_matrix() -> Path:
     """Write the old-import compatibility matrix parsed from CONTRACTS.md."""
     paths: dict[str, list[str]] = OrderedDict()
-    for path, symbol in parse_engine_imports_from_source():
+    for path, symbol in expand_import_matrix(parse_engine_imports_from_source()):
         paths.setdefault(path, [])
         if symbol not in paths[path]:
             paths[path].append(symbol)

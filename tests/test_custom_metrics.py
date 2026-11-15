@@ -262,7 +262,8 @@ def test_helpers_error_metric():
     assert to_user_value(name, -1.5) == 1.5
     assert is_non_additive_metric(name) is True
     assert to_sklearn_name(name) == name
-    assert get_metric(name) is fx.custom_rmse
+    metric = get_metric(name)
+    assert metric(np.array([1.0, 2.0]), np.array([1.0, 2.0])) == pytest.approx(0.0)
 
 
 def test_helpers_score_metric_with_kwargs():
