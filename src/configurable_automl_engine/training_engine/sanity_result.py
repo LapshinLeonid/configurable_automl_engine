@@ -9,6 +9,7 @@ pandas and scikit-learn; it must not import the gate or the circuits.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,9 +20,30 @@ _SEVERITY_CLEAN = 0
 _SEVERITY_WARNING = 1
 
 
+def _same_metric(left: float, right: float) -> bool:
+    """Compare two metric values, treating ``NaN`` as equal to ``NaN``.
+
+    A disabled or non-computable circuit keeps ``NaN`` in the result, so two
+    audits of the same input must compare equal even when their ``NaN``
+    objects are distinct. ``inf`` keeps the regular comparison semantics.
+    """
+    if math.isnan(left) and math.isnan(right):
+        return True
+    return bool(left == right)
+
+
+def _metric_hash_key(value: float) -> float | None:
+    """Return a hash key consistent with :func:`_same_metric`."""
+    return None if math.isnan(value) else value
+
+
 @dataclass(frozen=True)
 class SanityCheckResult:
     """Result of a model degeneracy audit.
+
+    Two results compare equal when every field matches; ``NaN`` metrics are
+    treated as equal to each other, so repeating an audit of the same input
+    always yields an equal record.
 
     Attributes:
         is_valid: True when no circuit disqualified the model. In ``warn_only``
@@ -67,6 +89,38 @@ class SanityCheckResult:
     severity: int = _SEVERITY_CLEAN
     n_repeats: int = 1
     n_valid_repeats: int = 1
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SanityCheckResult):
+            return NotImplemented
+        return (
+            self.is_valid == other.is_valid
+            and self.reasons == other.reasons
+            and self.soft_warnings == other.soft_warnings
+            and _same_metric(self.diversity_ratio, other.diversity_ratio)
+            and _same_metric(self.unique_ratio, other.unique_ratio)
+            and self.dead_features_count == other.dead_features_count
+            and _same_metric(self.generalization_gap, other.generalization_gap)
+            and self.severity == other.severity
+            and self.n_repeats == other.n_repeats
+            and self.n_valid_repeats == other.n_valid_repeats
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.is_valid,
+                tuple(self.reasons),
+                tuple(self.soft_warnings),
+                _metric_hash_key(self.diversity_ratio),
+                _metric_hash_key(self.unique_ratio),
+                self.dead_features_count,
+                _metric_hash_key(self.generalization_gap),
+                self.severity,
+                self.n_repeats,
+                self.n_valid_repeats,
+            )
+        )
 
 
 def _compute_severity(

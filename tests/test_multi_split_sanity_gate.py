@@ -522,6 +522,28 @@ def test_multi_split_gate_is_deterministic():
     assert first == second
 
 
+def test_audit_equality_treats_distinct_nan_metrics_as_equal():
+    y = np.linspace(-1.0, 1.0, 40)
+    gate = _gate_without_other_circuits(
+        check_diversity=False,
+        check_unique=False,
+        check_generalization_gap=False,
+    )
+    result = gate.check(y=y, y_pred_oof=_with_rmse(y, 0.2, 1))
+    same_metrics = replace(
+        result,
+        diversity_ratio=float("nan"),
+        unique_ratio=float("nan"),
+        generalization_gap=float("nan"),
+    )
+    different_metric = replace(same_metrics, unique_ratio=0.5)
+
+    assert same_metrics.diversity_ratio is not result.diversity_ratio
+    assert same_metrics == result
+    assert hash(same_metrics) == hash(result)
+    assert different_metric != result
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Invalidated repeats are excluded from the gate
 # ──────────────────────────────────────────────────────────────────────────────
