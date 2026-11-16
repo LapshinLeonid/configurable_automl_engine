@@ -1591,7 +1591,8 @@ assert config.general.target_transform is TargetTransform.log1p
 Runtime checks that need the engine environment run at the engine entry points:
 installed algorithm packages, valid hyperparameter names for the estimator,
 callable imports and signatures for custom metrics, `start_method`,
-thread/timeout limits and the joblib part of `check_n_folds`. An engine
+thread/timeout limits and the joblib part of `check_validation_settings`
+(the contract rule itself remains `check_n_folds`). An engine
 consumer still calls `read_config`, `train_best_model` or `AutoMLExperiment`
 for the complete validation. Direct construction of
 `Config`, `GeneralCfg` or the re-exported engine aliases does **not** run those

@@ -26,6 +26,9 @@ jobs:
           pip install -e automl-contracts
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e ".[all,test]"; fi
 
+      - name: Check contract architecture boundaries
+        run: python scripts/check_contract_boundaries.py
+
       - name: Lint with Ruff
         run: ruff check src/ automl-contracts/src/
 
@@ -81,6 +84,65 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  # The contract is independent from the engine: it is checked, built and
+  # installed in a clean environment without the engine runtime packages.
+  contracts:
+    name: Contract distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install contract and verification tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e automl-contracts pytest pytest-mock ruff mypy import-linter==2.15 build twine jsonschema packaging
+
+      - name: Run static boundary guards
+        run: python scripts/check_contract_boundaries.py
+
+      - name: Run contract quality checks
+        run: |
+          ruff check src/ automl-contracts/src/
+          ruff format --check src/ automl-contracts/src/
+          ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+          ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+          mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py
+          (cd automl-contracts && mypy src)
+          (cd automl-contracts && lint-imports)
+          python -m pytest tests/contracts
+
+      - name: Build and verify contract artifacts
+        run: |
+          rm -rf automl-contracts/dist
+          python -m build automl-contracts --outdir automl-contracts/dist
+          twine check automl-contracts/dist/*
+          python scripts/verify_contract_distribution.py \
+            --contract-wheel automl-contracts/dist/*.whl \
+            --contract-sdist automl-contracts/dist/*.tar.gz
+
+      - name: Install contract in a clean environment
+        run: |
+          rm -rf /tmp/contracts-venv
+          python -m venv /tmp/contracts-venv
+          /tmp/contracts-venv/bin/pip install --upgrade pip
+          /tmp/contracts-venv/bin/pip install automl-contracts/dist/*.whl
+          /tmp/contracts-venv/bin/python scripts/smoke_contract_install.py
+          /tmp/contracts-venv/bin/pip check
+
+      - name: Build engine artifacts without contract sources
+        run: |
+          rm -rf dist/engine
+          SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -m build . --outdir dist/engine
+          python scripts/verify_contract_distribution.py \
+            --engine-wheel dist/engine/*.whl \
+            --engine-sdist dist/engine/*.tar.gz
 
   # The process-pool machinery depends on the interpreter: Python 3.14
   # changed the default POSIX start method and added the public

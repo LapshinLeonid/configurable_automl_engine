@@ -14,7 +14,9 @@ must not import any other module of the ``hpo`` package. The setting groups
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
+
+from automl_contracts.config.general import SplitAggregation
 
 from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.settings import (
@@ -23,9 +25,6 @@ from configurable_automl_engine.common.settings import (
     OversamplingSettings,
 )
 from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
-
-#: How the per-repeat scores of the multi-split validation are combined.
-SplitAggregation = Literal["mean", "median"]
 
 if TYPE_CHECKING:
     from optuna.trial import FrozenTrial

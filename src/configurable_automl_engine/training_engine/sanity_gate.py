@@ -2,8 +2,9 @@
 
 Protects the final winner selection of the AutoML engine from "degenerate"
 models — constant/flat predictions, step functions, unused features and
-overfit learners. The module is standalone: it depends only on numpy, pandas
-and scikit-learn and knows nothing about the rest of the engine.
+overfit learners. The module is standalone: it depends only on numpy, pandas,
+scikit-learn and the public contract, and knows nothing about the rest of the
+engine.
 
 The gate (:class:`ModelSanityGate`) holds the settings, runs the enabled
 circuits (:mod:`.sanity_circuits` — the four circuits A–D, their thresholds,
@@ -24,9 +25,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
+from automl_contracts.config.sanity_gate import GeneralizationGapMode
 
 from configurable_automl_engine.training_engine.sanity_circuits import (
     DeadFeatureSettings,
@@ -50,18 +52,6 @@ from configurable_automl_engine.training_engine.sanity_result import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
-
-
-#: Circuit D mode: ``"warn"`` — a finite gap strictly above
-#: ``max_generalization_gap`` is recorded in ``soft_warnings`` (does not
-#: disqualify); ``"reject"`` — a failure → ``reasons`` →
-#: disqualification. Default — ``"warn"``.
-#: The field name is deliberately NOT ``mode`` (a collision with the removed
-#: ``sanity_gate.mode`` field, which the ``_reject_removed_mode`` validator
-#: rejects with a migration error). The type is declared here, in the
-#: standalone gate module, and separately in ``config/sanity_gate.py`` (without an
-#: import, to keep the module independent of the rest of the engine).
-GeneralizationGapMode = Literal["warn", "reject"]
 
 
 @dataclass

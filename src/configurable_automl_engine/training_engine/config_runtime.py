@@ -12,6 +12,7 @@ import logging
 import multiprocessing
 
 from automl_contracts.config import AlgoCfg, Config
+from automl_contracts.config.general_rules import check_n_folds as _check_n_folds
 from automl_contracts.definitions import SerializationFormat, ValidationStrategy
 
 from configurable_automl_engine.common.definitions import ALGO_PACKAGE_MAPPING
@@ -25,7 +26,7 @@ from configurable_automl_engine.models import get_allowed_hyperparameters
 logger = logging.getLogger(__name__)
 
 
-def check_n_folds(
+def check_validation_settings(
     serialization_format: SerializationFormat,
     n_folds: int,
     validation_strategy: ValidationStrategy,
@@ -48,10 +49,7 @@ def check_n_folds(
             "serialization_format='joblib' requires"
             " the 'joblib' package to be installed"
         )
-    if n_folds < 1:
-        raise ValueError("`n_folds` must be at least 1")
-    if validation_strategy == ValidationStrategy.k_fold and n_folds < 2:
-        raise ValueError("n_folds must be ≥ 2 for k-fold validation")
+    _check_n_folds(n_folds, validation_strategy)
 
 
 def check_start_method(start_method: str | None, parallel_mode: str) -> None:
@@ -206,7 +204,7 @@ def validate_runtime_config(cfg: Config) -> Config:
         cfg.general.phase_timeout,
         cfg.general.task_timeout,
     )
-    check_n_folds(
+    check_validation_settings(
         cfg.general.serialization_format,
         cfg.general.n_folds,
         cfg.general.validation_strategy,
@@ -215,9 +213,9 @@ def validate_runtime_config(cfg: Config) -> Config:
 
 
 __all__ = [
-    "check_n_folds",
     "check_start_method",
     "check_threads_timeouts",
+    "check_validation_settings",
     "get_required_package",
     "get_unknown_hyperparameters",
     "validate_runtime_config",

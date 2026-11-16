@@ -417,3 +417,92 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 export AUTOML_RUN_NETWORK_TESTS=1
                 python3.11 -m pytest --cov=src
+
+      # Independent contract gates: the contract is installed and tested
+      # without the engine, built as its own distribution, and installed
+      # into a clean virtual environment that must not contain the engine
+      # or the heavy runtime packages.
+      - name: contracts-guarantees
+        cubes:
+          - name: contracts-static-checks
+            script:
+              - |
+                set -e
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-venv
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                python3.11 -m pip install --ignore-installed blinker
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e automl-contracts
+                python3.11 -m pip install pytest pytest-mock ruff mypy import-linter==2.15 jsonschema packaging
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  CONTRACT: STATIC BOUNDARY GUARDS"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 scripts/check_contract_boundaries.py
+                echo "✅ Contract boundaries: no violations found"
+              - |
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  CONTRACT: RUFF, MYPY, IMPORT-LINTER, PYTEST"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 -m ruff check src/ automl-contracts/src/
+                python3.11 -m ruff format --check src/ automl-contracts/src/
+                python3.11 -m ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+                python3.11 -m ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
+                python3.11 -m mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py
+                (cd automl-contracts && python3.11 -m mypy src)
+                (cd automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
+                python3.11 -m pytest tests/contracts
+                echo "✅ Contract quality checks: no issues found"
+
+          - name: contracts-build-isolated
+            script:
+              - |
+                set -e
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-venv
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                python3.11 -m pip install --ignore-installed blinker
+                python3.11 -m pip install build twine
+              - |
+                set -e
+                rm -rf automl-contracts/dist automl-contracts/build automl-contracts/src/*.egg-info
+                python3.11 -m build automl-contracts --outdir automl-contracts/dist
+                CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+                CONTRACT_SDIST=$(ls automl-contracts/dist/*.tar.gz | head -1)
+                python3.11 -m twine check "$CONTRACT_WHEEL" "$CONTRACT_SDIST"
+                python3.11 scripts/verify_contract_distribution.py \
+                  --contract-wheel "$CONTRACT_WHEEL" \
+                  --contract-sdist "$CONTRACT_SDIST"
+                echo "✅ Contract wheel/sdist: metadata and contents are clean"
+              - |
+                set -e
+                rm -rf /tmp/contracts-venv
+                python3.11 -m venv /tmp/contracts-venv
+                /tmp/contracts-venv/bin/pip install --upgrade pip
+                CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+                /tmp/contracts-venv/bin/pip install "$CONTRACT_WHEEL"
+                /tmp/contracts-venv/bin/python scripts/smoke_contract_install.py
+                /tmp/contracts-venv/bin/pip check
+                echo "✅ Contract wheel: clean-environment install and smoke import passed"
+              - |
+                set -e
+                rm -rf dist/engine
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m build . --outdir dist/engine
+                ENGINE_WHEEL=$(ls dist/engine/*.whl | head -1)
+                ENGINE_SDIST=$(ls dist/engine/*.tar.gz | head -1)
+                python3.11 scripts/verify_contract_distribution.py \
+                  --engine-wheel "$ENGINE_WHEEL" \
+                  --engine-sdist "$ENGINE_SDIST"
+                echo "✅ Engine artifacts: contract sources are not included"
