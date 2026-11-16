@@ -1,7 +1,8 @@
 name: CI
 
-on: 
-  push
+on:
+  push:
+  pull_request:
 
 jobs:
   test:
@@ -20,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML import-linter==2.15
+          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15
           # Install the project itself in "editable" mode so it is visible as a package
           # This works if there is a setup.py or pyproject.toml at the repository root
           pip install -e automl-contracts
@@ -52,6 +53,26 @@ jobs:
           PYTHONPATH: .
           AUTOML_RUN_NETWORK_TESTS: "1"
         run: pytest --cov=src --cov-report=xml
+
+      # The engine must work with the contract installed from the built wheel,
+      # and every documented legacy public import path must stay available.
+      - name: Verify the engine against the built contract wheel
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+        run: |
+          set -euo pipefail
+          python -m pip install build
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+          rm -rf automl-contracts/dist dist/engine
+          python -m build automl-contracts --outdir automl-contracts/dist
+          python -m build . --outdir dist/engine
+          python -m pip install --force-reinstall --no-deps automl-contracts/dist/*.whl
+          python -m pip install --force-reinstall --no-deps dist/engine/*.whl
+          cd /tmp
+          python "$GITHUB_WORKSPACE/scripts/smoke_engine_install.py" \
+            --expected-contract-version "$VERSION" \
+            --import-matrix "$GITHUB_WORKSPACE/tests/engine/golden/import_matrix.json" \
+            --forbid-source-root "$GITHUB_WORKSPACE"
 
       # Regression benchmark of the Sanity Gate on the target pipeline — a mandatory
       # gate. Compares pipeline variants (baseline:
@@ -102,18 +123,20 @@ jobs:
       - name: Install contract and verification tools
         run: |
           python -m pip install --upgrade pip
-          pip install -e automl-contracts pytest pytest-mock ruff mypy import-linter==2.15 build twine jsonschema packaging
+          pip install -e automl-contracts pytest pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15 build twine "jsonschema>=4.18" packaging
 
-      - name: Run static boundary guards
-        run: python scripts/check_contract_boundaries.py
+      - name: Run static boundary and release configuration guards
+        run: |
+          python scripts/check_contract_boundaries.py
+          python scripts/check_release_configuration.py
 
       - name: Run contract quality checks
         run: |
           ruff check src/ automl-contracts/src/
           ruff format --check src/ automl-contracts/src/
-          ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
-          ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
-          mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py
+          ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
+          ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
+          mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
           (cd automl-contracts && mypy src)
           (cd automl-contracts && lint-imports)
           python -m pytest tests/contracts
@@ -135,6 +158,13 @@ jobs:
           /tmp/contracts-venv/bin/pip install automl-contracts/dist/*.whl
           /tmp/contracts-venv/bin/python scripts/smoke_contract_install.py
           /tmp/contracts-venv/bin/pip check
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+          /tmp/contracts-venv/bin/pip install --index-url https://pypi.org/simple "jsonschema>=4.18" packaging
+          cd /tmp
+          /tmp/contracts-venv/bin/python "$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py" \
+            --expected-version "$VERSION" \
+            --reference-config "$GITHUB_WORKSPACE/tests/contracts/data/reference_config.json" \
+            --forbid-source-root "$GITHUB_WORKSPACE"
 
       - name: Build engine artifacts without contract sources
         run: |

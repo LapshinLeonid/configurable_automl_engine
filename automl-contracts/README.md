@@ -131,10 +131,13 @@ export PYPI_REGISTRY_PAT
 python -m pip install --index-url https://pypi.org/simple \
   "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
 
+# Percent-encode the PAT before embedding it into the URL.
+ENCODED_PAT=$(python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PYPI_REGISTRY_PAT"], safe=""))')
+
 # Install the contract itself without resolving its dependencies against the
 # private registry.
 python -m pip install --no-deps \
-  --index-url "https://iam:${PYPI_REGISTRY_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
+  --index-url "https://iam:${ENCODED_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
   automl-contracts
 ```
 
@@ -157,8 +160,9 @@ available to the process, and let the platform mask the secret:
   run: |
     python -m pip install --index-url https://pypi.org/simple \
       "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
+    ENCODED_PAT=$(python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PYPI_REGISTRY_PAT"], safe=""))')
     python -m pip install --no-deps \
-      --index-url "https://iam:${PYPI_REGISTRY_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
+      --index-url "https://iam:${ENCODED_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
       automl-contracts
 ```
 
@@ -186,6 +190,35 @@ and [Configure PyPI](https://sourcecraft.dev/portal/docs/ru/sourcecraft/operatio
 - The registry identifier is not a secret, but it is not a version: changing
   the registry or the organization slug requires updating every documented
   command, CI workflow and installation example.
+
+### Publication pipeline
+
+A contract release is published by the `publish-contracts` workflow in
+`.sourcecraft/ci.yaml`. The GitHub workflow
+`.github/workflows/publish-contracts.yaml` verifies the same release tag and
+builds the same artifacts, but does not upload them. The publication workflow
+runs only for a `contracts-v<version>` tag and refuses to publish when:
+
+- the tag does not match the `contracts-v<version>` mask;
+- the tag version differs from the static version in `pyproject.toml`;
+- any release gate fails: contract boundaries, release configuration, Ruff,
+  Mypy, import layers, contract tests, artifact metadata or the clean
+  installation of the exact wheel;
+- `SOURCECRAFT_PYPI_REGISTRY_ID` is not configured, or the `PYPI_REGISTRY_PAT`
+  secret is missing, expired or lacks upload rights.
+
+The workflow uploads the same wheel and sdist that passed the gates with
+`twine` to the registry `legacy/` endpoint. Published versions are immutable:
+an attempt to upload the same version again fails instead of being skipped.
+After the upload the workflow installs `automl-contracts` back from the
+registry in a clean environment and validates a reference configuration
+through the public models, protocols and packaged JSON Schema, without the
+engine.
+
+Configure the registry identifier as a CI variable in the workflow and keep
+the PAT only in the repository secret. Neither value belongs in a script, a
+committed file or a diagnostic message. The SourceCraft sync workflow pushes
+the `contracts-v*` tag to GitHub so the verification mirror is reachable.
 
 ## Using the public API
 

@@ -27,6 +27,12 @@ ROOT_MIRROR = REPO_ROOT / "config.schema.json"
 GENERATOR = REPO_ROOT / "automl-contracts" / "scripts" / "generate_schema.py"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
+HAS_DRAFT_2020_12 = hasattr(jsonschema, "Draft202012Validator")
+requires_draft_2020_12 = pytest.mark.skipif(
+    not HAS_DRAFT_2020_12,
+    reason="jsonschema>=4.18 is required for the Draft 2020-12 checks",
+)
+
 REGENERATE = (
     "The saved JSON Schema is out of sync with the contract models. "
     "Regenerate it with `python automl-contracts/scripts/generate_schema.py`, "
@@ -117,6 +123,7 @@ def test_root_schema_mirror_matches_the_canonical_schema() -> None:
     assert not canonical.endswith(b"\n")
 
 
+@requires_draft_2020_12
 def test_schema_is_valid_against_its_metaschema() -> None:
     schema = json.loads(CANONICAL_SCHEMA.read_text(encoding="utf-8"))
     validator_class = jsonschema.validators.validator_for(schema)
@@ -174,6 +181,7 @@ def test_schema_contains_the_public_config_enums() -> None:
         assert name in definitions, name
 
 
+@requires_draft_2020_12
 def test_schema_accepts_the_reference_configs() -> None:
     schema = json.loads(CANONICAL_SCHEMA.read_text(encoding="utf-8"))
     validator = jsonschema.Draft202012Validator(schema)
@@ -193,6 +201,7 @@ def test_schema_accepts_the_reference_configs() -> None:
         assert errors == [], [error.message for error in errors]
 
 
+@requires_draft_2020_12
 def test_schema_rejects_an_unknown_section() -> None:
     schema = json.loads(CANONICAL_SCHEMA.read_text(encoding="utf-8"))
     validator = jsonschema.Draft202012Validator(schema)

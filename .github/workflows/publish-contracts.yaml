@@ -1,0 +1,84 @@
+name: Verify automl-contracts release tag
+
+# The contract has its own release line. The SourceCraft workflow is the only
+# publisher; this GitHub mirror verifies that the tagged commit passes the same
+# release gates and builds the same artifacts.
+on:
+  push:
+    tags:
+      - "contracts-v*"
+
+concurrency:
+  group: publish-contracts-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Verify automl-contracts release
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install release tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e automl-contracts
+          pip install ruff mypy types-PyYAML pyyaml pytest pytest-mock pytest-cov import-linter==2.15 "jsonschema>=4.18" packaging build twine
+
+      - name: Check the release tag
+        run: |
+          set -euo pipefail
+          VERSION=$(python scripts/contract_release.py check-tag \
+            --tag "${GITHUB_REF_NAME}" \
+            --pyproject automl-contracts/pyproject.toml)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Release version: $VERSION"
+
+      - name: Run release quality gates
+        run: |
+          set -euo pipefail
+          python scripts/check_contract_boundaries.py
+          python scripts/check_release_configuration.py
+          ruff check src/ automl-contracts/src/
+          ruff format --check src/ automl-contracts/src/
+          ruff check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+          ruff format --check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+          mypy scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+          (cd automl-contracts && mypy src)
+          (cd automl-contracts && lint-imports)
+          python -m pytest tests/contracts
+
+      - name: Build and verify the distribution
+        run: |
+          set -euo pipefail
+          rm -rf automl-contracts/dist automl-contracts/build automl-contracts/src/*.egg-info
+          python -m build automl-contracts --outdir automl-contracts/dist
+          CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+          CONTRACT_SDIST=$(ls automl-contracts/dist/*.tar.gz | head -1)
+          twine check "$CONTRACT_WHEEL" "$CONTRACT_SDIST"
+          python scripts/verify_contract_distribution.py \
+            --contract-wheel "$CONTRACT_WHEEL" \
+            --contract-sdist "$CONTRACT_SDIST" \
+            --expected-version "$VERSION"
+
+      - name: Install the exact artifact in a clean environment
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/publish-venv
+          python -m venv /tmp/publish-venv
+          /tmp/publish-venv/bin/pip install --upgrade pip
+          /tmp/publish-venv/bin/pip install --index-url https://pypi.org/simple "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
+          CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+          /tmp/publish-venv/bin/pip install --no-deps "$CONTRACT_WHEEL"
+          /tmp/publish-venv/bin/python scripts/smoke_contract_install.py
+          /tmp/publish-venv/bin/pip check

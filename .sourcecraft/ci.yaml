@@ -11,6 +11,17 @@ on:
     - workflows: [quality-checks]
       filter:
         branches: ["**"]
+    - workflows: [publish-contracts]
+      filter:
+        tags: ["contracts-v*"]
+    - workflows: [sync-to-github]
+      filter:
+        tags: ["contracts-v*"]
+
+  pull_request:
+    - workflows: [quality-checks]
+      filter:
+        target_branches: ["**"]
 
 workflows:
   # ----------------------------------------------------
@@ -35,8 +46,8 @@ workflows:
                   exit 0
                 fi
 
-                BRANCH="${SOURCECRAFT_COMMIT_REF_NAME}"
-                echo "🔄 Syncing branch '$BRANCH' to GitHub..."
+                REF_NAME="${SOURCECRAFT_COMMIT_REF_NAME}"
+                echo "🔄 Syncing '$REF_NAME' to GitHub..."
 
                 git config user.name "SourceCraft Sync"
                 git config user.email "noreply@sourcecraft.dev"
@@ -46,9 +57,13 @@ workflows:
 
                 # Add GitHub as a remote and push via HEAD (detached HEAD in CI/CD)
                 git remote add github "https://x-access-token:${CLEAN_TOKEN}@github.com/${GITHUB_REPO}.git"
-                git push github "HEAD:refs/heads/${BRANCH}"
-
-                echo "✅ Branch '$BRANCH' synced to GitHub"
+                if [ "${SOURCECRAFT_COMMIT_REF}" != "${SOURCECRAFT_COMMIT_REF#refs/tags/}" ]; then
+                  git push github "HEAD:refs/tags/${REF_NAME}"
+                  echo "✅ Tag '$REF_NAME' synced to GitHub"
+                else
+                  git push github "HEAD:refs/heads/${REF_NAME}"
+                  echo "✅ Branch '$REF_NAME' synced to GitHub"
+                fi
 
   # ----------------------------------------------------
   # Single pipeline: planning → coding → review → fixes → review → fixes
@@ -418,6 +433,31 @@ workflows:
                 export AUTOML_RUN_NETWORK_TESTS=1
                 python3.11 -m pytest --cov=src
 
+          # The engine must work with the contract installed from the built
+          # wheel, not only with the editable source checkout.
+          - name: engine-contract-integration
+            script:
+              - |
+                set -e
+                python3.11 -m pip install build
+                REPO_DIR="$(pwd)"
+                VERSION=$(python3.11 -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+                rm -rf automl-contracts/dist dist/engine
+                python3.11 -m build automl-contracts --outdir automl-contracts/dist
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m build . --outdir dist/engine
+                CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+                ENGINE_WHEEL=$(ls dist/engine/*.whl | head -1)
+                python3.11 -m pip install --force-reinstall --no-deps "$CONTRACT_WHEEL"
+                python3.11 -m pip install --force-reinstall --no-deps "$ENGINE_WHEEL"
+                (
+                  cd /tmp
+                  python3.11 "$REPO_DIR/scripts/smoke_engine_install.py" \
+                    --expected-contract-version "$VERSION" \
+                    --import-matrix "$REPO_DIR/tests/engine/golden/import_matrix.json" \
+                    --forbid-source-root "$REPO_DIR"
+                )
+                echo "✅ Engine works with the built contract wheel and legacy public imports"
+
       # Independent contract gates: the contract is installed and tested
       # without the engine, built as its own distribution, and installed
       # into a clean virtual environment that must not contain the engine
@@ -438,14 +478,16 @@ workflows:
                 python3.11 -m pip install --upgrade pip
                 python3.11 -m pip install --ignore-installed blinker
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e automl-contracts
-                python3.11 -m pip install pytest pytest-mock ruff mypy import-linter==2.15 jsonschema packaging
+                python3.11 -m pip install pytest pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15 packaging
+                python3.11 -m pip install --ignore-installed "jsonschema>=4.18"
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  CONTRACT: STATIC BOUNDARY GUARDS"
                 echo "═══════════════════════════════════════════════════════════════"
                 python3.11 scripts/check_contract_boundaries.py
-                echo "✅ Contract boundaries: no violations found"
+                python3.11 scripts/check_release_configuration.py
+                echo "✅ Contract boundaries and release configuration: no violations found"
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
@@ -453,9 +495,9 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 python3.11 -m ruff check src/ automl-contracts/src/
                 python3.11 -m ruff format --check src/ automl-contracts/src/
-                python3.11 -m ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
-                python3.11 -m ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py tests/contracts/test_architecture_guarantees.py
-                python3.11 -m mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py
+                python3.11 -m ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
+                python3.11 -m ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
+                python3.11 -m mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
                 (cd automl-contracts && python3.11 -m mypy src)
                 (cd automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
                 python3.11 -m pytest tests/contracts
@@ -495,7 +537,17 @@ workflows:
                 /tmp/contracts-venv/bin/pip install "$CONTRACT_WHEEL"
                 /tmp/contracts-venv/bin/python scripts/smoke_contract_install.py
                 /tmp/contracts-venv/bin/pip check
-                echo "✅ Contract wheel: clean-environment install and smoke import passed"
+                REPO_DIR="$(pwd)"
+                VERSION=$(python3.11 -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+                /tmp/contracts-venv/bin/pip install --index-url https://pypi.org/simple "jsonschema>=4.18" packaging
+                (
+                  cd /tmp
+                  /tmp/contracts-venv/bin/python "$REPO_DIR/scripts/e2e_contract_consumer.py" \
+                    --expected-version "$VERSION" \
+                    --reference-config "$REPO_DIR/tests/contracts/data/reference_config.json" \
+                    --forbid-source-root "$REPO_DIR"
+                )
+                echo "✅ Contract wheel: clean-environment install and consumer E2E passed"
               - |
                 set -e
                 rm -rf dist/engine
@@ -506,3 +558,142 @@ workflows:
                   --engine-wheel "$ENGINE_WHEEL" \
                   --engine-sdist "$ENGINE_SDIST"
                 echo "✅ Engine artifacts: contract sources are not included"
+
+  # ----------------------------------------------------
+  # Publish automl-contracts to the SourceCraft PyPI registry
+  #
+  # Runs only for a contracts-v<version> tag. The workflow refuses to upload
+  # when the tag and pyproject.toml disagree, when a quality gate fails, when
+  # the registry variable is missing or when the PAT secret is absent. The
+  # published package is then installed back from the registry and exercised
+  # as an external consumer without the engine.
+  # ----------------------------------------------------
+  publish-contracts:
+    env:
+      # Set the identifier of the SourceCraft PyPI registry from its page.
+      # The identifier is configuration, not a secret, and must not be
+      # hardcoded in scripts.
+      SOURCECRAFT_PYPI_REGISTRY_ID: ""
+      # The PAT is stored only as a repository secret.
+      PYPI_REGISTRY_PAT: ${{ secrets.PYPI_REGISTRY_PAT }}
+    tasks:
+      - name: contracts-release
+        cubes:
+          - name: setup
+            script:
+              - |
+                set -e
+                apt-get update -qq
+                apt-get install -y -qq software-properties-common
+                add-apt-repository -y ppa:deadsnakes/ppa
+                apt-get update -qq
+                apt-get install -y -qq python3.11 python3.11-venv
+                curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                python3.11 -m pip install --ignore-installed blinker
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e automl-contracts
+                python3.11 -m pip install ruff mypy types-PyYAML pyyaml pytest pytest-mock pytest-cov import-linter==2.15 packaging build twine
+                python3.11 -m pip install --ignore-installed "jsonschema>=4.18"
+
+          - name: preflight
+            script:
+              - |
+                set -e
+                VERSION=$(python3.11 scripts/contract_release.py check-tag \
+                  --tag "${SOURCECRAFT_COMMIT_REF_NAME}" \
+                  --pyproject automl-contracts/pyproject.toml)
+                printf '%s' "$VERSION" > /tmp/contracts-release-version.txt
+                echo "Release version: $VERSION"
+                test -n "${SOURCECRAFT_PYPI_REGISTRY_ID}" || {
+                  echo "SOURCECRAFT_PYPI_REGISTRY_ID is not configured" >&2
+                  exit 1
+                }
+                test -n "${PYPI_REGISTRY_PAT}" || {
+                  echo "PYPI_REGISTRY_PAT secret is not configured" >&2
+                  exit 1
+                }
+                python3.11 scripts/contract_release.py show-endpoints
+                echo "✅ Release tag and registry configuration verified"
+
+          - name: quality-gates
+            script:
+              - |
+                set -e
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  RELEASE GATES: boundaries, release config, ruff, mypy, pytest"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 scripts/check_contract_boundaries.py
+                python3.11 scripts/check_release_configuration.py
+                python3.11 -m ruff check src/ automl-contracts/src/
+                python3.11 -m ruff format --check src/ automl-contracts/src/
+                python3.11 -m ruff check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+                python3.11 -m ruff format --check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+                python3.11 -m mypy scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
+                (cd automl-contracts && python3.11 -m mypy src)
+                (cd automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
+                python3.11 -m pytest tests/contracts
+                echo "✅ All release gates passed"
+
+          - name: build-and-verify
+            script:
+              - |
+                set -e
+                VERSION=$(cat /tmp/contracts-release-version.txt)
+                rm -rf automl-contracts/dist automl-contracts/build automl-contracts/src/*.egg-info
+                python3.11 -m build automl-contracts --outdir automl-contracts/dist
+                CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+                CONTRACT_SDIST=$(ls automl-contracts/dist/*.tar.gz | head -1)
+                python3.11 -m twine check "$CONTRACT_WHEEL" "$CONTRACT_SDIST"
+                python3.11 scripts/verify_contract_distribution.py \
+                  --contract-wheel "$CONTRACT_WHEEL" \
+                  --contract-sdist "$CONTRACT_SDIST" \
+                  --expected-version "$VERSION"
+                echo "✅ Distribution metadata and contents are clean"
+              - |
+                set -e
+                VERSION=$(cat /tmp/contracts-release-version.txt)
+                rm -rf /tmp/publish-venv
+                python3.11 -m venv /tmp/publish-venv
+                /tmp/publish-venv/bin/pip install --upgrade pip
+                /tmp/publish-venv/bin/pip install --index-url https://pypi.org/simple "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
+                CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
+                /tmp/publish-venv/bin/pip install --no-deps "$CONTRACT_WHEEL"
+                /tmp/publish-venv/bin/python scripts/smoke_contract_install.py
+                /tmp/publish-venv/bin/pip check
+                echo "✅ The exact artifact that will be uploaded installs cleanly"
+
+          - name: publish
+            script:
+              - |
+                set -e
+                VERSION=$(cat /tmp/contracts-release-version.txt)
+                if git tag --points-at HEAD | grep -q "^contracts-v"; then
+                  echo "Publishing $VERSION from the contracts-v* tag"
+                fi
+                python3.11 scripts/contract_release.py publish \
+                  --dist automl-contracts/dist \
+                  --expected-version "$VERSION"
+                echo "✅ Published automl-contracts $VERSION"
+
+          - name: verify-from-registry
+            script:
+              - |
+                set -e
+                VERSION=$(cat /tmp/contracts-release-version.txt)
+                REPO_DIR="$(pwd)"
+                rm -rf /tmp/contract-e2e-venv /tmp/contract-e2e-consumer
+                python3.11 -m venv /tmp/contract-e2e-venv
+                python3.11 scripts/contract_release.py install \
+                  --python /tmp/contract-e2e-venv/bin/python \
+                  --version "$VERSION" \
+                  --with-jsonschema
+                mkdir -p /tmp/contract-e2e-consumer
+                (
+                  cd /tmp/contract-e2e-consumer
+                  /tmp/contract-e2e-venv/bin/python "$REPO_DIR/scripts/e2e_contract_consumer.py" \
+                    --expected-version "$VERSION" \
+                    --reference-config "$REPO_DIR/tests/contracts/data/reference_config.json" \
+                    --forbid-source-root "$REPO_DIR"
+                )
+                echo "✅ Consumer E2E from the SourceCraft registry passed"
