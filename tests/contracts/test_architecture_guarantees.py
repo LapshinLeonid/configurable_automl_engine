@@ -4610,11 +4610,11 @@ def test_class_level_path_container_is_reported(tmp_path: Path) -> None:
     assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
-def test_module_element_alias_does_not_leak_into_nested_scope(
+def test_module_element_alias_is_visible_in_nested_scope(
     tmp_path: Path,
 ) -> None:
     _write(
-        tmp_path / "good.py",
+        tmp_path / "bad.py",
         """
         import os
 
@@ -4627,7 +4627,8 @@ def test_module_element_alias_does_not_leak_into_nested_scope(
             return alias.environ
         """,
     )
-    assert scan_contract_runtime_access(tmp_path) == []
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
 
 
 def test_element_alias_merges_out_of_compound_statements(
@@ -5941,3 +5942,1460 @@ def test_ci_requires_source_scope_format_check(tmp_path: Path) -> None:
         "ruff format check for both packages" in violation.message
         for violation in violations
     )
+
+
+def test_identity_result_path_argument_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        def use(value):
+            value.read_text()
+
+        use(identity(Path("x")))
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_identity_direct_path_result_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        identity(Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_identity_result_non_path_argument_is_not_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        def identity(value):
+            return value
+
+        def use(value):
+            value.strip()
+
+        use(identity("safe"))
+        identity("safe").strip()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_annotated_instance_path_parameters_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            path: Path
+            general: General
+
+        def read_direct(cfg: Config) -> str:
+            return cfg.path.read_text()
+
+        def read_nested(cfg: Config) -> str:
+            return cfg.general.path.read_text()
+
+        def read_via_local(cfg: Config) -> str:
+            p = cfg.path
+            return p.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_optional_annotated_instance_path_parameter_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+        from typing import Optional
+
+        class Config:
+            path: Path
+
+        def read(cfg: Optional[Config]) -> str:
+            assert cfg is not None
+            return cfg.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_instance_path_parameter_from_call_argument_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class Config:
+            path: Path
+
+        def read(cfg) -> str:
+            return cfg.path.read_text()
+
+        read(Config())
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_non_path_instance_fields_are_not_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+        from typing import Optional
+
+        class General:
+            title: str
+
+        class Config:
+            path: Path
+            title: str
+            general: Optional[General]
+
+        def read(cfg: Config) -> str:
+            return cfg.title.strip() + str(cfg.general)
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_class_method_parameter_return_runtime_access_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def get(self, module):
+                return module
+
+        Loader().get(os).system("id")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_class_method_self_alias_return_runtime_access_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            module = os
+
+            def get(self):
+                alias = self
+                return alias.module
+
+        Loader().get().environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_class_method_parameter_and_self_alias_path_returns_are_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class Loader:
+            def get(self, path):
+                return path
+
+        class Aliased:
+            path = Path("x")
+
+            def get(self):
+                alias = self
+                return alias.path
+
+        Loader().get(Path("x")).read_text()
+        Aliased().get().read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_class_method_parameter_return_dynamic_import_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        class Loader:
+            def get(self, module):
+                return module
+
+        Loader().get(importlib).import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_inherited_class_method_parameter_return_runtime_access_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Base:
+            def get(self, module):
+                return module
+
+        class Child(Base):
+            pass
+
+        Child().get(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_inherited_class_method_parameter_return_dynamic_import_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        class Base:
+            def get(self, module):
+                return module
+
+        class Child(Base):
+            pass
+
+        Child().get(importlib).import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_class_method_parameter_with_non_runtime_argument_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        class Loader:
+            def get(self, module: str) -> str:
+                return module
+
+        Loader().get("safe").strip()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_except_handler_instance_alias_is_not_stale(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class SafeError(Exception):
+            module = types.SimpleNamespace(environ="safe")
+
+        def read() -> str:
+            holder = Holder()
+            try:
+                raise SafeError()
+            except SafeError as holder:
+                return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_tuple_unpacking_clears_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read() -> str:
+            holder = Holder()
+            holder, _ = (Safe(), 1)
+            return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_list_unpacking_clears_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read() -> str:
+            holder = Holder()
+            [holder] = [Safe()]
+            return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_match_capture_clears_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read(value) -> str:
+            holder = Holder()
+            match value:
+                case Safe() as holder:
+                    return holder.module.environ
+            return ""
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_for_target_clears_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read() -> str:
+            holder = Holder()
+            for holder in [Safe()]:
+                return holder.module.environ
+            return ""
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_with_target_clears_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read() -> str:
+            holder = Holder()
+            with Safe() as holder:
+                return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_if_branches_clear_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read(flag: bool) -> str:
+            holder = Holder()
+            if flag:
+                holder = Safe()
+            else:
+                holder = Safe()
+            return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_conditional_instance_alias_still_reports_reachable_runtime_value(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read(flag: bool) -> str:
+            holder = Holder()
+            if flag:
+                holder = Safe()
+            return holder.module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_path_parents_non_literal_index_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        index = 0
+        Path("x").parents[index].read_text()
+        Path("x").parents[-1].read_text()
+        Path("x").parents[index + 1].read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_path_parents_non_literal_index_pure_operations_are_allowed(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        index = 0
+        Path("x").parents[index].name
+        Path("x").parents[index].as_posix()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_init_parameter_is_not_resolved_as_other_method_parameter(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+            def get(self, module):
+                return self.module
+
+        Loader("safe").get(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_init_parameter_is_resolved_against_constructor(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+            def get(self, module):
+                return self.module
+
+        Loader(os).get("safe").environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_local_instance_nested_path_field_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+
+        cfg = Config()
+        cfg.general.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_self_nested_path_field_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class User:
+            def __init__(self):
+                self.general = General()
+
+            def read(self):
+                return self.general.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_imported_instance_nested_path_field_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "models.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+        """,
+    )
+    _write(
+        tmp_path / "bad.py",
+        """
+        from models import Config
+
+        cfg = Config()
+        cfg.general.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_imported_package_instance_nested_path_field_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "automl_contracts" / "__init__.py",
+        "",
+    )
+    _write(
+        tmp_path / "automl_contracts" / "general.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path_to_model: Path
+        """,
+    )
+    _write(
+        tmp_path / "automl_contracts" / "config.py",
+        """
+        from automl_contracts.general import General
+
+        class Config:
+            general: General
+        """,
+    )
+    _write(
+        tmp_path / "bad.py",
+        """
+        from automl_contracts.config import Config
+
+        cfg = Config()
+        cfg.general.path_to_model.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_match_without_matching_case_keeps_instance_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read(value) -> str:
+            holder = Holder()
+            match value:
+                case Safe() as holder:
+                    pass
+            return holder.module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_reassigned_method_parameters_are_not_return_arguments(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Null:
+            def __enter__(self):
+                return "safe"
+
+            def __exit__(self, *args):
+                return False
+
+        class Loader:
+            def by_assign(self, module):
+                module = "safe"
+                return module
+
+            def by_for(self, module):
+                for module in ["safe"]:
+                    pass
+                return module
+
+            def by_with(self, module):
+                with Null() as module:
+                    pass
+                return module
+
+            def by_except(self, module):
+                try:
+                    pass
+                except Exception as module:
+                    pass
+                return module
+
+            def by_walrus(self, module):
+                if (module := "safe"):
+                    pass
+                return module
+
+        Loader().by_assign(os).environ
+        Loader().by_for(os).environ
+        Loader().by_with(os).environ
+        Loader().by_except(os).environ
+        Loader().by_walrus(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_shadowed_identity_helper_is_not_path_identity(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            identity = lambda value: 42
+            return identity(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_identity_helper_alias_path_result_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        f = identity
+        f(Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_self_alias_clears_stale_parameter_reference(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Loader:
+            module = os
+
+            def get(self, module):
+                alias = module
+                alias = self
+                return alias
+
+        Loader().get(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_init_parameter_is_resolved_for_assigned_instance(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+            def get(self):
+                return self.module
+
+        loader = Loader(os)
+        loader.get().environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_relative_import_instance_nested_path_field_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "automl_contracts" / "__init__.py", "")
+    _write(
+        tmp_path / "automl_contracts" / "models.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+        """,
+    )
+    _write(
+        tmp_path / "automl_contracts" / "config.py",
+        """
+        from .models import Config
+
+        cfg = Config()
+        cfg.general.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_local_instance_path_alias_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class Config:
+            path: Path
+
+        cfg = Config()
+        p = cfg.path
+        p.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_intermediate_instance_alias_path_field_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+
+        cfg = Config()
+        g = cfg.general
+        g.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_wildcard_match_branch_clears_stale_instance_alias(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        class Holder:
+            module = os
+
+        class Safe:
+            module = types.SimpleNamespace(environ="safe")
+
+        def read(value) -> str:
+            holder = Holder()
+            match value:
+                case _:
+                    holder = Safe()
+            return holder.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_identity_shadowing_covers_binding_forms(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        class Manager:
+            def __enter__(self):
+                return lambda value: 42
+
+            def __exit__(self, *args):
+                return False
+
+        def by_for():
+            for identity in [lambda value: 42]:
+                pass
+            return identity(os).environ
+
+        def by_with():
+            with Manager() as identity:
+                pass
+            return identity(os).environ
+
+        def by_except():
+            try:
+                pass
+            except Exception as identity:
+                pass
+            return identity(os).environ
+
+        def by_nested_def():
+            def identity(value):
+                return 42
+            return identity(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_method_alias_invalidated_by_local_bindings(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Null:
+            def __enter__(self):
+                return "safe"
+
+            def __exit__(self, *args):
+                return False
+
+        class Loader:
+            def by_for(self, module):
+                alias = module
+                for alias in ["safe"]:
+                    pass
+                return alias
+
+            def by_with(self, module):
+                alias = module
+                with Null() as alias:
+                    pass
+                return alias
+
+            def by_except(self, module):
+                alias = module
+                try:
+                    pass
+                except Exception as alias:
+                    pass
+                return alias
+
+            def by_walrus(self, module):
+                alias = module
+                if (alias := "safe"):
+                    pass
+                return alias
+
+            def by_unpacking(self, module):
+                alias = module
+                alias, _ = ("safe", 1)
+                return alias
+
+        Loader().by_for(os).environ
+        Loader().by_with(os).environ
+        Loader().by_except(os).environ
+        Loader().by_walrus(os).environ
+        Loader().by_unpacking(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_identity_shadowing_inside_bound_bodies(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        class Manager:
+            def __enter__(self):
+                return lambda value: 42
+
+            def __exit__(self, *args):
+                return False
+
+        def by_for():
+            for identity in [lambda value: 42]:
+                return identity(os).environ
+            return ""
+
+        def by_with():
+            with Manager() as identity:
+                return identity(os).environ
+            return ""
+
+        def by_except():
+            try:
+                pass
+            except Exception as identity:
+                return identity(os).environ
+            return ""
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_shadowed_identity_path_call_is_not_path(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        def read():
+            identity = lambda value: "safe"
+            return identity(Path("x")).read_text()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_local_identity_that_returns_argument_keeps_path_taint(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        def read():
+            identity = lambda value: value
+            return identity(Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_annotated_parameter_alias_nested_path_field_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+
+        def read(cfg: Config) -> str:
+            g = cfg.general
+            return g.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_instance_constructor_is_copied_through_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+            def get(self):
+                return self.module
+
+        loader = Loader(os)
+        other = loader
+        other.get().environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_augmented_assignment_invalidates_method_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Loader:
+            def get(self, module):
+                alias = module
+                alias += "safe"
+                return alias
+
+        Loader().get(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_direct_init_parameter_attribute_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        loader = Loader(os)
+        loader.module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_direct_chained_init_parameter_attribute_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        Loader(os).module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_keyword_init_parameter_attribute_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, extra, module):
+                self.module = module
+
+        Loader("x", module=os).module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_default_init_parameter_attribute_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module=os):
+                self.module = module
+
+        Loader().module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_parameter_types_are_scoped_per_function_node(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        from pathlib import Path
+
+        class General:
+            path: Path
+
+        class Config:
+            general: General
+
+        class Safe:
+            pass
+
+        class Reader:
+            def read(self, cfg: Safe) -> None:
+                pass
+
+        def read(cfg: Config) -> str:
+            g = cfg.general
+            return g.path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_identity_alias_runtime_access_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        same = identity
+        same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_identity_alias_dynamic_import_is_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        def identity(value):
+            return value
+
+        same = identity
+        same(importlib).import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]
+
+
+def test_identity_alias_merged_from_both_branches(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read(flag):
+            if flag:
+                same = identity
+            else:
+                same = identity
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_identity_alias_overwritten_safely_in_both_branches(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        def identity(value):
+            return value
+
+        def read(flag):
+            same = identity
+            if flag:
+                same = lambda value: types.SimpleNamespace(environ="safe")
+            else:
+                same = lambda value: types.SimpleNamespace(environ="safe")
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_equal_constructors_in_branches_are_merged(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+            def get(self):
+                return self.module
+
+        def read(flag):
+            if flag:
+                loader = Loader(os)
+            else:
+                loader = Loader(os)
+            return loader.get().environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_nested_definition_clears_identity_alias(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+        import types
+
+        def identity(value):
+            return value
+
+        same = identity
+
+        def same(value):
+            return types.SimpleNamespace(environ="safe")
+
+        same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_global_and_closure_facts_are_visible_in_functions(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        same = identity
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        loader = Loader(os)
+
+        def read_global():
+            first = same(os).environ
+            second = loader.module.environ
+            return first + second
+
+        def outer():
+            local_same = identity
+            local_loader = Loader(os)
+
+            def inner():
+                first = local_same(os).environ
+                second = local_loader.module.environ
+                return first + second
+
+            return inner()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
+
+
+def test_imported_constructor_and_identity_facts_are_reported(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "pkg" / "models.py",
+        """
+        class Library:
+            def __init__(self, module):
+                self.module = module
+        """,
+    )
+    _write(
+        tmp_path / "pkg" / "helpers.py",
+        """
+        def identity(value):
+            return value
+        """,
+    )
+    _write(
+        tmp_path / "pkg" / "use.py",
+        """
+        import os
+        from .models import Library
+        from .helpers import identity
+
+        Library(os).module.environ
+        identity(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_imported_identity_alias_dynamic_import_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "pkg" / "__init__.py", "")
+    _write(
+        tmp_path / "pkg" / "helpers.py",
+        """
+        def identity(value):
+            return value
+        """,
+    )
+    _write(
+        tmp_path / "pkg" / "use.py",
+        """
+        import importlib
+        from .helpers import identity
+
+        identity(importlib).import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"]

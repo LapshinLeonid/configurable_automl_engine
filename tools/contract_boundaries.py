@@ -58,6 +58,18 @@ FORBIDDEN_LIBRARY_ROOTS = frozenset(
     }
 )
 WILDCARD_IMPORT_ALLOWLIST = frozenset({"__future__", "typing"})
+IDENTITY_ALIAS_PREFIX = "@identity:"
+CLASS_PATH_FIELD_PREFIX = "@pathfield:"
+CALL_PARAMETER_PREFIX = "@param:"
+INIT_PARAMETER_PREFIX = "@initparam:"
+
+
+def _identity_alias_key(name: str) -> str:
+    return f"{IDENTITY_ALIAS_PREFIX}{name}"
+
+
+def _clear_identity_binding(name: str, aliases: dict[str, frozenset[str]]) -> None:
+    aliases.pop(_identity_alias_key(name), None)
 
 
 def _is_dynamic_import_name(name: str) -> bool:
@@ -874,6 +886,31 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
     return aliases
 
 
+def _relative_import_base(root: Path, path: Path, level: int) -> str:
+    relative = path.relative_to(root).with_suffix("")
+    parts = list(relative.parts)
+    is_package = bool(parts and parts[-1] == "__init__")
+    if is_package:
+        parts.pop()
+    absolute = [root.name, *parts]
+    drop = level - 1 if is_package else level
+    return ".".join(absolute[: max(0, len(absolute) - drop)])
+
+
+def _file_import_aliases(tree: ast.Module, path: Path, root: Path) -> dict[str, str]:
+    aliases = _import_aliases(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level == 0:
+            continue
+        base = _relative_import_base(root, path, node.level)
+        if node.module:
+            base = f"{base}.{node.module}" if base else node.module
+        for alias in node.names:
+            target = f"{base}.{alias.name}" if base else alias.name
+            aliases[alias.asname or alias.name] = target
+    return aliases
+
+
 FlowAliases = dict[str, frozenset[str]]
 CallContext = tuple[ast.Call, FlowAliases, set[str]]
 
@@ -1040,6 +1077,7 @@ def _remove_target_aliases(targets: Sequence[ast.AST], aliases: FlowAliases) -> 
     for target in targets:
         for name in _iter_target_names(target):
             aliases[name.id] = frozenset()
+            _clear_identity_binding(name.id, aliases)
             _clear_flow_index_aliases(name.id, aliases)
         dotted = _dotted_name(target)
         if dotted is not None:
@@ -1050,6 +1088,7 @@ def _assign_names(
     target: ast.AST, values: frozenset[str], aliases: FlowAliases
 ) -> None:
     for name in _iter_target_names(target):
+        _clear_identity_binding(name.id, aliases)
         _clear_flow_index_aliases(name.id, aliases)
         aliases[name.id] = values
     dotted = _dotted_name(target)
@@ -1364,10 +1403,14 @@ def _assign_target(
             )
         return
     if isinstance(target, ast.Name):
+        _clear_identity_binding(target.id, aliases)
         _clear_flow_index_aliases(target.id, aliases)
-        aliases[target.id] = _value_callable_names(
-            value, aliases, path_aliases, path_names
-        )
+        if _identity_lambda_parameter(value) is not None:
+            aliases[target.id] = frozenset({_identity_alias_key(target.id)})
+        else:
+            aliases[target.id] = _value_callable_names(
+                value, aliases, path_aliases, path_names
+            )
         _bind_flow_index_aliases(target.id, value, aliases, path_aliases, path_names)
         return
     dotted = _dotted_name(target)
@@ -1439,12 +1482,13 @@ def _apply_scope_import(stmt: ast.stmt, aliases: FlowAliases) -> None:
         for alias in stmt.names:
             local = alias.asname or alias.name.split(".")[0]
             resolved = alias.name if alias.asname else alias.name.split(".")[0]
+            _clear_identity_binding(local, aliases)
             aliases[local] = frozenset({resolved})
     elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0 and stmt.module:
         for alias in stmt.names:
-            aliases[alias.asname or alias.name] = frozenset(
-                {f"{stmt.module}.{alias.name}"}
-            )
+            local = alias.asname or alias.name
+            _clear_identity_binding(local, aliases)
+            aliases[local] = frozenset({f"{stmt.module}.{alias.name}"})
 
 
 def _merge_alias_sets(target: FlowAliases, *branches: FlowAliases) -> None:
@@ -1459,6 +1503,9 @@ def _merge_alias_sets(target: FlowAliases, *branches: FlowAliases) -> None:
             else:
                 values.update(target.get(key, frozenset({key})))
         target[key] = frozenset(values)
+    for key in [key for key in target if key.startswith(IDENTITY_ALIAS_PREFIX)]:
+        if not any(key in branch for branch in branches):
+            target.pop(key, None)
 
 
 def _scope_nodes(body: Sequence[ast.stmt]) -> Iterator[ast.AST]:
@@ -1484,12 +1531,21 @@ def _remove_path_names(targets: Sequence[ast.AST], names: set[str]) -> None:
         if isinstance(target, ast.Name):
             names.discard(target.id)
             _clear_index_path_names(target.id, names)
-        elif (
-            isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id in {"self", "cls"}
-        ):
-            names.discard(f"{target.value.id}.{target.attr}")
+            prefix = f"{target.id}."
+            for key in [key for key in names if key.startswith(prefix)]:
+                names.discard(key)
+        elif isinstance(target, ast.Attribute):
+            dotted = _dotted_name(target)
+            if dotted is not None:
+                names.discard(dotted)
+                prefix = f"{dotted}."
+                for key in [key for key in names if key.startswith(prefix)]:
+                    names.discard(key)
+            if isinstance(target.value, ast.Name) and target.value.id in {
+                "self",
+                "cls",
+            }:
+                names.discard(f"{target.value.id}.{target.attr}")
         elif isinstance(target, (ast.Tuple, ast.List)):
             _remove_path_names(target.elts, names)
 
@@ -1759,11 +1815,19 @@ def _iter_function_calls(
             yield from _calls_in_expression(argument.annotation, aliases, path_names)
     if stmt.returns is not None:
         yield from _calls_in_expression(stmt.returns, aliases, path_names)
-    aliases[stmt.name] = frozenset()
+    identity_key = _identity_alias_key(stmt.name)
+    if _identity_function_parameter(stmt) is not None:
+        aliases[identity_key] = frozenset({stmt.name})
+        aliases[stmt.name] = frozenset({identity_key})
+    else:
+        aliases.pop(identity_key, None)
+        aliases[stmt.name] = frozenset()
     static = _import_aliases_from_alias_sets(aliases)
     base_aliases = dict(global_aliases or {})
     base_aliases.update(aliases)
-    bindings, path_parameters = _function_call_bindings(stmt.name, global_aliases)
+    bindings, path_parameters, path_attributes = _function_call_bindings(
+        stmt.name, global_aliases
+    )
     inner_paths = _function_argument_paths(
         stmt,
         aliases,
@@ -1772,6 +1836,7 @@ def _iter_function_calls(
         base_aliases,
         bindings,
         path_parameters,
+        path_attributes,
     )
     yield from _iter_calls_with_aliases(
         stmt.body, base_aliases, inner_paths, global_aliases
@@ -1803,6 +1868,7 @@ def _function_argument_paths(
     base_aliases: FlowAliases,
     bindings: dict[str, frozenset[str]] | None = None,
     path_parameters: set[str] | None = None,
+    path_attributes: dict[str, set[str]] | None = None,
 ) -> set[str]:
     """Bind defaults and ``Path`` annotations of function parameters."""
     inner_paths = set(path_names)
@@ -1845,7 +1911,68 @@ def _function_argument_paths(
             inner_paths.add(parameter.arg)
         else:
             inner_paths.discard(parameter.arg)
+        for field_name in (path_attributes or {}).get(parameter.arg, set()):
+            inner_paths.add(f"{parameter.arg}.{field_name}")
+        if parameter.annotation is None:
+            continue
+        class_fields = _class_path_fields_from_aliases(static)
+        if not class_fields:
+            continue
+        for class_name in _annotation_instance_classes(
+            parameter.annotation, static, set(class_fields)
+        ):
+            for field_name in class_fields.get(class_name, set()):
+                inner_paths.add(f"{parameter.arg}.{field_name}")
     return inner_paths
+
+
+def _record_argument_binding(
+    function_name: str,
+    parameter_name: str,
+    argument: ast.AST,
+    call_aliases: FlowAliases,
+    static: dict[str, str],
+    call_paths: set[str],
+    class_fields: dict[str, set[str]],
+    class_names: set[str],
+    values: dict[str, dict[str, set[str]]],
+    path_parameters: dict[str, set[str]],
+    path_attributes: dict[str, dict[str, set[str]]],
+) -> None:
+    argument_names = _value_callable_names(argument, call_aliases, static, call_paths)
+    values.setdefault(function_name, {}).setdefault(parameter_name, set()).update(
+        argument_names
+    )
+    if _is_path_expression(argument, static, call_paths):
+        path_parameters.setdefault(function_name, set()).add(parameter_name)
+    for class_name in _value_instance_classes(argument, static, class_names):
+        fields = class_fields.get(class_name, set())
+        if fields:
+            path_attributes.setdefault(function_name, {}).setdefault(
+                parameter_name, set()
+            ).update(fields)
+
+
+def _call_binding_flow(
+    values: dict[str, dict[str, set[str]]],
+    path_parameters: dict[str, set[str]],
+    path_attributes: dict[str, dict[str, set[str]]],
+) -> tuple[FlowAliases, dict[str, dict[str, str]]]:
+    flow: FlowAliases = {}
+    plain: dict[str, dict[str, str]] = {}
+    for name, bound_parameters in values.items():
+        for parameter_name, parameter_values in bound_parameters.items():
+            flow[f"{name}.__arg__{parameter_name}"] = frozenset(parameter_values)
+            preferred = _pick_candidate(parameter_values)
+            if preferred is not None:
+                plain.setdefault(name, {})[parameter_name] = preferred
+    for name, bound_path_parameters in path_parameters.items():
+        for parameter_name in bound_path_parameters:
+            flow[f"{name}.__patharg__{parameter_name}"] = frozenset({"1"})
+    for name, bound_path_attributes in path_attributes.items():
+        for parameter_name, fields in bound_path_attributes.items():
+            flow[f"{name}.__pathattr__{parameter_name}"] = frozenset(fields)
+    return flow, plain
 
 
 def _call_argument_bindings(
@@ -1861,6 +1988,12 @@ def _call_argument_bindings(
     }
     values: dict[str, dict[str, set[str]]] = {}
     path_parameters: dict[str, set[str]] = {}
+    path_attributes: dict[str, dict[str, set[str]]] = {}
+    identity_aliases = _identity_static_aliases(tree)
+    class_static = _import_aliases_from_alias_sets(initial)
+    class_static.update(identity_aliases)
+    class_fields = _class_instance_path_fields(tree, class_static)
+    class_names = set(class_fields)
     for call, call_aliases, call_paths in _iter_calls_with_aliases(
         tree.body, dict(initial), set(), final
     ):
@@ -1869,64 +2002,78 @@ def _call_argument_bindings(
             continue
         definition = functions[func.id]
         static = _import_aliases_from_alias_sets(call_aliases)
+        static.update(identity_aliases)
         positional = [*definition.args.posonlyargs, *definition.args.args]
         for argument, definition_parameter in zip(call.args, positional):
             if isinstance(argument, ast.Starred):
                 break
-            argument_names = _value_callable_names(
-                argument, call_aliases, static, call_paths
+            _record_argument_binding(
+                func.id,
+                definition_parameter.arg,
+                argument,
+                call_aliases,
+                static,
+                call_paths,
+                class_fields,
+                class_names,
+                values,
+                path_parameters,
+                path_attributes,
             )
-            values.setdefault(func.id, {}).setdefault(
-                definition_parameter.arg, set()
-            ).update(argument_names)
-            if _is_path_expression(argument, static, call_paths):
-                path_parameters.setdefault(func.id, set()).add(definition_parameter.arg)
         for keyword in call.keywords:
             if keyword.arg is None:
                 continue
-            keyword_names = _value_callable_names(
-                keyword.value, call_aliases, static, call_paths
+            _record_argument_binding(
+                func.id,
+                keyword.arg,
+                keyword.value,
+                call_aliases,
+                static,
+                call_paths,
+                class_fields,
+                class_names,
+                values,
+                path_parameters,
+                path_attributes,
             )
-            values.setdefault(func.id, {}).setdefault(keyword.arg, set()).update(
-                keyword_names
-            )
-            if _is_path_expression(keyword.value, static, call_paths):
-                path_parameters.setdefault(func.id, set()).add(keyword.arg)
-    flow: FlowAliases = {}
-    plain: dict[str, dict[str, str]] = {}
-    for name, bound_parameters in values.items():
-        for parameter_name, parameter_values in bound_parameters.items():
-            flow[f"{name}.__arg__{parameter_name}"] = frozenset(parameter_values)
-            preferred = _pick_candidate(parameter_values)
-            if preferred is not None:
-                plain.setdefault(name, {})[parameter_name] = preferred
-    for name, bound_path_parameters in path_parameters.items():
-        for parameter_name in bound_path_parameters:
-            flow[f"{name}.__patharg__{parameter_name}"] = frozenset({"1"})
-    return flow, plain
+    return _call_binding_flow(values, path_parameters, path_attributes)
 
 
 def _function_call_bindings(
     function_name: str, global_aliases: FlowAliases | None
-) -> tuple[dict[str, frozenset[str]], set[str]]:
+) -> tuple[dict[str, frozenset[str]], set[str], dict[str, set[str]]]:
     bindings: dict[str, frozenset[str]] = {}
     path_parameters: set[str] = set()
+    path_attributes: dict[str, set[str]] = {}
     if not global_aliases:
-        return bindings, path_parameters
+        return bindings, path_parameters, path_attributes
     value_prefix = f"{function_name}.__arg__"
     path_prefix = f"{function_name}.__patharg__"
+    attribute_prefix = f"{function_name}.__pathattr__"
     for key, value in global_aliases.items():
         if key.startswith(value_prefix):
             bindings[key[len(value_prefix) :]] = value
         elif key.startswith(path_prefix):
             path_parameters.add(key[len(path_prefix) :])
-    return bindings, path_parameters
+        elif key.startswith(attribute_prefix):
+            path_attributes[key[len(attribute_prefix) :]] = set(value)
+    return bindings, path_parameters, path_attributes
 
 
 def _import_aliases_from_alias_sets(aliases: FlowAliases) -> dict[str, str]:
     return {
         name: next(iter(values)) for name, values in aliases.items() if len(values) == 1
     }
+
+
+def _merge_flow_aliases(static: dict[str, str], aliases: FlowAliases) -> dict[str, str]:
+    result = dict(static)
+    for name, values in aliases.items():
+        if len(values) == 1:
+            result[name] = next(iter(values))
+        elif not values:
+            result.pop(name, None)
+    return result
 
 
 def _iter_class_calls(
@@ -1941,6 +2088,7 @@ def _iter_class_calls(
         yield from _calls_in_expression(base, aliases, path_names)
     for keyword in stmt.keywords:
         yield from _calls_in_expression(keyword.value, aliases, path_names)
+    _clear_identity_binding(stmt.name, aliases)
     aliases[stmt.name] = frozenset()
     path_names.discard(stmt.name)
     static = _import_aliases_from_alias_sets(aliases)
@@ -2157,6 +2305,7 @@ def _iter_try_calls(
         branch = dict(aliases)
         handler_paths = set(path_names)
         if handler.name is not None:
+            _clear_identity_binding(handler.name, branch)
             branch[handler.name] = frozenset()
             handler_paths.discard(handler.name)
         branches.append(branch)
@@ -2589,10 +2738,35 @@ def _literal_getattr_target(node: ast.Call) -> str | None:
 def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Violation]:
     """Reject dynamic import calls in the contract."""
     violations: list[Violation] = []
-    for path in python_files(contract_src):
-        tree = _parse(path)
-        static, _ = _module_value_aliases(tree, _import_aliases(tree))
+    trees = {path: _parse(path) for path in python_files(contract_src)}
+    (
+        imported_attributes_registry,
+        imported_methods_registry,
+        imported_init_registry,
+        imported_identity_registry,
+    ) = _runtime_fact_registry(contract_src, trees)
+    for path, tree in trees.items():
+        file_imports = _file_import_aliases(tree, path, contract_src)
+        base_static = dict(file_imports)
+        base_static.update(_identity_static_aliases(tree))
+        static, _ = _module_value_aliases(tree, base_static)
+        imported_runtime = _imported_runtime_facts(
+            static,
+            imported_attributes_registry,
+            imported_methods_registry,
+            imported_init_registry,
+            imported_identity_registry,
+        )
+        for name in imported_runtime.identity_functions:
+            marker = _identity_alias_key(name)
+            static[name] = marker
+            static[marker] = name
         initial = _with_function_returns(tree, _initial_flow_aliases(tree))
+        initial.update(_identity_flow_aliases(tree))
+        for name in imported_runtime.identity_functions:
+            marker = _identity_alias_key(name)
+            initial[name] = frozenset({marker})
+            initial[marker] = frozenset({name})
         final = _module_final_aliases(tree, initial)
         bindings, plain_bindings = _call_argument_bindings(tree, initial, final)
         initial.update(bindings)
@@ -2602,14 +2776,18 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
         violations.extend(
             _namespace_reference_violations(
                 tree,
-                _node_runtime_aliases(tree, _import_aliases(tree), plain_bindings),
+                _node_runtime_aliases(tree, file_imports, plain_bindings),
                 _shadowed_names_by_node(tree),
                 set(),
                 static,
                 _dynamic_reference_report(path),
+                imported_attributes=imported_runtime.attributes,
+                imported_methods=imported_runtime.methods,
+                imported_init_methods=imported_runtime.init_methods,
+                extra_identity_functions=imported_runtime.identity_functions,
             )
         )
-        for lambda_node, lambda_names in _lambda_reference_names(tree, static):
+        for lambda_node, lambda_names in _lambda_reference_names(tree, file_imports):
             lambda_dynamic = frozenset(
                 name for name in lambda_names if _is_dynamic_import_name(name)
             )
@@ -2743,6 +2921,9 @@ def _attribute_is_path(
         name = _resolve_callable_name(node, aliases)
         if name in PATH_CLASS_NAMES:
             return True
+    dotted = _dotted_name(node)
+    if dotted is not None and dotted in path_names:
+        return True
     if isinstance(node.value, ast.Call):
         class_name = _resolve_callable_name(node.value.func, aliases)
         if class_name is not None and f"{class_name}.{node.attr}" in path_names:
@@ -2764,6 +2945,10 @@ def _call_is_path(
     name = _resolve_callable_name(node.func, aliases)
     if name in PATH_CLASS_NAMES or name in path_names:
         return True
+    if isinstance(node.func, ast.Name) and len(node.args) == 1 and not node.keywords:
+        target = aliases.get(node.func.id)
+        if target is not None and target.startswith(IDENTITY_ALIAS_PREFIX):
+            return _is_path_expression(node.args[0], aliases, path_names)
     if not isinstance(node.func, ast.Attribute):
         return False
     if (
@@ -2784,7 +2969,14 @@ def _call_is_path(
 def _subscript_is_path(
     node: ast.AST, aliases: dict[str, str], path_names: set[str]
 ) -> bool | None:
-    if not (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)):
+    if not isinstance(node, ast.Subscript):
+        return None
+    if isinstance(node.value, ast.Attribute) and node.value.attr in {
+        "parent",
+        "parents",
+    }:
+        return _is_path_expression(node.value.value, aliases, path_names)
+    if not isinstance(node.slice, ast.Constant):
         return None
     if isinstance(node.value, ast.Name):
         return f"{node.value.id}[{node.slice.value!r}]" in path_names
@@ -2844,14 +3036,11 @@ def _add_path_names(targets: Sequence[ast.AST], names: set[str]) -> bool:
         if isinstance(target, ast.Name) and target.id not in names:
             names.add(target.id)
             changed = True
-        elif (
-            isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id in {"self", "cls"}
-            and f"{target.value.id}.{target.attr}" not in names
-        ):
-            names.add(f"{target.value.id}.{target.attr}")
-            changed = True
+        elif isinstance(target, ast.Attribute):
+            dotted = _dotted_name(target)
+            if dotted is not None and dotted not in names:
+                names.add(dotted)
+                changed = True
         elif isinstance(target, (ast.Tuple, ast.List)):
             changed |= _add_path_names(target.elts, names)
         elif isinstance(target, ast.Starred):
@@ -3465,6 +3654,420 @@ def _self_path_attributes_by_class(
     return result
 
 
+def _annotation_instance_classes(
+    annotation: ast.AST, aliases: dict[str, str], class_names: set[str]
+) -> set[str]:
+    """Return classes named by an instance annotation."""
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        forward_name = annotation.value.rsplit(".", 1)[-1]
+        return {forward_name} if forward_name in class_names else set()
+    name = _resolve_callable_name(annotation, aliases)
+    if name is not None:
+        last = name.rsplit(".", 1)[-1]
+        if last in class_names:
+            return {last}
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _annotation_instance_classes(
+            annotation.left, aliases, class_names
+        ) | _annotation_instance_classes(annotation.right, aliases, class_names)
+    if isinstance(annotation, ast.Subscript):
+        base = _resolve_callable_name(annotation.value, aliases)
+        base_name = base.rsplit(".", 1)[-1] if base else ""
+        elements = (
+            annotation.slice.elts
+            if isinstance(annotation.slice, ast.Tuple)
+            else [annotation.slice]
+        )
+        if base_name == "Annotated" and elements:
+            return _annotation_instance_classes(elements[0], aliases, class_names)
+        if base_name in {"Optional", "Union"}:
+            result: set[str] = set()
+            for element in elements:
+                result |= _annotation_instance_classes(element, aliases, class_names)
+            return result
+    return set()
+
+
+def _value_instance_classes(
+    value: ast.AST, aliases: dict[str, str], class_names: set[str]
+) -> set[str]:
+    if isinstance(value, ast.Call):
+        name = _resolve_callable_name(value.func, aliases)
+        if name is not None and name.rsplit(".", 1)[-1] in class_names:
+            return {name.rsplit(".", 1)[-1]}
+        return set()
+    return _annotation_instance_classes(value, aliases, class_names)
+
+
+def _field_statement_parts(
+    node: ast.AST,
+) -> tuple[Sequence[ast.AST], ast.AST | None, ast.AST | None] | None:
+    if isinstance(node, ast.Assign):
+        return node.targets, node.value, None
+    if isinstance(node, ast.AnnAssign):
+        return [node.target], node.value, node.annotation
+    return None
+
+
+def _field_assignment_owners(
+    node: ast.AST,
+    aliases: dict[str, str],
+    class_names: set[str],
+    parameter_classes: dict[str, set[str]] | None = None,
+) -> tuple[Sequence[ast.AST], set[str]] | None:
+    parts = _field_statement_parts(node)
+    if parts is None:
+        return None
+    targets, value, annotation = parts
+    owners: set[str] = set()
+    if annotation is not None:
+        owners |= _annotation_instance_classes(annotation, aliases, class_names)
+    if value is not None:
+        owners |= _value_instance_classes(value, aliases, class_names)
+        if isinstance(value, ast.Name) and parameter_classes is not None:
+            owners |= parameter_classes.get(value.id, set())
+    return targets, owners
+
+
+def _method_parameter_classes(
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: dict[str, str],
+    class_names: set[str],
+) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for parameter in _function_parameters(method):
+        if parameter.annotation is None:
+            continue
+        result[parameter.arg] = _annotation_instance_classes(
+            parameter.annotation, aliases, class_names
+        )
+    return result
+
+
+def _function_parameter_types(
+    tree: ast.Module, aliases: dict[str, str], class_names: set[str]
+) -> dict[int, dict[str, str]]:
+    result: dict[int, dict[str, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parameters: dict[str, str] = {}
+        for parameter in _function_parameters(node):
+            if parameter.annotation is None:
+                continue
+            classes = _annotation_instance_classes(
+                parameter.annotation, aliases, class_names
+            )
+            if classes:
+                parameters[parameter.arg] = _preferred_name(classes)
+        if parameters:
+            result[id(node)] = parameters
+    return result
+
+
+def _class_field_owner_map(
+    classes: Sequence[ast.ClassDef],
+    aliases: dict[str, str],
+    class_names: set[str],
+) -> dict[str, dict[str, set[str]]]:
+    result: dict[str, dict[str, set[str]]] = {name: {} for name in class_names}
+    for class_node in classes:
+        fields = result[class_node.name]
+        for statement in class_node.body:
+            assignment = _field_assignment_owners(statement, aliases, class_names)
+            if assignment is None:
+                continue
+            targets, owners = assignment
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    fields.setdefault(target.id, set()).update(owners)
+        for method in _class_methods(class_node):
+            parameter_classes = _method_parameter_classes(method, aliases, class_names)
+            for node in _scope_nodes(method.body):
+                assignment = _field_assignment_owners(
+                    node, aliases, class_names, parameter_classes
+                )
+                if assignment is None:
+                    continue
+                targets, owners = assignment
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id in {"self", "cls"}
+                    ):
+                        fields.setdefault(target.attr, set()).update(owners)
+    return result
+
+
+def _inherit_field_types(
+    classes: Sequence[ast.ClassDef],
+    resolved: dict[str, dict[str, str]],
+    bases: dict[str, list[str]],
+) -> None:
+    for _ in range(len(classes) + 1):
+        changed = False
+        for class_node in classes:
+            for base in bases.get(class_node.name, []):
+                for field_name, owner in resolved.get(base, {}).items():
+                    if field_name not in resolved[class_node.name]:
+                        resolved[class_node.name][field_name] = owner
+                        changed = True
+        if not changed:
+            break
+
+
+def _class_field_type_map(
+    tree: ast.Module, aliases: dict[str, str], class_names: set[str]
+) -> dict[str, dict[str, str]]:
+    """Map instance field names to the class that owns their value."""
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    owner_map = _class_field_owner_map(classes, aliases, class_names)
+    resolved: dict[str, dict[str, str]] = {
+        name: {
+            field: _preferred_name(owners) for field, owners in fields.items() if owners
+        }
+        for name, fields in owner_map.items()
+    }
+    _inherit_field_types(
+        classes, resolved, _class_bases(classes, _class_alias_map(tree))
+    )
+    return resolved
+
+
+def _class_instance_path_fields(
+    tree: ast.Module,
+    aliases: dict[str, str],
+    external_fields: dict[str, set[str]] | None = None,
+) -> dict[str, set[str]]:
+    """Return dotted ``Path`` field chains for every class instance."""
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    external = external_fields or {}
+    class_names = {node.name for node in classes} | set(external)
+    direct = {
+        name: {
+            attribute.split(".", 1)[1]
+            for attribute in attributes
+            if attribute.startswith("self.")
+        }
+        for name, attributes in _self_path_attributes_by_class(tree, aliases).items()
+    }
+    field_types = _class_field_type_map(tree, aliases, class_names)
+    result = {name: set(fields) for name, fields in direct.items()}
+    for name, fields in external.items():
+        result.setdefault(name, set()).update(fields)
+    for _ in range(len(class_names) + 1):
+        changed = False
+        for name in class_names:
+            expanded = set(result.get(name, set()))
+            for field_name, owner in field_types.get(name, {}).items():
+                for nested in result.get(owner, set()):
+                    expanded.add(f"{field_name}.{nested}")
+            if expanded != result.get(name, set()):
+                result[name] = expanded
+                changed = True
+        if not changed:
+            break
+    return result
+
+
+def _module_names_for_path(root: Path, path: Path) -> set[str]:
+    relative = path.relative_to(root).with_suffix("")
+    parts = list(relative.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    relative_name = ".".join(parts)
+    if not relative_name:
+        return {root.name}
+    return {relative_name, f"{root.name}.{relative_name}"}
+
+
+def _class_field_registry(
+    root: Path, trees: dict[Path, ast.Module]
+) -> dict[str, set[str]]:
+    statics: dict[Path, dict[str, str]] = {}
+    modules: dict[Path, set[str]] = {}
+    classes: dict[Path, list[str]] = {}
+    registry: dict[str, set[str]] = {}
+    for path, tree in trees.items():
+        static, _ = _module_value_aliases(tree, _file_import_aliases(tree, path, root))
+        static.update(_identity_static_aliases(tree))
+        statics[path] = static
+        modules[path] = _module_names_for_path(root, path)
+        classes[path] = [
+            node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+        ]
+        fields = _class_instance_path_fields(tree, static)
+        for name in classes[path]:
+            values = set(fields.get(name, set()))
+            for module in modules[path]:
+                registry[f"{module}.{name}"] = values
+    for _ in range(len(trees) + 1):
+        changed = False
+        for path, tree in trees.items():
+            imported = _imported_class_fields(statics[path], registry)
+            fields = _class_instance_path_fields(tree, statics[path], imported)
+            fields = _merge_class_fields(fields, imported)
+            for name in classes[path]:
+                values = set(fields.get(name, set()))
+                for module in modules[path]:
+                    key = f"{module}.{name}"
+                    if registry.get(key) != values:
+                        registry[key] = values
+                        changed = True
+        if not changed:
+            break
+    return registry
+
+
+def _imported_class_fields(
+    static: dict[str, str], registry: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for alias, target in static.items():
+        if alias.startswith((IDENTITY_ALIAS_PREFIX, CLASS_PATH_FIELD_PREFIX)):
+            continue
+        if target.startswith((IDENTITY_ALIAS_PREFIX, CLASS_PATH_FIELD_PREFIX)):
+            continue
+        fields = registry.get(target)
+        if fields is not None:
+            if alias.isidentifier():
+                result.setdefault(alias, set()).update(fields)
+            result.setdefault(target.rsplit(".", 1)[-1], set()).update(fields)
+        prefix = f"{target}."
+        for qualified, nested in registry.items():
+            if not qualified.startswith(prefix):
+                continue
+            result.setdefault(qualified.rsplit(".", 1)[-1], set()).update(nested)
+            if alias.isidentifier():
+                result.setdefault(alias, set()).update(nested)
+    return result
+
+
+@dataclass
+class _ImportedRuntimeFacts:
+    attributes: dict[str, dict[str, str]] = field(default_factory=dict)
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = field(
+        default_factory=dict
+    )
+    init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = field(
+        default_factory=dict
+    )
+    identity_functions: dict[str, str] = field(default_factory=dict)
+
+
+def _runtime_fact_registry(
+    root: Path, trees: dict[Path, ast.Module]
+) -> tuple[
+    dict[str, dict[str, str]],
+    dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    dict[str, str],
+]:
+    attributes: dict[str, dict[str, str]] = {}
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    identities: dict[str, str] = {}
+    for path, tree in trees.items():
+        static, _ = _module_value_aliases(tree, _file_import_aliases(tree, path, root))
+        static.update(_identity_static_aliases(tree))
+        class_attributes, _ = _class_namespace_facts(tree, static)
+        class_methods = _class_method_nodes(tree)
+        class_init_methods = _class_init_methods(tree)
+        modules = _module_names_for_path(root, path)
+        for class_node in ast.walk(tree):
+            if not isinstance(class_node, ast.ClassDef):
+                continue
+            for module in modules:
+                key = f"{module}.{class_node.name}"
+                attributes[key] = class_attributes.get(class_node.name, {})
+                methods[key] = class_methods.get(class_node.name, {})
+                init = class_init_methods.get(class_node.name)
+                if init is not None:
+                    init_methods[key] = init
+        for name, parameter in _identity_functions(tree).items():
+            for module in modules:
+                identities[f"{module}.{name}"] = parameter
+    return attributes, methods, init_methods, identities
+
+
+def _imported_runtime_facts(
+    static: dict[str, str],
+    attributes: dict[str, dict[str, str]],
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    identities: dict[str, str],
+) -> _ImportedRuntimeFacts:
+    result = _ImportedRuntimeFacts()
+    for alias, target in static.items():
+        if alias.startswith((IDENTITY_ALIAS_PREFIX, CLASS_PATH_FIELD_PREFIX)):
+            continue
+        if target.startswith((IDENTITY_ALIAS_PREFIX, CLASS_PATH_FIELD_PREFIX)):
+            continue
+        keys = [target]
+        prefix = f"{target}."
+        keys.extend(
+            qualified for qualified in attributes if qualified.startswith(prefix)
+        )
+        for key in keys:
+            if key not in attributes:
+                continue
+            names = {key.rsplit(".", 1)[-1]}
+            if alias.isidentifier():
+                names.add(alias)
+            for name in names:
+                result.attributes.setdefault(name, dict(attributes[key]))
+                result.methods.setdefault(name, dict(methods.get(key, {})))
+                if key in init_methods:
+                    result.init_methods[name] = init_methods[key]
+        identity = identities.get(target)
+        if identity is not None:
+            name = alias if alias.isidentifier() else target.rsplit(".", 1)[-1]
+            result.identity_functions[name] = identity
+            result.identity_functions[target.rsplit(".", 1)[-1]] = identity
+    return result
+
+
+def _merge_class_fields(
+    local: dict[str, set[str]], imported: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    result = {name: set(fields) for name, fields in local.items()}
+    for name, fields in imported.items():
+        result.setdefault(name, set()).update(fields)
+    return result
+
+
+def _class_path_field_static_aliases(
+    fields: dict[str, set[str]],
+) -> dict[str, str]:
+    return {
+        f"{CLASS_PATH_FIELD_PREFIX}{class_name}:{field}": "1"
+        for class_name, class_fields in fields.items()
+        for field in class_fields
+    }
+
+
+def _class_path_field_flow_aliases(
+    fields: dict[str, set[str]],
+) -> FlowAliases:
+    return {key: frozenset({"1"}) for key in _class_path_field_static_aliases(fields)}
+
+
+def _class_path_fields_from_aliases(
+    aliases: dict[str, str],
+) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for key in aliases:
+        if not key.startswith(CLASS_PATH_FIELD_PREFIX):
+            continue
+        class_name, separator, field = key[len(CLASS_PATH_FIELD_PREFIX) :].partition(
+            ":"
+        )
+        if separator and class_name and field:
+            result.setdefault(class_name, set()).add(field)
+    return result
+
+
 def _preferred_name(names: frozenset[str] | set[str]) -> str:
     return min(names, key=lambda candidate: ("." not in candidate, candidate))
 
@@ -3938,25 +4541,40 @@ def _class_container_element(
     return None
 
 
+def _class_receiver_name(
+    name: str, class_name: str, receiver_aliases: set[str]
+) -> str | None:
+    if name in {"self", "cls"}:
+        return name
+    if name in receiver_aliases:
+        return "self"
+    if name == class_name:
+        return class_name
+    return None
+
+
 def _class_attribute_chain(
     value: ast.AST,
     class_attributes: dict[str, str],
     class_name: str,
+    receiver_aliases: set[str] | None = None,
 ) -> str | None:
     if not isinstance(value, ast.Attribute):
         return None
     base = value.value
     if not isinstance(base, ast.Attribute) or not isinstance(base.value, ast.Name):
         return None
-    root = base.value.id
-    if root in {"self", "cls"}:
-        resolved = class_attributes.get(f"{root}.{base.attr}")
+    receiver = _class_receiver_name(
+        base.value.id, class_name, receiver_aliases or set()
+    )
+    if receiver is None:
+        return None
+    if receiver in {"self", "cls"}:
+        resolved = class_attributes.get(f"{receiver}.{base.attr}")
         if resolved is None:
             resolved = class_attributes.get(base.attr)
-    elif root == class_name:
-        resolved = class_attributes.get(base.attr)
     else:
-        return None
+        resolved = class_attributes.get(base.attr)
     if resolved is None:
         return None
     return f"{resolved}.{value.attr}"
@@ -3966,20 +4584,22 @@ def _class_attribute_value(
     value: ast.AST,
     class_attributes: dict[str, str],
     class_name: str,
+    receiver_aliases: set[str] | None = None,
 ) -> str | None:
     if not isinstance(value, ast.Attribute):
         return None
     base = value.value
     if not isinstance(base, ast.Name):
         return None
-    if base.id in {"self", "cls"}:
-        resolved = class_attributes.get(f"{base.id}.{value.attr}")
+    receiver = _class_receiver_name(base.id, class_name, receiver_aliases or set())
+    if receiver is None:
+        return None
+    if receiver in {"self", "cls"}:
+        resolved = class_attributes.get(f"{receiver}.{value.attr}")
         if resolved is not None:
             return resolved
         return class_attributes.get(value.attr)
-    if base.id == class_name:
-        return class_attributes.get(value.attr)
-    return None
+    return class_attributes.get(value.attr)
 
 
 RETURN_SEPARATOR = "|"
@@ -3997,6 +4617,125 @@ def _merge_return_value(existing: str | None, candidate: str) -> str:
     return RETURN_SEPARATOR.join(sorted(values))
 
 
+def _class_parameter_reference(value: ast.AST, parameters: set[str]) -> str | None:
+    if isinstance(value, ast.Name):
+        if value.id in parameters and value.id not in {"self", "cls"}:
+            return f"{CALL_PARAMETER_PREFIX}{value.id}"
+        return None
+    if isinstance(value, ast.Attribute):
+        dotted = _dotted_name(value)
+        if dotted is not None:
+            root = dotted.split(".", 1)[0]
+            if root in parameters and root not in {"self", "cls"}:
+                return f"{CALL_PARAMETER_PREFIX}{dotted}"
+    return None
+
+
+def _class_return_candidate(
+    value: ast.AST,
+    aliases: dict[str, str],
+    class_attributes: dict[str, str],
+    class_name: str,
+    receiver_aliases: set[str],
+    parameters: set[str],
+    local_references: dict[str, str],
+) -> str | None:
+    if isinstance(value, ast.Name):
+        resolved = local_references.get(value.id)
+        if resolved is not None:
+            return resolved
+    resolved = _class_parameter_reference(value, parameters)
+    if resolved is not None:
+        return resolved
+    resolved = _class_attribute_chain(
+        value, class_attributes, class_name, receiver_aliases
+    )
+    if resolved is not None:
+        return resolved
+    resolved = _class_attribute_value(
+        value, class_attributes, class_name, receiver_aliases
+    )
+    if resolved is not None:
+        return resolved
+    resolved = _class_container_element(value, class_attributes, class_name)
+    if resolved is not None:
+        return resolved
+    return _resolved_reference(value, aliases)
+
+
+def _clear_local_aliases(
+    targets: Sequence[ast.AST],
+    receiver_aliases: set[str],
+    local_references: dict[str, str],
+) -> None:
+    for target in targets:
+        for name in _iter_target_names(target):
+            receiver_aliases.discard(name.id)
+            local_references.pop(name.id, None)
+
+
+def _track_method_aliases(
+    targets: Sequence[ast.AST],
+    value: ast.AST,
+    parameters: set[str],
+    receiver_aliases: set[str],
+    local_references: dict[str, str],
+) -> None:
+    _clear_local_aliases(targets, receiver_aliases, local_references)
+    for target in targets:
+        if not isinstance(target, ast.Name):
+            continue
+        if isinstance(value, ast.Name) and value.id in {"self", "cls"}:
+            local_references.pop(target.id, None)
+            if target.id != value.id:
+                receiver_aliases.add(target.id)
+            continue
+        receiver_aliases.discard(target.id)
+        reference = local_references.get(
+            value.id if isinstance(value, ast.Name) else ""
+        )
+        if reference is None:
+            reference = _class_parameter_reference(value, parameters)
+        if reference is None:
+            local_references.pop(target.id, None)
+        else:
+            local_references[target.id] = reference
+
+
+def _invalidate_rebound_aliases(
+    node: ast.AST,
+    receiver_aliases: set[str],
+    local_references: dict[str, str],
+) -> bool:
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        _clear_local_aliases([node.target], receiver_aliases, local_references)
+        return True
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        _clear_local_aliases(
+            [
+                item.optional_vars
+                for item in node.items
+                if item.optional_vars is not None
+            ],
+            receiver_aliases,
+            local_references,
+        )
+        return True
+    if isinstance(node, ast.ExceptHandler):
+        if node.name is not None:
+            receiver_aliases.discard(node.name)
+            local_references.pop(node.name, None)
+        return True
+    if isinstance(node, ast.AugAssign):
+        _clear_local_aliases([node.target], receiver_aliases, local_references)
+        return True
+    if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+        receiver_aliases.discard(node.target.id)
+        local_references.pop(node.target.id, None)
+        return True
+    return False
+
+
 def _class_method_facts(
     method: ast.FunctionDef | ast.AsyncFunctionDef,
     aliases: dict[str, str],
@@ -4004,23 +4743,27 @@ def _class_method_facts(
     class_returns: dict[str, str],
     class_name: str,
 ) -> None:
+    parameters = _function_parameter_names(method)
+    reference_parameters = parameters - _method_reassigned_parameters(method)
+    receiver_aliases: set[str] = set()
+    local_references: dict[str, str] = {}
     for inner in _scope_nodes(method.body):
         if isinstance(inner, ast.Return) and inner.value is not None:
-            resolved = _class_attribute_chain(inner.value, class_attributes, class_name)
-            if resolved is None:
-                resolved = _class_attribute_value(
-                    inner.value, class_attributes, class_name
-                )
-            if resolved is None:
-                resolved = _class_container_element(
-                    inner.value, class_attributes, class_name
-                )
-            if resolved is None:
-                resolved = _resolved_reference(inner.value, aliases)
+            resolved = _class_return_candidate(
+                inner.value,
+                aliases,
+                class_attributes,
+                class_name,
+                receiver_aliases,
+                reference_parameters,
+                local_references,
+            )
             if resolved is not None:
                 class_returns[method.name] = _merge_return_value(
                     class_returns.get(method.name), resolved
                 )
+            continue
+        if _invalidate_rebound_aliases(inner, receiver_aliases, local_references):
             continue
         if isinstance(inner, ast.Assign):
             targets = inner.targets
@@ -4030,19 +4773,33 @@ def _class_method_facts(
             value = inner.value
         else:
             continue
-        resolved = _class_attribute_chain(value, class_attributes, class_name)
-        if resolved is None:
-            resolved = _class_container_element(value, class_attributes, class_name)
-        if resolved is None:
-            resolved = _resolved_reference(value, aliases)
+        _track_method_aliases(
+            targets, value, reference_parameters, receiver_aliases, local_references
+        )
+        resolved = _class_return_candidate(
+            value,
+            aliases,
+            class_attributes,
+            class_name,
+            receiver_aliases,
+            reference_parameters,
+            local_references,
+        )
         for target in targets:
             if (
                 isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
                 and target.value.id in {"self", "cls"}
             ):
-                if resolved is not None:
+                if resolved is not None and not resolved.startswith(
+                    CALL_PARAMETER_PREFIX
+                ):
                     class_attributes[target.attr] = resolved
+                elif resolved is not None and method.name == "__init__":
+                    class_attributes[target.attr] = (
+                        f"{INIT_PARAMETER_PREFIX}"
+                        f"{resolved[len(CALL_PARAMETER_PREFIX) :]}"
+                    )
                 _store_class_container(
                     f"{target.value.id}.{target.attr}",
                     value,
@@ -4055,8 +4812,8 @@ def _class_method_facts(
                 class_attributes[target_key] = resolved
 
 
-def _method_shadowed_names(method: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    names = set(_function_parameter_names(method))
+def _method_bound_names(method: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    names: set[str] = set()
     for node in _scope_nodes(method.body):
         if isinstance(node, ast.Import):
             names.update(
@@ -4096,6 +4853,17 @@ def _method_shadowed_names(method: ast.FunctionDef | ast.AsyncFunctionDef) -> se
         for target in targets:
             names.update(name.id for name in _iter_target_names(target))
     return names
+
+
+def _method_shadowed_names(method: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    return set(_function_parameter_names(method)) | _method_bound_names(method)
+
+
+def _method_reassigned_parameters(
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[str]:
+    parameters = set(_function_parameter_names(method))
+    return (_method_bound_names(method) & parameters) - {"self", "cls"}
 
 
 def _method_aliases(
@@ -4623,6 +5391,9 @@ class _ElementScope:
     container_sources: dict[str, str] = field(default_factory=dict)
     container_columns: dict[str, dict[int, list[str]]] = field(default_factory=dict)
     instance_aliases: dict[str, str] = field(default_factory=dict)
+    shadowed_identities: set[str] = field(default_factory=set)
+    instance_constructors: dict[str, ast.Call] = field(default_factory=dict)
+    identity_aliases: dict[str, str] = field(default_factory=dict)
 
     def clone(self) -> _ElementScope:
         return _ElementScope(
@@ -4636,6 +5407,9 @@ class _ElementScope:
                 for name, columns in self.container_columns.items()
             },
             dict(self.instance_aliases),
+            set(self.shadowed_identities),
+            dict(self.instance_constructors),
+            dict(self.identity_aliases),
         )
 
 
@@ -4650,6 +5424,14 @@ def _pattern_capture_names(pattern: ast.AST) -> set[str]:
     return names
 
 
+def _pattern_is_irrefutable(pattern: ast.AST) -> bool:
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None
+    if isinstance(pattern, ast.MatchOr):
+        return any(_pattern_is_irrefutable(item) for item in pattern.patterns)
+    return False
+
+
 def _is_docstring(statement: ast.stmt) -> bool:
     return (
         isinstance(statement, ast.Expr)
@@ -4658,21 +5440,57 @@ def _is_docstring(statement: ast.stmt) -> bool:
     )
 
 
+def _identity_function_parameter(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str | None:
+    parameters = [*node.args.posonlyargs, *node.args.args]
+    if len(parameters) != 1 or node.args.vararg or node.args.kwarg:
+        return None
+    body = [statement for statement in node.body if not _is_docstring(statement)]
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    value = body[0].value
+    if isinstance(value, ast.Name) and value.id == parameters[0].arg:
+        return value.id
+    return None
+
+
+def _identity_lambda_parameter(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Lambda):
+        return None
+    parameters = [*node.args.posonlyargs, *node.args.args]
+    if len(parameters) != 1 or node.args.vararg or node.args.kwarg:
+        return None
+    if isinstance(node.body, ast.Name) and node.body.id == parameters[0].arg:
+        return node.body.id
+    return None
+
+
 def _identity_functions(tree: ast.Module) -> dict[str, str]:
     result: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        parameters = [*node.args.posonlyargs, *node.args.args]
-        if len(parameters) != 1 or node.args.vararg or node.args.kwarg:
-            continue
-        body = [statement for statement in node.body if not _is_docstring(statement)]
-        if len(body) != 1 or not isinstance(body[0], ast.Return):
-            continue
-        value = body[0].value
-        if isinstance(value, ast.Name) and value.id == parameters[0].arg:
-            result[node.name] = value.id
+        parameter = _identity_function_parameter(node)
+        if parameter is not None:
+            result[node.name] = parameter
     return result
+
+
+def _identity_static_aliases(tree: ast.Module) -> dict[str, str]:
+    """Expose identity helpers to the path scanner through scoped aliases."""
+    result: dict[str, str] = {}
+    for name in _identity_functions(tree):
+        marker = _identity_alias_key(name)
+        result[name] = marker
+        result[marker] = name
+    return result
+
+
+def _identity_flow_aliases(tree: ast.Module) -> FlowAliases:
+    return {
+        key: frozenset({value}) for key, value in _identity_static_aliases(tree).items()
+    }
 
 
 class _ElementAnalysis:
@@ -4689,14 +5507,23 @@ class _ElementAnalysis:
         attributes: dict[str, dict[str, str]],
         contexts: dict[int, str | None],
         identity_functions: dict[str, str] | None = None,
+        field_types: dict[str, dict[str, str]] | None = None,
+        path_fields: dict[str, set[str]] | None = None,
+        parameter_types: dict[int, dict[str, str]] | None = None,
+        init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
     ) -> None:
         self.attributes = attributes
         self.contexts = contexts
         self.identity_functions = identity_functions or {}
+        self.field_types = field_types or {}
+        self.path_fields = path_fields or {}
+        self.parameter_types = parameter_types or {}
+        self.init_methods = init_methods or {}
         self.element_aliases: dict[int, str] = {}
         self.container_nodes: dict[int, dict[str, str]] = {}
         self.class_alias_nodes: dict[int, str] = {}
         self.instance_alias_nodes: dict[int, str] = {}
+        self.instance_constructor_nodes: dict[int, ast.Call] = {}
         self.invalid_nodes: dict[int, frozenset[str]] = {}
 
     def run(self, tree: ast.Module) -> None:
@@ -4707,6 +5534,16 @@ class _ElementAnalysis:
         if class_name is None:
             return {}
         return self.attributes.get(class_name, {})
+
+    def _identity_name(self, name: str, scope: _ElementScope) -> str | None:
+        alias = scope.identity_aliases.get(name)
+        if alias is not None:
+            return alias
+        if name in scope.shadowed_identities:
+            return None
+        if name in self.identity_functions:
+            return name
+        return None
 
     def _attribute_container(
         self, value: ast.Attribute, scope: _ElementScope, class_name: str | None
@@ -4767,6 +5604,86 @@ class _ElementAnalysis:
             return None
         return owner_attributes.get(value.attr)
 
+    def _attribute_owner(
+        self,
+        value: ast.Attribute,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> str | None:
+        dotted = _dotted_name(value)
+        root = _leftmost_name(value)
+        if dotted is None or root is None:
+            return None
+        prefix = f"{root.id}."
+        if not dotted.startswith(prefix):
+            return None
+        owner = scope.instance_aliases.get(root.id)
+        if owner is None and root.id in {"self", "cls"}:
+            owner = class_name
+        if owner is None:
+            return None
+        for field_name in dotted[len(prefix) :].split("."):
+            owner = self.field_types.get(owner, {}).get(field_name)
+            if owner is None:
+                return None
+        return owner
+
+    def _instance_attribute_value(
+        self,
+        value: ast.Attribute,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> str | None:
+        if isinstance(value.value, ast.Name):
+            owner = scope.instance_aliases.get(value.value.id)
+            constructor = scope.instance_constructors.get(value.value.id)
+        elif isinstance(value.value, ast.Call):
+            owner = self._instance_class(value.value, scope, class_name)
+            constructor = value.value
+        else:
+            return None
+        if owner is None:
+            return None
+        attributes = self.attributes.get(owner, {})
+        resolved = (
+            attributes.get(value.attr)
+            or attributes.get(f"self.{value.attr}")
+            or attributes.get(f"cls.{value.attr}")
+        )
+        if resolved is None or not resolved.startswith(INIT_PARAMETER_PREFIX):
+            return resolved
+        init_method = self.init_methods.get(owner)
+        if constructor is None or init_method is None:
+            return None
+        specification = resolved[len(INIT_PARAMETER_PREFIX) :]
+        name, _, suffix = specification.partition(".")
+        base_value = _resolve_method_parameter(
+            constructor, init_method, name, scope.aliases
+        )
+        if base_value is None:
+            return None
+        return f"{base_value}.{suffix}" if suffix else base_value
+
+    def _attribute_is_path_field(
+        self,
+        value: ast.Attribute,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> bool:
+        dotted = _dotted_name(value)
+        root = _leftmost_name(value)
+        if dotted is None or root is None:
+            return False
+        prefix = f"{root.id}."
+        if not dotted.startswith(prefix):
+            return False
+        owner = scope.instance_aliases.get(root.id)
+        if owner is None and root.id in {"self", "cls"}:
+            owner = class_name
+        if owner is None:
+            return False
+        return dotted[len(prefix) :] in self.path_fields.get(owner, set())
+
     def value_of(
         self, value: ast.AST, scope: _ElementScope, class_name: str | None
     ) -> str | None:
@@ -4776,6 +5693,11 @@ class _ElementAnalysis:
                 return resolved
             return _resolved_reference(value, scope.aliases)
         if isinstance(value, ast.Attribute):
+            if self._attribute_is_path_field(value, scope, class_name):
+                return "Path"
+            resolved = self._instance_attribute_value(value, scope, class_name)
+            if resolved is not None:
+                return resolved
             resolved = self._attribute_value(value, scope, class_name)
             if resolved is not None:
                 return resolved
@@ -4783,10 +5705,14 @@ class _ElementAnalysis:
             elements = self.elements_of(value.value, scope, class_name)
             if elements is not None:
                 return _container_map_value(elements, _literal_subscript_key(value))
-        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-            identity = self.identity_functions.get(value.func.id)
-            if identity is not None and len(value.args) == 1 and not value.keywords:
-                return self.value_of(value.args[0], scope, class_name)
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and self._identity_name(value.func.id, scope) is not None
+            and len(value.args) == 1
+            and not value.keywords
+        ):
+            return self.value_of(value.args[0], scope, class_name)
         return _resolved_reference(value, scope.aliases)
 
     def elements_of(
@@ -4906,6 +5832,11 @@ class _ElementAnalysis:
     ) -> None:
         was_class = name in self.attributes or name in scope.class_aliases
         scope.class_aliases.pop(name, None)
+        scope.instance_aliases.pop(name, None)
+        scope.instance_constructors.pop(name, None)
+        scope.identity_aliases.pop(name, None)
+        if name in self.identity_functions:
+            scope.shadowed_identities.add(name)
         if container is not None:
             scope.containers[name] = dict(container)
             scope.container_sources[name] = source
@@ -4924,24 +5855,40 @@ class _ElementAnalysis:
         scope.aliases.pop(name, None)
         scope.containers.pop(name, None)
         scope.container_sources.pop(name, None)
+        scope.instance_aliases.pop(name, None)
+        scope.instance_constructors.pop(name, None)
+        scope.identity_aliases.pop(name, None)
+        if name in self.identity_functions:
+            scope.shadowed_identities.add(name)
         scope.class_aliases[name] = owner
         scope.invalid_classes.discard(name)
 
-    def _instance_class(self, value: ast.AST, scope: _ElementScope) -> str | None:
+    def _instance_class(
+        self,
+        value: ast.AST,
+        scope: _ElementScope,
+        class_name: str | None = None,
+    ) -> str | None:
         if isinstance(value, ast.Name):
             return scope.instance_aliases.get(value.id)
+        if isinstance(value, ast.Attribute):
+            return self._attribute_owner(value, scope, class_name)
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
             owner = scope.class_aliases.get(value.func.id)
             if owner is None and value.func.id in self.attributes:
                 owner = value.func.id
-            if owner is None and value.func.id in self.identity_functions:
-                identity = self.identity_functions[value.func.id]
+            identity = self._identity_name(value.func.id, scope)
+            if owner is None and identity is not None:
                 return (
-                    self._instance_class(value.args[0], scope)
-                    if value.args and identity
+                    self._instance_class(value.args[0], scope, class_name)
+                    if value.args
                     else None
                 )
             return owner
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+            attribute = value.func.attr
+            if attribute in self.attributes:
+                return attribute
         return None
 
     def _bind_resolved_target(
@@ -4987,6 +5934,15 @@ class _ElementAnalysis:
                 element = None
             self._bind_resolved_target(element_target, element, scope)
 
+    def _binding_identity_name(
+        self, value: ast.AST, target_name: str, scope: _ElementScope
+    ) -> str | None:
+        if _identity_lambda_parameter(value) is not None:
+            return target_name
+        if isinstance(value, ast.Name):
+            return self._identity_name(value.id, scope)
+        return None
+
     def bind_target(
         self,
         target: ast.AST,
@@ -5009,13 +5965,22 @@ class _ElementAnalysis:
             if owner is not None:
                 self.store_class_alias(target.id, owner, scope)
                 return
-        scope.instance_aliases.pop(target.id, None)
-        instance_class = self._instance_class(value, scope)
-        if instance_class is not None:
-            scope.instance_aliases[target.id] = instance_class
+        identity_name = self._binding_identity_name(value, target.id, scope)
+        instance_class = self._instance_class(value, scope, class_name)
         container, source = self.container_of(value, scope, class_name)
         if container is not None:
             self.store(target.id, None, container, scope, source)
+            if instance_class is not None:
+                scope.instance_aliases[target.id] = instance_class
+                constructor = (
+                    value
+                    if isinstance(value, ast.Call)
+                    else scope.instance_constructors.get(
+                        value.id if isinstance(value, ast.Name) else ""
+                    )
+                )
+                if constructor is not None:
+                    scope.instance_constructors[target.id] = constructor
             columns = self.columns_of(value, scope, class_name)
             if columns is not None:
                 scope.container_columns[target.id] = {
@@ -5031,6 +5996,19 @@ class _ElementAnalysis:
             else self.value_of(value, scope, class_name)
         )
         self.store(target.id, element, None, scope)
+        if instance_class is not None:
+            scope.instance_aliases[target.id] = instance_class
+            constructor = (
+                value
+                if isinstance(value, ast.Call)
+                else scope.instance_constructors.get(
+                    value.id if isinstance(value, ast.Name) else ""
+                )
+            )
+            if constructor is not None:
+                scope.instance_constructors[target.id] = constructor
+        if identity_name is not None:
+            scope.identity_aliases[target.id] = identity_name
 
     def _bind_unpacked_iterable(
         self,
@@ -5090,37 +6068,80 @@ class _ElementAnalysis:
         self.bind_iterated(target, self.elements_of(iterable, scope, class_name), scope)
 
     # -- recording ----------------------------------------------------
-    def _record_alias(self, node: ast.AST, scope: _ElementScope) -> None:
+    def _record_attribute_alias(
+        self,
+        node: ast.Attribute,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> None:
+        if isinstance(node.value, ast.Name):
+            instance = scope.instance_aliases.get(node.value.id)
+            if instance is not None:
+                self.instance_alias_nodes[id(node.value)] = instance
+            else:
+                self.instance_alias_nodes.pop(id(node.value), None)
+            constructor = scope.instance_constructors.get(node.value.id)
+            if constructor is not None:
+                self.instance_constructor_nodes[id(node.value)] = constructor
+            else:
+                self.instance_constructor_nodes.pop(id(node.value), None)
+            return
+        if (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and self._identity_name(node.value.func.id, scope) is not None
+        ):
+            element = self.value_of(node.value, scope, class_name)
+            if element is not None:
+                self.element_aliases[id(node.value)] = element
+            else:
+                self.element_aliases.pop(id(node.value), None)
+            return
+        if isinstance(node.value, ast.Call):
+            self.element_aliases.pop(id(node.value), None)
+            return
+        if isinstance(node.value, ast.Attribute):
+            element = None
+            if (
+                isinstance(node.value.value, ast.Name)
+                and node.value.value.id in scope.instance_aliases
+            ) or isinstance(node.value.value, ast.Call):
+                element = self.value_of(node.value, scope, class_name)
+            if element is not None:
+                self.element_aliases[id(node.value)] = element
+            else:
+                self.element_aliases.pop(id(node.value), None)
+
+    def _record_alias(
+        self, node: ast.AST, scope: _ElementScope, class_name: str | None
+    ) -> None:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             name = node.value.id
             element = scope.aliases.get(name)
             if element is not None:
                 self.element_aliases[id(node.value)] = element
+            else:
+                self.element_aliases.pop(id(node.value), None)
             owner = scope.class_aliases.get(name)
             if owner is not None:
                 self.class_alias_nodes[id(node.value)] = owner
+            else:
+                self.class_alias_nodes.pop(id(node.value), None)
         elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             name = node.value.id
             elements = scope.containers.get(name)
             if elements is not None and scope.container_sources.get(name) == "class":
                 self.container_nodes[id(node.value)] = dict(elements)
+            else:
+                self.container_nodes.pop(id(node.value), None)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             owner = scope.class_aliases.get(node.func.id)
             if owner is not None:
                 self.class_alias_nodes[id(node.func)] = owner
+            else:
+                self.class_alias_nodes.pop(id(node.func), None)
         if isinstance(node, ast.Attribute):
-            if isinstance(node.value, ast.Name):
-                instance = scope.instance_aliases.get(node.value.id)
-                if instance is not None:
-                    self.instance_alias_nodes[id(node.value)] = instance
-            elif (
-                isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name)
-                and node.value.func.id in self.identity_functions
-            ):
-                element = self.value_of(node.value, scope, None)
-                if element is not None:
-                    self.element_aliases[id(node.value)] = element
+            self._record_attribute_alias(node, scope, class_name)
 
     def _record_comprehension(
         self,
@@ -5155,7 +6176,7 @@ class _ElementAnalysis:
         ):
             self._record_comprehension(node, scope, class_name)
             return
-        self._record_alias(node, scope)
+        self._record_alias(node, scope, class_name)
         for child in ast.iter_child_nodes(node):
             self.record(child, scope, class_name)
 
@@ -5184,8 +6205,32 @@ class _ElementAnalysis:
             return True
         return False
 
+    def _constructor_facts(
+        self, name: str, scope: _ElementScope
+    ) -> tuple[str, tuple[str | None, ...]] | None:
+        constructor = scope.instance_constructors.get(name)
+        owner = scope.instance_aliases.get(name)
+        init_method = self.init_methods.get(owner or "")
+        if constructor is None or owner is None or init_method is None:
+            return None
+        parameters = [
+            parameter.arg
+            for parameter in _function_parameters(init_method)
+            if parameter.arg not in {"self", "cls"}
+        ]
+        values = tuple(
+            _resolve_method_parameter(
+                constructor, init_method, parameter, scope.aliases
+            )
+            for parameter in parameters
+        )
+        return owner, values
+
     def _merge(self, scope: _ElementScope, branches: Sequence[_ElementScope]) -> None:
         merged = scope.clone()
+        instance_aliases: dict[str, str] = {}
+        instance_constructors: dict[str, ast.Call] = {}
+        identity_aliases: dict[str, str] = {}
         for branch in branches:
             merged.aliases.update(branch.aliases)
             for name, elements in branch.containers.items():
@@ -5194,19 +6239,42 @@ class _ElementAnalysis:
                     name, "literal"
                 )
             merged.class_aliases.update(branch.class_aliases)
-            merged.instance_aliases.update(branch.instance_aliases)
+            instance_aliases.update(branch.instance_aliases)
+            merged.shadowed_identities |= branch.shadowed_identities
             merged.invalid_classes |= branch.invalid_classes
             for name, columns in branch.container_columns.items():
                 merged.container_columns[name] = {
                     index: list(values) for index, values in columns.items()
                 }
+        if branches:
+            common = set(branches[0].instance_constructors)
+            for branch in branches[1:]:
+                common &= set(branch.instance_constructors)
+            for name in common:
+                facts = [self._constructor_facts(name, branch) for branch in branches]
+                if facts[0] is not None and all(item == facts[0] for item in facts):
+                    instance_constructors[name] = branches[0].instance_constructors[
+                        name
+                    ]
+            common_aliases = set(branches[0].identity_aliases)
+            for branch in branches[1:]:
+                common_aliases &= set(branch.identity_aliases)
+            for name in common_aliases:
+                value = branches[0].identity_aliases[name]
+                if all(branch.identity_aliases[name] == value for branch in branches):
+                    identity_aliases[name] = value
+        else:
+            identity_aliases = dict(scope.identity_aliases)
         scope.aliases = merged.aliases
         scope.containers = merged.containers
         scope.class_aliases = merged.class_aliases
         scope.invalid_classes = merged.invalid_classes
         scope.container_sources = merged.container_sources
         scope.container_columns = merged.container_columns
-        scope.instance_aliases = merged.instance_aliases
+        scope.instance_aliases = instance_aliases
+        scope.instance_constructors = instance_constructors
+        scope.identity_aliases = identity_aliases
+        scope.shadowed_identities = merged.shadowed_identities
 
     def _visit_conditional(
         self,
@@ -5279,6 +6347,11 @@ class _ElementAnalysis:
                 self.store(name, None, None, case_scope)
             self.visit(case.body, case_scope, class_name)
             branches.append(case_scope)
+        if not any(
+            _pattern_is_irrefutable(case.pattern) and case.guard is None
+            for case in statement.cases
+        ):
+            branches.append(scope.clone())
         self._merge(scope, branches)
 
     def _class_scope(self, name: str) -> _ElementScope:
@@ -5309,14 +6382,39 @@ class _ElementAnalysis:
         elif isinstance(statement, ast.Match):
             self._visit_match(statement, scope, class_name)
         elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parameters = set(_function_parameter_names(statement))
+            self.store(statement.name, None, None, scope)
+            if _identity_function_parameter(statement) is not None:
+                scope.shadowed_identities.discard(statement.name)
             inner = _ElementScope(
-                invalid_classes=set(_function_parameter_names(statement))
+                aliases=dict(scope.aliases),
+                class_aliases=dict(scope.class_aliases),
+                invalid_classes=set(parameters),
+                instance_aliases=dict(scope.instance_aliases),
+                instance_constructors=dict(scope.instance_constructors),
+                shadowed_identities=set(scope.shadowed_identities),
+                identity_aliases=dict(scope.identity_aliases),
             )
+            for parameter in parameters:
+                self.store(parameter, None, None, inner)
+            inner.instance_aliases.update(self.parameter_types.get(id(statement), {}))
             self.visit(statement.body, inner, class_name)
         elif isinstance(statement, ast.ClassDef):
-            self.visit(
-                statement.body, self._class_scope(statement.name), statement.name
-            )
+            scope.aliases.pop(statement.name, None)
+            scope.class_aliases.pop(statement.name, None)
+            scope.instance_aliases.pop(statement.name, None)
+            scope.instance_constructors.pop(statement.name, None)
+            scope.identity_aliases.pop(statement.name, None)
+            if statement.name in self.identity_functions:
+                scope.shadowed_identities.add(statement.name)
+            class_scope = self._class_scope(statement.name)
+            class_scope.aliases = dict(scope.aliases)
+            class_scope.class_aliases = dict(scope.class_aliases)
+            class_scope.instance_aliases = dict(scope.instance_aliases)
+            class_scope.instance_constructors = dict(scope.instance_constructors)
+            class_scope.identity_aliases = dict(scope.identity_aliases)
+            class_scope.shadowed_identities = set(scope.shadowed_identities)
+            self.visit(statement.body, class_scope, statement.name)
 
     def visit(
         self,
@@ -5335,8 +6433,23 @@ def _element_alias_analysis(
     tree: ast.Module,
     attributes: dict[str, dict[str, str]],
     contexts: dict[int, str | None],
+    field_types: dict[str, dict[str, str]] | None = None,
+    path_fields: dict[str, set[str]] | None = None,
+    parameter_types: dict[int, dict[str, str]] | None = None,
+    init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
+    extra_identity_functions: dict[str, str] | None = None,
 ) -> _ElementAnalysis:
-    analysis = _ElementAnalysis(attributes, contexts, _identity_functions(tree))
+    identities = dict(extra_identity_functions or {})
+    identities.update(_identity_functions(tree))
+    analysis = _ElementAnalysis(
+        attributes,
+        contexts,
+        identities,
+        field_types,
+        path_fields,
+        parameter_types,
+        init_methods,
+    )
     analysis.run(tree)
     return analysis
 
@@ -5514,6 +6627,176 @@ def _call_return_target(
     return None, None, None
 
 
+def _class_method_nodes(
+    tree: ast.Module,
+) -> dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    result: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {
+        class_node.name: {
+            statement.name: statement
+            for statement in class_node.body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for class_node in classes
+    }
+    bases = _class_bases(classes, _class_alias_map(tree))
+    for _ in range(len(classes) + 1):
+        changed = False
+        for class_node in classes:
+            methods = result[class_node.name]
+            for base in bases.get(class_node.name, []):
+                for method_name, method in result.get(base, {}).items():
+                    if method_name not in methods:
+                        methods[method_name] = method
+                        changed = True
+        if not changed:
+            break
+    return result
+
+
+def _class_init_methods(
+    tree: ast.Module,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    result: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for class_name, methods in _class_method_nodes(tree).items():
+        init = methods.get("__init__")
+        if init is not None:
+            result[class_name] = init
+    return result
+
+
+def _method_parameter(
+    method: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> ast.arg | None:
+    for parameter in _function_parameters(method):
+        if parameter.arg == name:
+            return parameter
+    return None
+
+
+def _resolve_argument_reference(
+    expression: ast.AST, aliases: dict[str, str]
+) -> str | None:
+    if isinstance(expression, ast.Call):
+        name = _resolve_callable_name(expression.func, aliases)
+        if name in PATH_CLASS_NAMES:
+            return "Path"
+    return _resolved_reference(expression, aliases)
+
+
+def _method_default_expression(
+    method: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> ast.AST | None:
+    positional = [*method.args.posonlyargs, *method.args.args]
+    defaults = method.args.defaults
+    default_start = len(positional) - len(defaults)
+    for index, parameter in enumerate(positional):
+        if parameter.arg != name:
+            continue
+        default_index = index - default_start
+        if 0 <= default_index < len(defaults):
+            return defaults[default_index]
+        return None
+    for parameter, default in zip(method.args.kwonlyargs, method.args.kw_defaults):
+        if parameter.arg == name and default is not None:
+            return default
+    return None
+
+
+def _resolve_method_parameter(
+    call: ast.Call,
+    method: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    aliases: dict[str, str],
+) -> str | None:
+    positional = [*method.args.posonlyargs, *method.args.args]
+    offset = 0
+    if positional and positional[0].arg in {"self", "cls"}:
+        is_static = any(
+            (
+                (_resolve_callable_name(decorator, {}) or "").rsplit(".", 1)[-1]
+                == "staticmethod"
+            )
+            for decorator in method.decorator_list
+        )
+        if not is_static:
+            offset = 1
+    expression: ast.AST | None = None
+    for parameter_index, positional_parameter in enumerate(positional):
+        if positional_parameter.arg != name:
+            continue
+        call_index = parameter_index - offset
+        if 0 <= call_index < len(call.args):
+            argument = call.args[call_index]
+            if not isinstance(argument, ast.Starred):
+                expression = argument
+        break
+    if expression is None:
+        for keyword in call.keywords:
+            if keyword.arg == name:
+                expression = keyword.value
+                break
+    if expression is None:
+        expression = _method_default_expression(method, name)
+    if expression is not None:
+        resolved = _resolve_argument_reference(expression, aliases)
+        if resolved is not None:
+            return resolved
+    parameter_node = _method_parameter(method, name)
+    if (
+        parameter_node is not None
+        and parameter_node.annotation is not None
+        and _annotation_contains_path(parameter_node.annotation, aliases)
+    ):
+        return "Path"
+    return None
+
+
+def _receiver_constructor_call(call: ast.Call) -> ast.Call | None:
+    function = call.func
+    if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Call):
+        return function.value
+    return None
+
+
+def _resolve_return_candidate(
+    candidate: str,
+    call: ast.Call,
+    method: ast.FunctionDef | ast.AsyncFunctionDef | None,
+    aliases: dict[str, str],
+    class_name: str | None = None,
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] | None = None,
+    instance_constructors: dict[int, ast.Call] | None = None,
+) -> str | None:
+    if candidate.startswith(INIT_PARAMETER_PREFIX):
+        constructor = _receiver_constructor_call(call)
+        if (
+            constructor is None
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+        ):
+            constructor = (instance_constructors or {}).get(id(call.func.value))
+        init_method = (methods or {}).get(class_name or "", {}).get("__init__")
+        if constructor is None or init_method is None:
+            return None
+        specification = candidate[len(INIT_PARAMETER_PREFIX) :]
+        name, _, suffix = specification.partition(".")
+        resolved = _resolve_method_parameter(constructor, init_method, name, aliases)
+        if resolved is None:
+            return None
+        return f"{resolved}.{suffix}" if suffix else resolved
+    if not candidate.startswith(CALL_PARAMETER_PREFIX):
+        return candidate
+    if method is None:
+        return None
+    specification = candidate[len(CALL_PARAMETER_PREFIX) :]
+    name, _, suffix = specification.partition(".")
+    resolved = _resolve_method_parameter(call, method, name, aliases)
+    if resolved is None:
+        return None
+    return f"{resolved}.{suffix}" if suffix else resolved
+
+
 def _namespace_call_return_reference(
     node: ast.Attribute,
     returns: dict[str, dict[str, str]],
@@ -5523,6 +6806,8 @@ def _namespace_call_return_reference(
     class_alias_nodes: dict[int, str],
     invalid_classes: frozenset[str],
     contexts: dict[int, str | None],
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    instance_constructors: dict[int, ast.Call],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     if not isinstance(node.value, ast.Call):
@@ -5543,13 +6828,35 @@ def _namespace_call_return_reference(
         return
     if class_name in parameters:
         return
+    method_node = methods.get(class_name, {}).get(method) if method else None
     base = returns[class_name].get(method) if method is not None else None
     if base is not None:
         for candidate in _return_candidates(base):
-            check(node, f"{candidate}.{node.attr}")
+            resolved = _resolve_return_candidate(
+                candidate,
+                node.value,
+                method_node,
+                aliases,
+                class_name,
+                methods,
+                instance_constructors,
+            )
+            if resolved is not None:
+                check(node, f"{resolved}.{node.attr}")
     else:
+        method_node = methods.get(class_name, {}).get(node.attr)
         for candidate in _return_candidates(returns[class_name].get(node.attr)):
-            check(node, candidate)
+            resolved = _resolve_return_candidate(
+                candidate,
+                node.value,
+                method_node,
+                aliases,
+                class_name,
+                methods,
+                instance_constructors,
+            )
+            if resolved is not None:
+                check(node, resolved)
 
 
 def _namespace_call_chain_reference(
@@ -5561,6 +6868,8 @@ def _namespace_call_chain_reference(
     class_alias_nodes: dict[int, str],
     invalid_classes: frozenset[str],
     contexts: dict[int, str | None],
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    instance_constructors: dict[int, ast.Call],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     inner = node.func
@@ -5582,8 +6891,19 @@ def _namespace_call_chain_reference(
         return
     if class_name in parameters:
         return
+    method_node = methods.get(class_name, {}).get(method)
     for candidate in _return_candidates(returns[class_name].get(method)):
-        check(node, candidate)
+        resolved = _resolve_return_candidate(
+            candidate,
+            inner,
+            method_node,
+            aliases,
+            class_name,
+            methods,
+            instance_constructors,
+        )
+        if resolved is not None:
+            check(node, resolved)
 
 
 def _namespace_attribute_reference(
@@ -5598,6 +6918,8 @@ def _namespace_attribute_reference(
     class_alias_nodes: dict[int, str],
     invalid_classes: frozenset[str],
     parameters: set[str],
+    methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
+    instance_constructors: dict[int, ast.Call],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     element_alias = element_aliases.get(id(node.value))
@@ -5640,6 +6962,8 @@ def _namespace_attribute_reference(
         class_alias_nodes,
         invalid_classes,
         contexts,
+        methods,
+        instance_constructors,
         check,
     )
 
@@ -5651,14 +6975,42 @@ def _namespace_reference_violations(
     value_alias_names: set[str],
     static: dict[str, str],
     report: Callable[[ast.AST, str], Violation | None],
+    field_types: dict[str, dict[str, str]] | None = None,
+    path_fields: dict[str, set[str]] | None = None,
+    parameter_types: dict[int, dict[str, str]] | None = None,
+    init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
+    imported_attributes: dict[str, dict[str, str]] | None = None,
+    imported_methods: (
+        dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] | None
+    ) = None,
+    imported_init_methods: (
+        dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None
+    ) = None,
+    extra_identity_functions: dict[str, str] | None = None,
 ) -> list[Violation]:
     attributes, returns = _class_namespace_facts(tree, static)
+    for name, attribute_facts in (imported_attributes or {}).items():
+        attributes.setdefault(name, attribute_facts)
     contexts = _class_contexts(tree)
-    analysis = _element_alias_analysis(tree, attributes, contexts)
+    effective_init_methods = dict(imported_init_methods or {})
+    effective_init_methods.update(init_methods or {})
+    analysis = _element_alias_analysis(
+        tree,
+        attributes,
+        contexts,
+        field_types,
+        path_fields,
+        parameter_types,
+        effective_init_methods,
+        extra_identity_functions,
+    )
     receiver_aliases = dict(analysis.class_alias_nodes)
     receiver_aliases.update(analysis.instance_alias_nodes)
     class_aliases = _class_alias_map(tree)
     parameters = _function_parameters_for_nodes(tree)
+    class_methods = _class_method_nodes(tree)
+    for name, method_facts in (imported_methods or {}).items():
+        class_methods.setdefault(name, method_facts)
     violations: list[Violation] = []
 
     def check(node: ast.AST, resolved: str | None) -> None:
@@ -5692,6 +7044,8 @@ def _namespace_reference_violations(
                 receiver_aliases,
                 invalid_classes,
                 parameters.get(id(node), set()),
+                class_methods,
+                analysis.instance_constructor_nodes,
                 check,
             )
         elif isinstance(node, ast.Subscript):
@@ -5743,6 +7097,8 @@ def _namespace_reference_violations(
                 receiver_aliases,
                 invalid_classes,
                 contexts,
+                class_methods,
+                analysis.instance_constructor_nodes,
                 check,
             )
     return violations
@@ -5767,16 +7123,29 @@ def _skip_shadowed_path_attribute(
 def _instance_path_attribute(
     node: ast.Attribute,
     instance_alias_nodes: dict[int, str] | None,
-    self_path_attributes: dict[str, set[str]],
+    class_contexts: dict[int, str | None],
+    instance_path_fields: dict[str, set[str]] | None,
 ) -> str | None:
-    if not isinstance(node.value, ast.Attribute) or not isinstance(
-        node.value.value, ast.Name
-    ):
+    if not isinstance(node.value, ast.Attribute):
         return None
-    value_class = (instance_alias_nodes or {}).get(id(node.value.value))
-    if value_class is not None and f"self.{node.value.attr}" in (
-        self_path_attributes.get(value_class, set())
-    ):
+    dotted = _dotted_name(node.value)
+    root = _leftmost_name(node.value)
+    if dotted is None or root is None:
+        return None
+    prefix = f"{root.id}."
+    if not dotted.startswith(prefix):
+        return None
+    relative = dotted[len(prefix) :]
+    value_class = (instance_alias_nodes or {}).get(id(root))
+    if value_class is None and root.id in {"self", "cls"}:
+        value_class = (
+            class_contexts.get(id(node.value))
+            or class_contexts.get(id(root))
+            or class_contexts.get(id(node))
+        )
+    if value_class is None:
+        return None
+    if relative in (instance_path_fields or {}).get(value_class, set()):
         return f"Path.{node.attr}"
     return None
 
@@ -5788,6 +7157,7 @@ def _runtime_attribute_name(
     self_path_attributes: dict[str, set[str]],
     class_contexts: dict[int, str | None],
     instance_alias_nodes: dict[int, str] | None,
+    instance_path_fields: dict[str, set[str]] | None = None,
 ) -> str | None:
     if isinstance(node.value, ast.NamedExpr):
         base_name = _resolve_callable_name(node.value.value, aliases)
@@ -5809,7 +7179,7 @@ def _runtime_attribute_name(
     ):
         attribute_name = f"Path.{node.attr}"
     instance_attribute = _instance_path_attribute(
-        node, instance_alias_nodes, self_path_attributes
+        node, instance_alias_nodes, class_contexts, instance_path_fields
     )
     if instance_attribute is not None:
         attribute_name = instance_attribute
@@ -5827,6 +7197,7 @@ def _runtime_attribute_violations(
     class_contexts: dict[int, str | None],
     path: Path,
     instance_alias_nodes: dict[int, str] | None = None,
+    instance_path_fields: dict[str, set[str]] | None = None,
 ) -> list[Violation]:
     violations: list[Violation] = []
     for node in ast.walk(tree):
@@ -5857,6 +7228,7 @@ def _runtime_attribute_violations(
                 self_path_attributes,
                 class_contexts,
                 instance_alias_nodes,
+                instance_path_fields,
             )
             if attribute_name is not None and _is_path_method_name(attribute_name):
                 attribute_name = _normalise_path_name(attribute_name)
@@ -5908,25 +7280,137 @@ def _logging_filename_violation(
     return _runtime_violation(path, node.lineno, "logging.basicConfig")
 
 
+def _runtime_call_access_violations(
+    tree: ast.Module,
+    initial: FlowAliases,
+    final: FlowAliases,
+    module_paths: set[str],
+    static: dict[str, str],
+    path: Path,
+) -> list[Violation]:
+    violations: list[Violation] = []
+    for node, aliases, path_names in _iter_calls_with_aliases(
+        tree.body, dict(initial), module_paths, final
+    ):
+        call_static = _merge_flow_aliases(static, aliases)
+        literal_targets = _literal_indirect_names(
+            node, aliases, path_names, call_static
+        ) | _literal_indirect_names(node.func, aliases, path_names, call_static)
+        forbidden_literal = {
+            name for name in literal_targets if _is_forbidden_runtime_name(name)
+        }
+        if forbidden_literal:
+            violations.append(
+                _runtime_violation(path, node.lineno, min(forbidden_literal))
+            )
+            continue
+        if isinstance(node.func, ast.Attribute) and _is_path_expression(
+            node.func.value, call_static, path_names
+        ):
+            if node.func.attr not in PATH_PURE_METHODS:
+                violations.append(
+                    _runtime_violation(path, node.lineno, f"Path.{node.func.attr}")
+                )
+            continue
+        logging_violation = _logging_filename_violation(node, aliases, path)
+        if logging_violation is not None:
+            violations.append(logging_violation)
+            continue
+        value_forbidden: set[str] = set()
+        value_line = node.lineno
+        arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+        for argument in arguments:
+            for reference, reference_names in _value_references(
+                argument, aliases, path_names, call_static
+            ):
+                forbidden_values = {
+                    name for name in reference_names if _is_forbidden_runtime_name(name)
+                }
+                if forbidden_values:
+                    value_forbidden = forbidden_values
+                    value_line = reference.lineno
+                    break
+            if value_forbidden:
+                break
+        if value_forbidden:
+            violations.append(
+                _runtime_violation(path, value_line, min(value_forbidden))
+            )
+        possible = _resolve_possible_names(node.func, aliases)
+        forbidden = {name for name in possible if _is_forbidden_runtime_name(name)}
+        if forbidden:
+            violations.append(_runtime_violation(path, node.lineno, min(forbidden)))
+    return violations
+
+
 def scan_contract_runtime_access(
     contract_src: Path = CONTRACT_SRC,
 ) -> list[Violation]:
     """Reject environment, filesystem and process access in the contract."""
     violations: list[Violation] = []
-    for path in python_files(contract_src):
-        tree = _parse(path)
-        static, value_alias_names = _module_value_aliases(tree, _import_aliases(tree))
+    trees = {path: _parse(path) for path in python_files(contract_src)}
+    registry = _class_field_registry(contract_src, trees)
+    (
+        imported_attributes_registry,
+        imported_methods_registry,
+        imported_init_registry,
+        imported_identity_registry,
+    ) = _runtime_fact_registry(contract_src, trees)
+    for path, tree in trees.items():
+        file_imports = _file_import_aliases(tree, path, contract_src)
+        base_static = dict(file_imports)
+        base_static.update(_identity_static_aliases(tree))
+        static, value_alias_names = _module_value_aliases(tree, base_static)
+        imported_fields = _imported_class_fields(static, registry)
+        imported_runtime = _imported_runtime_facts(
+            static,
+            imported_attributes_registry,
+            imported_methods_registry,
+            imported_init_registry,
+            imported_identity_registry,
+        )
+        for name in imported_runtime.identity_functions:
+            marker = _identity_alias_key(name)
+            static[name] = marker
+            static[marker] = name
+        class_fields = _class_instance_path_fields(tree, static, imported_fields)
+        class_fields = _merge_class_fields(class_fields, imported_fields)
+        static.update(_class_path_field_static_aliases(class_fields))
         initial = _with_function_returns(tree, _initial_flow_aliases(tree))
+        initial.update(_identity_flow_aliases(tree))
+        for name in imported_runtime.identity_functions:
+            marker = _identity_alias_key(name)
+            initial[name] = frozenset({marker})
+            initial[marker] = frozenset({name})
+        initial.update(_class_path_field_flow_aliases(class_fields))
         final = _module_final_aliases(tree, initial)
         bindings, plain_bindings = _call_argument_bindings(tree, initial, final)
         initial.update(bindings)
         final.update(bindings)
         module_paths: set[str] = set()
         shadowed = _shadowed_names_by_node(tree)
-        states = _node_runtime_aliases(tree, _import_aliases(tree), plain_bindings)
+        states = _node_runtime_aliases(tree, file_imports, plain_bindings)
         contexts = _class_contexts(tree)
         attributes, _ = _class_namespace_facts(tree, static)
-        analysis = _element_alias_analysis(tree, attributes, contexts)
+        for imported_name in imported_fields:
+            attributes.setdefault(imported_name, {})
+        for name, facts in imported_runtime.attributes.items():
+            attributes.setdefault(name, facts)
+        field_types = _class_field_type_map(tree, static, set(class_fields))
+        parameter_types = _function_parameter_types(tree, static, set(class_fields))
+        init_methods = _class_init_methods(tree)
+        effective_init_methods = dict(imported_runtime.init_methods)
+        effective_init_methods.update(init_methods)
+        analysis = _element_alias_analysis(
+            tree,
+            attributes,
+            contexts,
+            field_types,
+            class_fields,
+            parameter_types,
+            effective_init_methods,
+            imported_runtime.identity_functions,
+        )
         violations.extend(
             _literal_subscript_violations(
                 tree, states, shadowed, value_alias_names, path
@@ -5944,6 +7428,7 @@ def scan_contract_runtime_access(
                 contexts,
                 path,
                 analysis.instance_alias_nodes,
+                class_fields,
             )
         )
 
@@ -5955,11 +7440,17 @@ def scan_contract_runtime_access(
                 value_alias_names,
                 static,
                 _runtime_reference_report(path),
+                field_types,
+                class_fields,
+                parameter_types,
+                init_methods,
+                imported_runtime.attributes,
+                imported_runtime.methods,
+                imported_runtime.init_methods,
+                imported_runtime.identity_functions,
             )
         )
-        for lambda_node, lambda_names in _lambda_reference_names(
-            tree, _import_aliases(tree)
-        ):
+        for lambda_node, lambda_names in _lambda_reference_names(tree, file_imports):
             forbidden_lambda = {
                 name for name in lambda_names if _is_forbidden_runtime_name(name)
             }
@@ -5967,58 +7458,11 @@ def scan_contract_runtime_access(
                 violations.append(
                     _runtime_violation(path, lambda_node.lineno, min(forbidden_lambda))
                 )
-        for node, aliases, path_names in _iter_calls_with_aliases(
-            tree.body, dict(initial), module_paths, final
-        ):
-            literal_targets = _literal_indirect_names(
-                node, aliases, path_names, static
-            ) | _literal_indirect_names(node.func, aliases, path_names, static)
-            forbidden_literal = {
-                name for name in literal_targets if _is_forbidden_runtime_name(name)
-            }
-            if forbidden_literal:
-                violations.append(
-                    _runtime_violation(path, node.lineno, min(forbidden_literal))
-                )
-                continue
-            if isinstance(node.func, ast.Attribute) and _is_path_expression(
-                node.func.value, static, path_names
-            ):
-                if node.func.attr not in PATH_PURE_METHODS:
-                    violations.append(
-                        _runtime_violation(path, node.lineno, f"Path.{node.func.attr}")
-                    )
-                continue
-            logging_violation = _logging_filename_violation(node, aliases, path)
-            if logging_violation is not None:
-                violations.append(logging_violation)
-                continue
-            value_forbidden: set[str] = set()
-            value_line = node.lineno
-            arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
-            for argument in arguments:
-                for reference, reference_names in _value_references(
-                    argument, aliases, path_names, static
-                ):
-                    forbidden_values = {
-                        name
-                        for name in reference_names
-                        if _is_forbidden_runtime_name(name)
-                    }
-                    if forbidden_values:
-                        value_forbidden = forbidden_values
-                        value_line = reference.lineno
-                        break
-                if value_forbidden:
-                    break
-            if value_forbidden:
-                violations.append(
-                    _runtime_violation(path, value_line, min(value_forbidden))
-                )
-            possible = _resolve_possible_names(node.func, aliases)
-            forbidden = {name for name in possible if _is_forbidden_runtime_name(name)}
-            if forbidden:
-                violations.append(_runtime_violation(path, node.lineno, min(forbidden)))
+        violations.extend(
+            _runtime_call_access_violations(
+                tree, initial, final, module_paths, static, path
+            )
+        )
     return _dedupe_violations(violations)
 
 
