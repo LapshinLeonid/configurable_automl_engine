@@ -741,7 +741,7 @@ def _function_parameters(
 def _walk_alias_scope(
     statement: ast.stmt,
     aliases: dict[str, str],
-    walk: Callable[[Sequence[ast.stmt], dict[str, str]], None],
+    walk: Callable[[Sequence[ast.stmt], dict[str, str]], bool | None],
     function_arguments: dict[str, dict[str, str]] | None = None,
 ) -> bool:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -772,37 +772,179 @@ def _walk_alias_scope(
     return False
 
 
+def _merge_flat_alias_branches(
+    target: dict[str, str], branches: Sequence[dict[str, str]]
+) -> None:
+    keys: set[str] = set(target)
+    for branch in branches:
+        keys.update(branch)
+    for key in keys:
+        values = [branch[key] for branch in branches if key in branch]
+        if not values:
+            target.pop(key, None)
+            continue
+        preferred = _pick_candidate(values)
+        if preferred is not None:
+            target[key] = preferred
+        else:
+            target.pop(key, None)
+
+
+FlatAliasWalk = Callable[[Sequence[ast.stmt], dict[str, str]], bool | None]
+
+
+def _walk_if_aliases(
+    statement: ast.If, aliases: dict[str, str], walk: FlatAliasWalk
+) -> bool:
+    body = dict(aliases)
+    body_reachable = walk(statement.body, body)
+    orelse = dict(aliases)
+    else_reachable = walk(statement.orelse, orelse)
+    branches: list[dict[str, str]] = []
+    if body_reachable or _statements_escape_loop(statement.body):
+        branches.append(body)
+    if else_reachable or _statements_escape_loop(statement.orelse):
+        branches.append(orelse)
+    if not branches:
+        _merge_flat_alias_branches(aliases, [body, orelse])
+        return False
+    _merge_flat_alias_branches(aliases, branches)
+    return True
+
+
+def _statement_escapes_loop(statement: ast.stmt) -> bool:
+    if isinstance(statement, ast.If):
+        return _statements_escape_loop(statement.body) or _statements_escape_loop(
+            statement.orelse
+        )
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return _statements_escape_loop(statement.body)
+    if isinstance(statement, (ast.Try, ast.TryStar)):
+        groups = [statement.body, statement.orelse, statement.finalbody]
+        groups.extend(handler.body for handler in statement.handlers)
+        return any(_statements_escape_loop(group) for group in groups)
+    if isinstance(statement, ast.Match):
+        return any(_statements_escape_loop(case.body) for case in statement.cases)
+    return False
+
+
+def _statements_escape_loop(statements: Sequence[ast.stmt]) -> bool:
+    for statement in statements:
+        if isinstance(statement, (ast.Break, ast.Continue)):
+            return True
+        if isinstance(statement, (ast.Return, ast.Raise)):
+            return False
+        if _statement_escapes_loop(statement):
+            return True
+    return False
+
+
+def _walk_loop_aliases(
+    statement: ast.For | ast.AsyncFor | ast.While,
+    aliases: dict[str, str],
+    walk: FlatAliasWalk,
+) -> bool:
+    body = dict(aliases)
+    body_reachable = walk(statement.body, body)
+    orelse = dict(aliases)
+    walk(statement.orelse, orelse)
+    escapes = _statements_escape_loop(statement.body)
+    branches = [body, orelse] if body_reachable or escapes else [orelse]
+    _merge_flat_alias_branches(aliases, branches)
+    return True
+
+
+def _walk_with_aliases(
+    statement: ast.With | ast.AsyncWith,
+    aliases: dict[str, str],
+    walk: FlatAliasWalk,
+) -> bool:
+    inner = dict(aliases)
+    for item in statement.items:
+        if item.optional_vars is not None:
+            _bind_alias_target(item.optional_vars, item.context_expr, inner)
+    body_reachable = walk(statement.body, inner)
+    _merge_flat_alias_branches(aliases, [inner])
+    return bool(body_reachable)
+
+
+def _walk_try_aliases(
+    statement: ast.Try | ast.TryStar,
+    aliases: dict[str, str],
+    walk: FlatAliasWalk,
+) -> bool:
+    all_branches: list[dict[str, str]] = []
+    reachable_flags: list[bool] = []
+    body = dict(aliases)
+    body_reachable = walk(statement.body, body)
+    all_branches.append(body)
+    reachable_flags.append(bool(body_reachable))
+    for handler in statement.handlers:
+        branch = dict(aliases)
+        if handler.name is not None:
+            branch.pop(handler.name, None)
+        reachable = bool(walk(handler.body, branch))
+        all_branches.append(branch)
+        reachable_flags.append(reachable)
+    if body_reachable:
+        orelse = dict(body)
+        reachable = bool(walk(statement.orelse, orelse))
+        all_branches.append(orelse)
+        reachable_flags.append(reachable)
+    final_input = dict(aliases)
+    _merge_flat_alias_branches(final_input, all_branches)
+    final_reachable = walk(statement.finalbody, final_input)
+    _merge_flat_alias_branches(aliases, [final_input])
+    return any(reachable_flags) and bool(final_reachable)
+
+
+def _walk_match_aliases(
+    statement: ast.Match, aliases: dict[str, str], walk: FlatAliasWalk
+) -> bool:
+    all_branches: list[dict[str, str]] = []
+    reachable_branches: list[dict[str, str]] = []
+    kept_branches: list[dict[str, str]] = []
+    irrefutable = False
+    for case in statement.cases:
+        branch = dict(aliases)
+        for name in _pattern_capture_names(case.pattern):
+            branch.pop(name, None)
+        reachable = bool(walk(case.body, branch))
+        all_branches.append(branch)
+        if reachable:
+            reachable_branches.append(branch)
+        if reachable or _statements_escape_loop(case.body):
+            kept_branches.append(branch)
+        if _pattern_is_irrefutable(case.pattern) and case.guard is None:
+            irrefutable = True
+    if not irrefutable:
+        default_branch = dict(aliases)
+        all_branches.append(default_branch)
+        reachable_branches.append(default_branch)
+        kept_branches.append(default_branch)
+    if kept_branches:
+        _merge_flat_alias_branches(aliases, kept_branches)
+    else:
+        _merge_flat_alias_branches(aliases, all_branches)
+    return bool(reachable_branches)
+
+
 def _walk_alias_branches(
     statement: ast.stmt,
     aliases: dict[str, str],
-    walk: Callable[[Sequence[ast.stmt], dict[str, str]], None],
-) -> bool:
-    if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
-        walk(statement.body, dict(aliases))
-        walk(statement.orelse, dict(aliases))
-        return True
+    walk: FlatAliasWalk,
+) -> bool | None:
+    if isinstance(statement, ast.If):
+        return _walk_if_aliases(statement, aliases, walk)
+    if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+        return _walk_loop_aliases(statement, aliases, walk)
     if isinstance(statement, (ast.With, ast.AsyncWith)):
-        inner = dict(aliases)
-        for item in statement.items:
-            if item.optional_vars is not None:
-                _bind_alias_target(item.optional_vars, item.context_expr, inner)
-        walk(statement.body, inner)
-        return True
+        return _walk_with_aliases(statement, aliases, walk)
     if isinstance(statement, (ast.Try, ast.TryStar)):
-        walk(statement.body, dict(aliases))
-        for handler in statement.handlers:
-            branch = dict(aliases)
-            if handler.name is not None:
-                branch.pop(handler.name, None)
-            walk(handler.body, branch)
-        walk(statement.orelse, dict(aliases))
-        walk(statement.finalbody, dict(aliases))
-        return True
+        return _walk_try_aliases(statement, aliases, walk)
     if isinstance(statement, ast.Match):
-        for case in statement.cases:
-            walk(case.body, dict(aliases))
-        return True
-    return False
+        return _walk_match_aliases(statement, aliases, walk)
+    return None
 
 
 def _apply_alias_statement(statement: ast.stmt, aliases: dict[str, str]) -> None:
@@ -827,6 +969,134 @@ def _apply_alias_statement(statement: ast.stmt, aliases: dict[str, str]) -> None
                 _bind_alias_target(node.target, node.value, aliases)
 
 
+class _Reachability:
+    def __init__(self) -> None:
+        self.result: set[int] = set()
+
+    def mark_expression(self, node: ast.AST | None) -> None:
+        if node is not None:
+            self.result.update(id(child) for child in ast.walk(node))
+
+    def visit(self, statements: Sequence[ast.stmt]) -> bool:
+        reachable = True
+        for statement in statements:
+            if not reachable:
+                break
+            reachable = self._visit_statement(statement)
+        return reachable
+
+    def _visit_function(
+        self, statement: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        for decorator in statement.decorator_list:
+            self.mark_expression(decorator)
+        for default in [
+            *statement.args.defaults,
+            *[default for default in statement.args.kw_defaults if default is not None],
+        ]:
+            self.mark_expression(default)
+        for argument in [
+            *statement.args.posonlyargs,
+            *statement.args.args,
+            *statement.args.kwonlyargs,
+            statement.args.vararg,
+            statement.args.kwarg,
+        ]:
+            if argument is not None:
+                self.mark_expression(argument.annotation)
+        self.mark_expression(statement.returns)
+        self.visit(statement.body)
+
+    def _visit_class(self, statement: ast.ClassDef) -> None:
+        for decorator in statement.decorator_list:
+            self.mark_expression(decorator)
+        for base in statement.bases:
+            self.mark_expression(base)
+        for keyword in statement.keywords:
+            self.mark_expression(keyword.value)
+        self.visit(statement.body)
+
+    def _visit_if(self, statement: ast.If) -> bool:
+        self.mark_expression(statement.test)
+        body_reachable = self.visit(statement.body)
+        else_reachable = self.visit(statement.orelse)
+        return body_reachable or else_reachable
+
+    def _visit_loop(self, statement: ast.For | ast.AsyncFor | ast.While) -> bool:
+        if isinstance(statement, ast.While):
+            self.mark_expression(statement.test)
+        else:
+            self.mark_expression(statement.iter)
+            self.mark_expression(statement.target)
+        self.visit(statement.body)
+        self.visit(statement.orelse)
+        return True
+
+    def _visit_with(self, statement: ast.With | ast.AsyncWith) -> bool:
+        for item in statement.items:
+            self.mark_expression(item.context_expr)
+            self.mark_expression(item.optional_vars)
+        return self.visit(statement.body)
+
+    def _visit_try(self, statement: ast.Try | ast.TryStar) -> bool:
+        body_reachable = self.visit(statement.body)
+        handler_reachable = False
+        for handler in statement.handlers:
+            self.mark_expression(handler.type)
+            handler_reachable = self.visit(handler.body) or handler_reachable
+        else_reachable = self.visit(statement.orelse) if body_reachable else False
+        final_reachable = self.visit(statement.finalbody)
+        return (
+            body_reachable or handler_reachable or else_reachable
+        ) and final_reachable
+
+    def _visit_match(self, statement: ast.Match) -> bool:
+        self.mark_expression(statement.subject)
+        case_reachable = False
+        irrefutable = False
+        for case in statement.cases:
+            self.mark_expression(case.guard)
+            case_reachable = self.visit(case.body) or case_reachable
+            if _pattern_is_irrefutable(case.pattern) and case.guard is None:
+                irrefutable = True
+        return case_reachable or not irrefutable
+
+    def _visit_statement(self, statement: ast.stmt) -> bool:
+        self.result.add(id(statement))
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self._visit_function(statement)
+            return True
+        if isinstance(statement, ast.ClassDef):
+            self._visit_class(statement)
+            return True
+        if isinstance(statement, ast.If):
+            return self._visit_if(statement)
+        if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+            return self._visit_loop(statement)
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            return self._visit_with(statement)
+        if isinstance(statement, (ast.Try, ast.TryStar)):
+            return self._visit_try(statement)
+        if isinstance(statement, ast.Match):
+            return self._visit_match(statement)
+        if isinstance(statement, ast.Return):
+            self.mark_expression(statement.value)
+            return False
+        if isinstance(statement, ast.Raise):
+            self.mark_expression(statement.exc)
+            return False
+        if isinstance(statement, (ast.Break, ast.Continue)):
+            return False
+        self.mark_expression(statement)
+        return True
+
+
+def _reachable_node_ids(tree: ast.Module) -> set[int]:
+    reachability = _Reachability()
+    reachability.visit(tree.body)
+    return reachability.result
+
+
 def _node_runtime_aliases(
     tree: ast.Module,
     imported: dict[str, str],
@@ -845,17 +1115,24 @@ def _node_runtime_aliases(
         for node in ast.walk(statement):
             states[id(node)] = snapshot
 
-    def walk(statements: Sequence[ast.stmt], aliases: dict[str, str]) -> None:
+    def walk(statements: Sequence[ast.stmt], aliases: dict[str, str]) -> bool:
         for statement in statements:
             record(statement, aliases)
             if _walk_alias_scope(statement, aliases, walk, function_arguments):
                 continue
-            if _walk_alias_branches(statement, aliases, walk):
+            branch_reachable = _walk_alias_branches(statement, aliases, walk)
+            if branch_reachable is not None:
+                if not branch_reachable:
+                    return False
                 continue
             _apply_alias_statement(statement, aliases)
+            if isinstance(statement, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                return False
+        return True
 
     walk(tree.body, dict(imported))
-    return states
+    reachable = _reachable_node_ids(tree)
+    return {node: state for node, state in states.items() if node in reachable}
 
 
 def _imported_names(tree: ast.Module) -> set[str]:
@@ -2313,8 +2590,8 @@ def _iter_try_calls(
         yield from _iter_calls_with_aliases(
             handler.body, branch, handler_paths, global_aliases
         )
-    orelse = dict(aliases)
-    orelse_paths = set(path_names)
+    orelse = dict(body)
+    orelse_paths = set(body_paths)
     branches.append(orelse)
     path_branches.append(orelse_paths)
     yield from _iter_calls_with_aliases(
@@ -2735,6 +3012,33 @@ def _literal_getattr_target(node: ast.Call) -> str | None:
     return argument.value if argument.value in DYNAMIC_GETATTR_NAMES else None
 
 
+def _dynamic_lambda_violations(
+    tree: ast.Module,
+    imports: dict[str, str],
+    path: Path,
+    reachable: set[int],
+) -> list[Violation]:
+    violations: list[Violation] = []
+    for lambda_node, lambda_names in _lambda_reference_names(tree, imports):
+        if id(lambda_node) not in reachable:
+            continue
+        dynamic = frozenset(
+            name for name in lambda_names if _is_dynamic_import_name(name)
+        )
+        if dynamic:
+            violations.append(
+                Violation(
+                    "dynamic-import",
+                    path,
+                    lambda_node.lineno,
+                    "dynamic execution through "
+                    f"{sorted(dynamic)!r} is forbidden in the "
+                    "contract; use a static import",
+                )
+            )
+    return violations
+
+
 def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Violation]:
     """Reject dynamic import calls in the contract."""
     violations: list[Violation] = []
@@ -2743,6 +3047,7 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
         imported_attributes_registry,
         imported_methods_registry,
         imported_init_registry,
+        imported_returns_registry,
         imported_identity_registry,
     ) = _runtime_fact_registry(contract_src, trees)
     for path, tree in trees.items():
@@ -2755,6 +3060,7 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
             imported_attributes_registry,
             imported_methods_registry,
             imported_init_registry,
+            imported_returns_registry,
             imported_identity_registry,
         )
         for name in imported_runtime.identity_functions:
@@ -2772,11 +3078,13 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
         initial.update(bindings)
         final.update(bindings)
         paths = _module_path_names(tree, static)
+        states = _node_runtime_aliases(tree, file_imports, plain_bindings)
+        reachable = set(states)
 
         violations.extend(
             _namespace_reference_violations(
                 tree,
-                _node_runtime_aliases(tree, file_imports, plain_bindings),
+                states,
                 _shadowed_names_by_node(tree),
                 set(),
                 static,
@@ -2784,27 +3092,18 @@ def scan_contract_dynamic_imports(contract_src: Path = CONTRACT_SRC) -> list[Vio
                 imported_attributes=imported_runtime.attributes,
                 imported_methods=imported_runtime.methods,
                 imported_init_methods=imported_runtime.init_methods,
+                imported_returns=imported_runtime.returns,
                 extra_identity_functions=imported_runtime.identity_functions,
             )
         )
-        for lambda_node, lambda_names in _lambda_reference_names(tree, file_imports):
-            lambda_dynamic = frozenset(
-                name for name in lambda_names if _is_dynamic_import_name(name)
-            )
-            if lambda_dynamic:
-                violations.append(
-                    Violation(
-                        "dynamic-import",
-                        path,
-                        lambda_node.lineno,
-                        "dynamic execution through "
-                        f"{sorted(lambda_dynamic)!r} is forbidden in the "
-                        "contract; use a static import",
-                    )
-                )
+        violations.extend(
+            _dynamic_lambda_violations(tree, file_imports, path, reachable)
+        )
         for node, aliases, call_paths in _iter_calls_with_aliases(
             tree.body, dict(initial), paths, final
         ):
+            if id(node) not in reachable:
+                continue
             possible = (
                 _resolve_possible_names(node.func, aliases)
                 | _literal_indirect_names(node, aliases, call_paths, static)
@@ -2945,8 +3244,9 @@ def _call_is_path(
     name = _resolve_callable_name(node.func, aliases)
     if name in PATH_CLASS_NAMES or name in path_names:
         return True
-    if isinstance(node.func, ast.Name) and len(node.args) == 1 and not node.keywords:
-        target = aliases.get(node.func.id)
+    if len(node.args) == 1 and not node.keywords:
+        dotted = _dotted_name(node.func)
+        target = aliases.get(dotted) if dotted is not None else None
         if target is not None and target.startswith(IDENTITY_ALIAS_PREFIX):
             return _is_path_expression(node.args[0], aliases, path_names)
     if not isinstance(node.func, ast.Attribute):
@@ -3411,6 +3711,8 @@ def _literal_subscript_violations(
     }
     violations: list[Violation] = []
     for node in ast.walk(tree):
+        if id(node) not in states:
+            continue
         if not isinstance(node, ast.Subscript) or id(node) in call_func_ids:
             continue
         node_aliases: FlowAliases = {
@@ -3629,12 +3931,16 @@ def _class_self_path_attributes(
 
 
 def _self_path_attributes_by_class(
-    tree: ast.Module, aliases: dict[str, str]
+    tree: ast.Module,
+    aliases: dict[str, str],
+    external_names: set[str] | None = None,
 ) -> dict[str, set[str]]:
     classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
     module_names = _module_path_names(tree, aliases) | _path_returning_functions(
         tree, aliases
     )
+    local_names = {node.name for node in classes}
+    external = set(external_names or ())
     result = {
         class_node.name: _class_self_path_attributes(class_node, aliases, module_names)
         for class_node in classes
@@ -3644,7 +3950,7 @@ def _self_path_attributes_by_class(
         changed = False
         for class_node in classes:
             for base in class_node.bases:
-                base_name = _dotted_name(base) or _resolve_callable_name(base, aliases)
+                base_name = _resolved_base_names(base, aliases, local_names, external)
                 if base_name is None or base_name not in result:
                     continue
                 inherited = result[base_name] - result[class_node.name]
@@ -3829,9 +4135,7 @@ def _class_field_type_map(
         }
         for name, fields in owner_map.items()
     }
-    _inherit_field_types(
-        classes, resolved, _class_bases(classes, _class_alias_map(tree))
-    )
+    _inherit_field_types(classes, resolved, _class_bases(classes, aliases, class_names))
     return resolved
 
 
@@ -3953,7 +4257,26 @@ class _ImportedRuntimeFacts:
     init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = field(
         default_factory=dict
     )
+    returns: dict[str, dict[str, str]] = field(default_factory=dict)
     identity_functions: dict[str, str] = field(default_factory=dict)
+
+
+def _update_identity_registry(
+    tree: ast.Module,
+    imported: _ImportedRuntimeFacts,
+    modules: set[str],
+    identities: dict[str, str],
+) -> bool:
+    changed = False
+    for name, parameter in _module_identity_functions(
+        tree, imported.identity_functions
+    ).items():
+        for module in modules:
+            key = f"{module}.{name}"
+            if identities.get(key) != parameter:
+                identities[key] = parameter
+                changed = True
+    return changed
 
 
 def _runtime_fact_registry(
@@ -3962,33 +4285,80 @@ def _runtime_fact_registry(
     dict[str, dict[str, str]],
     dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
     dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    dict[str, dict[str, str]],
     dict[str, str],
 ]:
     attributes: dict[str, dict[str, str]] = {}
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    returns: dict[str, dict[str, str]] = {}
     identities: dict[str, str] = {}
+    statics: dict[Path, dict[str, str]] = {}
+    modules: dict[Path, set[str]] = {}
+    classes: dict[Path, list[str]] = {}
     for path, tree in trees.items():
         static, _ = _module_value_aliases(tree, _file_import_aliases(tree, path, root))
         static.update(_identity_static_aliases(tree))
-        class_attributes, _ = _class_namespace_facts(tree, static)
-        class_methods = _class_method_nodes(tree)
-        class_init_methods = _class_init_methods(tree)
-        modules = _module_names_for_path(root, path)
-        for class_node in ast.walk(tree):
-            if not isinstance(class_node, ast.ClassDef):
-                continue
-            for module in modules:
-                key = f"{module}.{class_node.name}"
-                attributes[key] = class_attributes.get(class_node.name, {})
-                methods[key] = class_methods.get(class_node.name, {})
-                init = class_init_methods.get(class_node.name)
-                if init is not None:
-                    init_methods[key] = init
-        for name, parameter in _identity_functions(tree).items():
-            for module in modules:
+        statics[path] = static
+        modules[path] = _module_names_for_path(root, path)
+        classes[path] = [
+            node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+        ]
+        for name, parameter in _module_identity_functions(tree).items():
+            for module in modules[path]:
                 identities[f"{module}.{name}"] = parameter
-    return attributes, methods, init_methods, identities
+    for _ in range(len(trees) + 1):
+        changed = False
+        for path, tree in trees.items():
+            static = statics[path]
+            imported = _imported_runtime_facts(
+                static,
+                attributes,
+                methods,
+                init_methods,
+                returns,
+                identities,
+            )
+            class_attributes, class_returns = _class_namespace_facts(
+                tree, static, imported.attributes, imported.returns
+            )
+            class_methods = _class_method_nodes(tree, imported.methods, static)
+            class_init_methods = _class_init_methods(tree, imported.methods, static)
+            if _update_identity_registry(tree, imported, modules[path], identities):
+                changed = True
+            for name in classes[path]:
+                for module in modules[path]:
+                    key = f"{module}.{name}"
+                    values = class_attributes.get(name, {})
+                    if attributes.get(key) != values:
+                        attributes[key] = values
+                        changed = True
+                    class_method_values = class_methods.get(name, {})
+                    if methods.get(key) != class_method_values:
+                        methods[key] = class_method_values
+                        changed = True
+                    class_return_values = class_returns.get(name, {})
+                    if returns.get(key) != class_return_values:
+                        returns[key] = class_return_values
+                        changed = True
+                    init = class_init_methods.get(name)
+                    if init is not None and init_methods.get(key) is not init:
+                        init_methods[key] = init
+                        changed = True
+        if not changed:
+            break
+    return attributes, methods, init_methods, returns, identities
+
+
+def _identity_registry_matches(target: str, qualified: str) -> str | None:
+    if qualified == target:
+        return ""
+    if qualified.startswith(f"{target}."):
+        return qualified[len(target) + 1 :]
+    suffix = f".{target}."
+    if suffix in qualified:
+        return qualified.split(suffix, 1)[1]
+    return None
 
 
 def _imported_runtime_facts(
@@ -3996,6 +4366,7 @@ def _imported_runtime_facts(
     attributes: dict[str, dict[str, str]],
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
     init_methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    returns: dict[str, dict[str, str]],
     identities: dict[str, str],
 ) -> _ImportedRuntimeFacts:
     result = _ImportedRuntimeFacts()
@@ -4018,6 +4389,7 @@ def _imported_runtime_facts(
             for name in names:
                 result.attributes.setdefault(name, dict(attributes[key]))
                 result.methods.setdefault(name, dict(methods.get(key, {})))
+                result.returns.setdefault(name, dict(returns.get(key, {})))
                 if key in init_methods:
                     result.init_methods[name] = init_methods[key]
         identity = identities.get(target)
@@ -4025,6 +4397,13 @@ def _imported_runtime_facts(
             name = alias if alias.isidentifier() else target.rsplit(".", 1)[-1]
             result.identity_functions[name] = identity
             result.identity_functions[target.rsplit(".", 1)[-1]] = identity
+        for key, qualified_identity in identities.items():
+            remainder = _identity_registry_matches(target, key)
+            if remainder is None or not remainder:
+                continue
+            result.identity_functions[f"{target}.{remainder}"] = qualified_identity
+            if alias.isidentifier():
+                result.identity_functions[f"{alias}.{remainder}"] = qualified_identity
     return result
 
 
@@ -4880,24 +5259,50 @@ def _method_aliases(
     return resolved
 
 
+def _resolved_base_names(
+    base: ast.AST,
+    aliases: dict[str, str],
+    local_names: set[str],
+    external_names: set[str],
+) -> str | None:
+    original = _dotted_name(base)
+    if original is None:
+        return None
+    if original in local_names:
+        return original
+    if original in external_names:
+        return original
+    target = original
+    for _ in range(len(aliases) + 1):
+        next_target = aliases.get(target)
+        if next_target is None or next_target == target:
+            break
+        target = next_target
+    if target in local_names:
+        return target
+    if target in external_names:
+        return target
+    suffix = target.rsplit(".", 1)[-1]
+    if suffix in local_names:
+        return suffix
+    if suffix in external_names:
+        return suffix
+    return None
+
+
 def _class_bases(
     classes: Sequence[ast.ClassDef],
     aliases: dict[str, str],
+    external_names: set[str] | None = None,
 ) -> dict[str, list[str]]:
-    names = {node.name for node in classes}
+    local_names = {node.name for node in classes}
+    external = set(external_names or ())
     bases: dict[str, list[str]] = {}
     for node in classes:
         resolved: list[str] = []
         for base in node.bases:
-            if not isinstance(base, ast.Name):
-                continue
-            target = base.id
-            for _ in range(len(aliases) + 1):
-                next_target = aliases.get(target)
-                if next_target is None or next_target == target:
-                    break
-                target = next_target
-            if target in names:
+            target = _resolved_base_names(base, aliases, local_names, external)
+            if target is not None and target not in resolved:
                 resolved.append(target)
         bases[node.name] = resolved
     return bases
@@ -5062,10 +5467,17 @@ def _run_class_methods(
 
 
 def _class_namespace_facts(
-    tree: ast.Module, aliases: dict[str, str]
+    tree: ast.Module,
+    aliases: dict[str, str],
+    imported_attributes: dict[str, dict[str, str]] | None = None,
+    imported_returns: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
-    bases = _class_bases(classes, _class_alias_map(tree))
+    external_attributes = imported_attributes or {}
+    external_returns = imported_returns or {}
+    bases = _class_bases(
+        classes, aliases, set(external_attributes) | set(external_returns)
+    )
     defined_keys = {
         class_node.name: _class_defined_keys(class_node) for class_node in classes
     }
@@ -5075,8 +5487,12 @@ def _class_namespace_facts(
         own_attributes.setdefault(class_node.name, {})
         own_returns.setdefault(class_node.name, {})
         _class_body_facts(class_node, aliases, own_attributes[class_node.name])
-    attributes = {name: dict(values) for name, values in own_attributes.items()}
-    returns = {name: dict(values) for name, values in own_returns.items()}
+    attributes = {name: dict(values) for name, values in external_attributes.items()}
+    returns = {name: dict(values) for name, values in external_returns.items()}
+    for name, values in own_attributes.items():
+        attributes[name] = dict(values)
+    for name, values in own_returns.items():
+        returns[name] = dict(values)
     for _ in range(len(classes) + 2):
         changed = False
         for class_node in classes:
@@ -5382,6 +5798,15 @@ def _function_parameter_names(
     return {parameter.arg for parameter in parameters if parameter is not None}
 
 
+@dataclass(frozen=True)
+class _ConstructorBinding:
+    """A constructor call together with its resolved init-parameter values."""
+
+    constructor: ast.Call
+    parameter_values: tuple[str | None, ...]
+    owner: str | None = None
+
+
 @dataclass
 class _ElementScope:
     aliases: dict[str, str] = field(default_factory=dict)
@@ -5390,27 +5815,185 @@ class _ElementScope:
     invalid_classes: set[str] = field(default_factory=set)
     container_sources: dict[str, str] = field(default_factory=dict)
     container_columns: dict[str, dict[int, list[str]]] = field(default_factory=dict)
-    instance_aliases: dict[str, str] = field(default_factory=dict)
+    instance_aliases: dict[str, frozenset[str]] = field(default_factory=dict)
     shadowed_identities: set[str] = field(default_factory=set)
-    instance_constructors: dict[str, ast.Call] = field(default_factory=dict)
+    instance_constructors: dict[str, frozenset[_ConstructorBinding]] = field(
+        default_factory=dict
+    )
     identity_aliases: dict[str, str] = field(default_factory=dict)
+    definitely_rebound: set[str] = field(default_factory=set)
+    reachable: bool = True
+    escapes_loop: bool = False
 
     def clone(self) -> _ElementScope:
         return _ElementScope(
-            dict(self.aliases),
-            {name: dict(elements) for name, elements in self.containers.items()},
-            dict(self.class_aliases),
-            set(self.invalid_classes),
-            dict(self.container_sources),
-            {
+            aliases=dict(self.aliases),
+            containers={
+                name: dict(elements) for name, elements in self.containers.items()
+            },
+            class_aliases=dict(self.class_aliases),
+            invalid_classes=set(self.invalid_classes),
+            container_sources=dict(self.container_sources),
+            container_columns={
                 name: {index: list(values) for index, values in columns.items()}
                 for name, columns in self.container_columns.items()
             },
-            dict(self.instance_aliases),
-            set(self.shadowed_identities),
-            dict(self.instance_constructors),
-            dict(self.identity_aliases),
+            instance_aliases=dict(self.instance_aliases),
+            shadowed_identities=set(self.shadowed_identities),
+            instance_constructors=dict(self.instance_constructors),
+            identity_aliases=dict(self.identity_aliases),
+            definitely_rebound=set(self.definitely_rebound),
+            reachable=self.reachable,
+            escapes_loop=self.escapes_loop,
         )
+
+
+def _merge_scope_scalar_map(
+    branches: Sequence[_ElementScope], attribute: str
+) -> dict[str, str]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(getattr(branch, attribute))
+    result: dict[str, str] = {}
+    for key in keys:
+        values = [
+            getattr(branch, attribute)[key]
+            for branch in branches
+            if key in getattr(branch, attribute)
+        ]
+        preferred = _pick_candidate(values)
+        if preferred is not None:
+            result[key] = preferred
+    return result
+
+
+def _merge_scope_name_sets(
+    branches: Sequence[_ElementScope], attribute: str
+) -> dict[str, frozenset[str]]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(getattr(branch, attribute))
+    result: dict[str, frozenset[str]] = {}
+    for key in keys:
+        names: set[str] = set()
+        for branch in branches:
+            names.update(getattr(branch, attribute).get(key, frozenset()))
+        if names:
+            result[key] = frozenset(names)
+    return result
+
+
+def _merge_scope_containers(
+    branches: Sequence[_ElementScope],
+) -> dict[str, dict[str, str]]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(branch.containers)
+    result: dict[str, dict[str, str]] = {}
+    for key in keys:
+        maps = [
+            branch.containers[key] for branch in branches if key in branch.containers
+        ]
+        element_keys: set[str] = set()
+        for elements in maps:
+            element_keys.update(elements)
+        merged_elements: dict[str, str] = {}
+        for element_key in element_keys:
+            values = [
+                elements[element_key] for elements in maps if element_key in elements
+            ]
+            preferred = _pick_candidate(values)
+            if preferred is not None:
+                merged_elements[element_key] = preferred
+        result[key] = merged_elements
+    return result
+
+
+def _merge_scope_sources(branches: Sequence[_ElementScope]) -> dict[str, str]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(branch.container_sources)
+    result: dict[str, str] = {}
+    for key in keys:
+        values = [
+            branch.container_sources.get(key, "literal")
+            for branch in branches
+            if key in branch.container_sources
+        ]
+        result[key] = "class" if "class" in values else "literal"
+    return result
+
+
+def _merge_scope_columns(
+    branches: Sequence[_ElementScope],
+) -> dict[str, dict[int, list[str]]]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(branch.container_columns)
+    result: dict[str, dict[int, list[str]]] = {}
+    for key in keys:
+        merged: dict[int, list[str]] = {}
+        for branch in branches:
+            columns = branch.container_columns.get(key)
+            if columns is None:
+                continue
+            for index, values in columns.items():
+                merged.setdefault(index, []).extend(values)
+        result[key] = merged
+    return result
+
+
+def _merge_scope_constructors(
+    branches: Sequence[_ElementScope],
+) -> dict[str, frozenset[_ConstructorBinding]]:
+    keys: set[str] = set()
+    for branch in branches:
+        keys.update(branch.instance_constructors)
+    result: dict[str, frozenset[_ConstructorBinding]] = {}
+    for key in keys:
+        bindings: set[_ConstructorBinding] = set()
+        for branch in branches:
+            bindings.update(branch.instance_constructors.get(key, frozenset()))
+        if bindings:
+            result[key] = frozenset(bindings)
+    return result
+
+
+def _copy_scope_state(target: _ElementScope, source: _ElementScope) -> None:
+    target.aliases = source.aliases
+    target.containers = source.containers
+    target.class_aliases = source.class_aliases
+    target.invalid_classes = source.invalid_classes
+    target.container_sources = source.container_sources
+    target.container_columns = source.container_columns
+    target.instance_aliases = source.instance_aliases
+    target.shadowed_identities = source.shadowed_identities
+    target.instance_constructors = source.instance_constructors
+    target.identity_aliases = source.identity_aliases
+    target.definitely_rebound = source.definitely_rebound
+    target.reachable = source.reachable
+    target.escapes_loop = source.escapes_loop
+
+
+def _merge_scope_shadowed(branches: Sequence[_ElementScope]) -> set[str]:
+    shadowed = set(branches[0].shadowed_identities)
+    for branch in branches[1:]:
+        shadowed &= branch.shadowed_identities
+    return shadowed
+
+
+def _mark_definite_rebinding(target: ast.AST, scope: _ElementScope) -> None:
+    for name in _iter_target_names(target):
+        scope.definitely_rebound.add(name.id)
+        scope.identity_aliases.pop(name.id, None)
+        scope.shadowed_identities.add(name.id)
+
+
+def _mark_definite_names(names: Iterable[str], scope: _ElementScope) -> None:
+    for name in names:
+        scope.definitely_rebound.add(name)
+        scope.identity_aliases.pop(name, None)
+        scope.shadowed_identities.add(name)
 
 
 def _pattern_capture_names(pattern: ast.AST) -> set[str]:
@@ -5477,6 +6060,94 @@ def _identity_functions(tree: ast.Module) -> dict[str, str]:
     return result
 
 
+def _identity_parameter_for_value(
+    value: ast.AST | None, identities: dict[str, str]
+) -> str | None:
+    if value is None:
+        return None
+    parameter = _identity_lambda_parameter(value)
+    if parameter is not None:
+        return parameter
+    if isinstance(value, (ast.Name, ast.Attribute)):
+        dotted = _dotted_name(value)
+        if dotted is not None:
+            return identities.get(dotted)
+    return None
+
+
+def _bind_identity_names(
+    targets: Sequence[ast.AST], parameter: str | None, identities: dict[str, str]
+) -> None:
+    for target in targets:
+        for name in _iter_target_names(target):
+            if parameter is None:
+                identities.pop(name.id, None)
+            else:
+                identities[name.id] = parameter
+
+
+def _module_assignment_targets(
+    statement: ast.stmt,
+) -> tuple[Sequence[ast.AST], ast.AST | None] | None:
+    if isinstance(statement, ast.Assign):
+        return statement.targets, statement.value
+    if isinstance(statement, ast.AnnAssign):
+        return [statement.target], statement.value
+    return None
+
+
+def _module_identity_functions(
+    tree: ast.Module, imported: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Return identity helpers and aliases bound at module level.
+
+    The registry tracks ``def`` helpers, identity lambdas, imported helpers
+    and transitive assignments in source order, so a later rebinding removes
+    an earlier identity fact.
+    """
+    imported = imported or {}
+    result: dict[str, str] = {}
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parameter = _identity_function_parameter(statement)
+            if parameter is None:
+                result.pop(statement.name, None)
+            else:
+                result[statement.name] = parameter
+            continue
+        if isinstance(statement, ast.ClassDef):
+            result.pop(statement.name, None)
+            continue
+        if isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                parameter = imported.get(local)
+                if parameter is None:
+                    result.pop(local, None)
+                else:
+                    result[local] = parameter
+            continue
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                result.pop(alias.asname or alias.name.split(".", 1)[0], None)
+            continue
+        if isinstance(statement, ast.Delete):
+            _bind_identity_names(statement.targets, None, result)
+            continue
+        assignment = _module_assignment_targets(statement)
+        if assignment is None:
+            continue
+        targets, value = assignment
+        available = dict(imported)
+        available.update(result)
+        _bind_identity_names(
+            targets, _identity_parameter_for_value(value, available), result
+        )
+    return result
+
+
 def _identity_static_aliases(tree: ast.Module) -> dict[str, str]:
     """Expose identity helpers to the path scanner through scoped aliases."""
     result: dict[str, str] = {}
@@ -5523,7 +6194,7 @@ class _ElementAnalysis:
         self.container_nodes: dict[int, dict[str, str]] = {}
         self.class_alias_nodes: dict[int, str] = {}
         self.instance_alias_nodes: dict[int, str] = {}
-        self.instance_constructor_nodes: dict[int, ast.Call] = {}
+        self.instance_constructor_nodes: dict[int, frozenset[_ConstructorBinding]] = {}
         self.invalid_nodes: dict[int, frozenset[str]] = {}
 
     def run(self, tree: ast.Module) -> None:
@@ -5540,6 +6211,15 @@ class _ElementAnalysis:
         if alias is not None:
             return alias
         if name in scope.shadowed_identities:
+            return None
+        head, dot, tail = name.partition(".")
+        if dot:
+            resolved_head = scope.aliases.get(head, head)
+            qualified = f"{resolved_head}.{tail}"
+            if qualified in self.identity_functions:
+                return qualified
+            if qualified in scope.identity_aliases:
+                return scope.identity_aliases[qualified]
             return None
         if name in self.identity_functions:
             return name
@@ -5604,29 +6284,70 @@ class _ElementAnalysis:
             return None
         return owner_attributes.get(value.attr)
 
+    def _attribute_owners(
+        self,
+        value: ast.Attribute,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> frozenset[str]:
+        dotted = _dotted_name(value)
+        root = _leftmost_name(value)
+        if dotted is None or root is None:
+            return frozenset()
+        prefix = f"{root.id}."
+        if not dotted.startswith(prefix):
+            return frozenset()
+        owners = set(scope.instance_aliases.get(root.id, frozenset()))
+        if not owners and root.id in {"self", "cls"} and class_name is not None:
+            owners.add(class_name)
+        resolved: set[str] = set()
+        for owner in owners:
+            current: str | None = owner
+            for field_name in dotted[len(prefix) :].split("."):
+                if current is None:
+                    break
+                current = self.field_types.get(current, {}).get(field_name)
+            if current is not None:
+                resolved.add(current)
+        return frozenset(resolved)
+
     def _attribute_owner(
         self,
         value: ast.Attribute,
         scope: _ElementScope,
         class_name: str | None,
     ) -> str | None:
-        dotted = _dotted_name(value)
-        root = _leftmost_name(value)
-        if dotted is None or root is None:
-            return None
-        prefix = f"{root.id}."
-        if not dotted.startswith(prefix):
-            return None
-        owner = scope.instance_aliases.get(root.id)
-        if owner is None and root.id in {"self", "cls"}:
-            owner = class_name
-        if owner is None:
-            return None
-        for field_name in dotted[len(prefix) :].split("."):
-            owner = self.field_types.get(owner, {}).get(field_name)
-            if owner is None:
-                return None
-        return owner
+        return _pick_candidate(self._attribute_owners(value, scope, class_name))
+
+    def _constructor_bindings(
+        self,
+        value: ast.AST,
+        instance_classes: frozenset[str],
+        scope: _ElementScope,
+    ) -> frozenset[_ConstructorBinding]:
+        if isinstance(value, ast.Call):
+            bindings: set[_ConstructorBinding] = set()
+            for instance_class in instance_classes:
+                init_method = self.init_methods.get(instance_class)
+                if init_method is None:
+                    bindings.add(_ConstructorBinding(value, (), instance_class))
+                    continue
+                parameters = [
+                    parameter.arg
+                    for parameter in _function_parameters(init_method)
+                    if parameter.arg not in {"self", "cls"}
+                ]
+                values = tuple(
+                    _resolve_method_parameter(
+                        value, init_method, parameter, scope.aliases
+                    )
+                    for parameter in parameters
+                )
+                bindings.add(_ConstructorBinding(value, values, instance_class))
+            return frozenset(bindings)
+        if isinstance(value, ast.Name):
+            return scope.instance_constructors.get(value.id, frozenset())
+        return frozenset()
 
     def _instance_attribute_value(
         self,
@@ -5635,34 +6356,53 @@ class _ElementAnalysis:
         class_name: str | None,
     ) -> str | None:
         if isinstance(value.value, ast.Name):
-            owner = scope.instance_aliases.get(value.value.id)
-            constructor = scope.instance_constructors.get(value.value.id)
+            owners = scope.instance_aliases.get(value.value.id, frozenset())
         elif isinstance(value.value, ast.Call):
-            owner = self._instance_class(value.value, scope, class_name)
-            constructor = value.value
+            owners = self._instance_classes(value.value, scope, class_name)
         else:
             return None
-        if owner is None:
-            return None
-        attributes = self.attributes.get(owner, {})
-        resolved = (
-            attributes.get(value.attr)
-            or attributes.get(f"self.{value.attr}")
-            or attributes.get(f"cls.{value.attr}")
-        )
-        if resolved is None or not resolved.startswith(INIT_PARAMETER_PREFIX):
-            return resolved
-        init_method = self.init_methods.get(owner)
-        if constructor is None or init_method is None:
-            return None
-        specification = resolved[len(INIT_PARAMETER_PREFIX) :]
-        name, _, suffix = specification.partition(".")
-        base_value = _resolve_method_parameter(
-            constructor, init_method, name, scope.aliases
-        )
-        if base_value is None:
-            return None
-        return f"{base_value}.{suffix}" if suffix else base_value
+        candidates: set[str] = set()
+        for owner in owners:
+            attributes = self.attributes.get(owner, {})
+            resolved = (
+                attributes.get(value.attr)
+                or attributes.get(f"self.{value.attr}")
+                or attributes.get(f"cls.{value.attr}")
+            )
+            if resolved is None:
+                continue
+            if not resolved.startswith(INIT_PARAMETER_PREFIX):
+                candidates.add(resolved)
+                continue
+            init_method = self.init_methods.get(owner)
+            bindings = self._constructor_bindings(
+                value.value, frozenset({owner}), scope
+            )
+            if not bindings or init_method is None:
+                continue
+            parameters = [
+                parameter.arg
+                for parameter in _function_parameters(init_method)
+                if parameter.arg not in {"self", "cls"}
+            ]
+            specification = resolved[len(INIT_PARAMETER_PREFIX) :]
+            name, _, suffix = specification.partition(".")
+            if name not in parameters:
+                continue
+            index = parameters.index(name)
+            for binding in bindings:
+                if binding.owner not in {None, owner}:
+                    continue
+                base_value = (
+                    binding.parameter_values[index]
+                    if index < len(binding.parameter_values)
+                    else _resolve_method_parameter(
+                        binding.constructor, init_method, name, scope.aliases
+                    )
+                )
+                if base_value is not None:
+                    candidates.add(f"{base_value}.{suffix}" if suffix else base_value)
+        return _pick_candidate(candidates)
 
     def _attribute_is_path_field(
         self,
@@ -5677,12 +6417,11 @@ class _ElementAnalysis:
         prefix = f"{root.id}."
         if not dotted.startswith(prefix):
             return False
-        owner = scope.instance_aliases.get(root.id)
-        if owner is None and root.id in {"self", "cls"}:
-            owner = class_name
-        if owner is None:
-            return False
-        return dotted[len(prefix) :] in self.path_fields.get(owner, set())
+        owners = set(scope.instance_aliases.get(root.id, frozenset()))
+        if not owners and root.id in {"self", "cls"} and class_name is not None:
+            owners.add(class_name)
+        relative = dotted[len(prefix) :]
+        return any(relative in self.path_fields.get(owner, set()) for owner in owners)
 
     def value_of(
         self, value: ast.AST, scope: _ElementScope, class_name: str | None
@@ -5707,8 +6446,8 @@ class _ElementAnalysis:
                 return _container_map_value(elements, _literal_subscript_key(value))
         if (
             isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and self._identity_name(value.func.id, scope) is not None
+            and (dotted := _dotted_name(value.func)) is not None
+            and self._identity_name(dotted, scope) is not None
             and len(value.args) == 1
             and not value.keywords
         ):
@@ -5863,16 +6602,16 @@ class _ElementAnalysis:
         scope.class_aliases[name] = owner
         scope.invalid_classes.discard(name)
 
-    def _instance_class(
+    def _instance_classes(
         self,
         value: ast.AST,
         scope: _ElementScope,
         class_name: str | None = None,
-    ) -> str | None:
+    ) -> frozenset[str]:
         if isinstance(value, ast.Name):
-            return scope.instance_aliases.get(value.id)
+            return scope.instance_aliases.get(value.id, frozenset())
         if isinstance(value, ast.Attribute):
-            return self._attribute_owner(value, scope, class_name)
+            return self._attribute_owners(value, scope, class_name)
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
             owner = scope.class_aliases.get(value.func.id)
             if owner is None and value.func.id in self.attributes:
@@ -5880,16 +6619,31 @@ class _ElementAnalysis:
             identity = self._identity_name(value.func.id, scope)
             if owner is None and identity is not None:
                 return (
-                    self._instance_class(value.args[0], scope, class_name)
+                    self._instance_classes(value.args[0], scope, class_name)
                     if value.args
-                    else None
+                    else frozenset()
                 )
-            return owner
+            return frozenset({owner}) if owner is not None else frozenset()
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+            dotted = _dotted_name(value.func)
+            if dotted is not None and self._identity_name(dotted, scope) is not None:
+                return (
+                    self._instance_classes(value.args[0], scope, class_name)
+                    if value.args
+                    else frozenset()
+                )
             attribute = value.func.attr
             if attribute in self.attributes:
-                return attribute
-        return None
+                return frozenset({attribute})
+        return frozenset()
+
+    def _instance_class(
+        self,
+        value: ast.AST,
+        scope: _ElementScope,
+        class_name: str | None = None,
+    ) -> str | None:
+        return _pick_candidate(self._instance_classes(value, scope, class_name))
 
     def _bind_resolved_target(
         self, target: ast.AST, element: str | None, scope: _ElementScope
@@ -5939,8 +6693,10 @@ class _ElementAnalysis:
     ) -> str | None:
         if _identity_lambda_parameter(value) is not None:
             return target_name
-        if isinstance(value, ast.Name):
-            return self._identity_name(value.id, scope)
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            dotted = _dotted_name(value)
+            if dotted is not None:
+                return self._identity_name(dotted, scope)
         return None
 
     def bind_target(
@@ -5966,21 +6722,17 @@ class _ElementAnalysis:
                 self.store_class_alias(target.id, owner, scope)
                 return
         identity_name = self._binding_identity_name(value, target.id, scope)
-        instance_class = self._instance_class(value, scope, class_name)
+        instance_classes = self._instance_classes(value, scope, class_name)
         container, source = self.container_of(value, scope, class_name)
         if container is not None:
             self.store(target.id, None, container, scope, source)
-            if instance_class is not None:
-                scope.instance_aliases[target.id] = instance_class
-                constructor = (
-                    value
-                    if isinstance(value, ast.Call)
-                    else scope.instance_constructors.get(
-                        value.id if isinstance(value, ast.Name) else ""
-                    )
+            if instance_classes:
+                scope.instance_aliases[target.id] = instance_classes
+                constructors = self._constructor_bindings(
+                    value, instance_classes, scope
                 )
-                if constructor is not None:
-                    scope.instance_constructors[target.id] = constructor
+                if constructors:
+                    scope.instance_constructors[target.id] = constructors
             columns = self.columns_of(value, scope, class_name)
             if columns is not None:
                 scope.container_columns[target.id] = {
@@ -5996,17 +6748,11 @@ class _ElementAnalysis:
             else self.value_of(value, scope, class_name)
         )
         self.store(target.id, element, None, scope)
-        if instance_class is not None:
-            scope.instance_aliases[target.id] = instance_class
-            constructor = (
-                value
-                if isinstance(value, ast.Call)
-                else scope.instance_constructors.get(
-                    value.id if isinstance(value, ast.Name) else ""
-                )
-            )
-            if constructor is not None:
-                scope.instance_constructors[target.id] = constructor
+        if instance_classes:
+            scope.instance_aliases[target.id] = instance_classes
+            constructors = self._constructor_bindings(value, instance_classes, scope)
+            if constructors:
+                scope.instance_constructors[target.id] = constructors
         if identity_name is not None:
             scope.identity_aliases[target.id] = identity_name
 
@@ -6075,21 +6821,22 @@ class _ElementAnalysis:
         class_name: str | None,
     ) -> None:
         if isinstance(node.value, ast.Name):
-            instance = scope.instance_aliases.get(node.value.id)
+            instances = scope.instance_aliases.get(node.value.id, frozenset())
+            instance = _pick_candidate(instances)
             if instance is not None:
                 self.instance_alias_nodes[id(node.value)] = instance
             else:
                 self.instance_alias_nodes.pop(id(node.value), None)
-            constructor = scope.instance_constructors.get(node.value.id)
-            if constructor is not None:
-                self.instance_constructor_nodes[id(node.value)] = constructor
+            constructors = scope.instance_constructors.get(node.value.id)
+            if constructors:
+                self.instance_constructor_nodes[id(node.value)] = constructors
             else:
                 self.instance_constructor_nodes.pop(id(node.value), None)
             return
         if (
             isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and self._identity_name(node.value.func.id, scope) is not None
+            and (dotted := _dotted_name(node.value.func)) is not None
+            and self._identity_name(dotted, scope) is not None
         ):
             element = self.value_of(node.value, scope, class_name)
             if element is not None:
@@ -6205,76 +6952,50 @@ class _ElementAnalysis:
             return True
         return False
 
-    def _constructor_facts(
-        self, name: str, scope: _ElementScope
-    ) -> tuple[str, tuple[str | None, ...]] | None:
-        constructor = scope.instance_constructors.get(name)
-        owner = scope.instance_aliases.get(name)
-        init_method = self.init_methods.get(owner or "")
-        if constructor is None or owner is None or init_method is None:
-            return None
-        parameters = [
-            parameter.arg
-            for parameter in _function_parameters(init_method)
-            if parameter.arg not in {"self", "cls"}
-        ]
-        values = tuple(
-            _resolve_method_parameter(
-                constructor, init_method, parameter, scope.aliases
-            )
-            for parameter in parameters
-        )
-        return owner, values
-
-    def _merge(self, scope: _ElementScope, branches: Sequence[_ElementScope]) -> None:
-        merged = scope.clone()
-        instance_aliases: dict[str, str] = {}
-        instance_constructors: dict[str, ast.Call] = {}
-        identity_aliases: dict[str, str] = {}
-        for branch in branches:
-            merged.aliases.update(branch.aliases)
-            for name, elements in branch.containers.items():
-                merged.containers[name] = dict(elements)
-                merged.container_sources[name] = branch.container_sources.get(
-                    name, "literal"
-                )
-            merged.class_aliases.update(branch.class_aliases)
-            instance_aliases.update(branch.instance_aliases)
-            merged.shadowed_identities |= branch.shadowed_identities
-            merged.invalid_classes |= branch.invalid_classes
-            for name, columns in branch.container_columns.items():
-                merged.container_columns[name] = {
-                    index: list(values) for index, values in columns.items()
-                }
-        if branches:
-            common = set(branches[0].instance_constructors)
-            for branch in branches[1:]:
-                common &= set(branch.instance_constructors)
-            for name in common:
-                facts = [self._constructor_facts(name, branch) for branch in branches]
-                if facts[0] is not None and all(item == facts[0] for item in facts):
-                    instance_constructors[name] = branches[0].instance_constructors[
-                        name
-                    ]
-            common_aliases = set(branches[0].identity_aliases)
-            for branch in branches[1:]:
-                common_aliases &= set(branch.identity_aliases)
-            for name in common_aliases:
-                value = branches[0].identity_aliases[name]
-                if all(branch.identity_aliases[name] == value for branch in branches):
-                    identity_aliases[name] = value
+    def _merge(
+        self,
+        scope: _ElementScope,
+        branches: Sequence[_ElementScope],
+    ) -> None:
+        if not branches:
+            scope.reachable = False
+            return
+        reachable = [branch for branch in branches if branch.reachable]
+        if reachable:
+            merged_branches = reachable
+            scope.reachable = True
+            scope.escapes_loop = any(branch.escapes_loop for branch in reachable)
         else:
-            identity_aliases = dict(scope.identity_aliases)
-        scope.aliases = merged.aliases
-        scope.containers = merged.containers
-        scope.class_aliases = merged.class_aliases
-        scope.invalid_classes = merged.invalid_classes
-        scope.container_sources = merged.container_sources
-        scope.container_columns = merged.container_columns
-        scope.instance_aliases = instance_aliases
-        scope.instance_constructors = instance_constructors
+            loop_branches = [branch for branch in branches if branch.escapes_loop]
+            merged_branches = loop_branches or list(branches)
+            scope.reachable = False
+            scope.escapes_loop = bool(loop_branches)
+
+        identity_aliases = _merge_scope_scalar_map(merged_branches, "identity_aliases")
+        definitely_rebound = set(merged_branches[0].definitely_rebound)
+        for branch in merged_branches[1:]:
+            definitely_rebound &= branch.definitely_rebound
+        for name in definitely_rebound:
+            identity_aliases.pop(name, None)
+        shadowed = _merge_scope_shadowed(merged_branches) | definitely_rebound
+        shadowed -= set(identity_aliases)
+        invalid_classes: set[str] = set()
+        for branch in merged_branches:
+            invalid_classes |= branch.invalid_classes
+
+        scope.aliases = _merge_scope_scalar_map(merged_branches, "aliases")
+        scope.class_aliases = _merge_scope_scalar_map(merged_branches, "class_aliases")
+        scope.containers = _merge_scope_containers(merged_branches)
+        scope.container_sources = _merge_scope_sources(merged_branches)
+        scope.container_columns = _merge_scope_columns(merged_branches)
+        scope.instance_aliases = _merge_scope_name_sets(
+            merged_branches, "instance_aliases"
+        )
+        scope.instance_constructors = _merge_scope_constructors(merged_branches)
         scope.identity_aliases = identity_aliases
-        scope.shadowed_identities = merged.shadowed_identities
+        scope.shadowed_identities = shadowed
+        scope.definitely_rebound = definitely_rebound
+        scope.invalid_classes = invalid_classes
 
     def _visit_conditional(
         self,
@@ -6298,9 +7019,15 @@ class _ElementAnalysis:
         if isinstance(statement, (ast.For, ast.AsyncFor)):
             self.bind_loop(statement.target, statement.iter, body_scope, class_name)
         self.visit(statement.body, body_scope, class_name)
+        if body_scope.escapes_loop:
+            body_scope.reachable = True
+            body_scope.escapes_loop = False
         else_scope = scope.clone()
         self.visit(statement.orelse, else_scope, class_name)
         self._merge(scope, [body_scope, else_scope])
+        scope.escapes_loop = False
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            _mark_definite_rebinding(statement.target, scope)
 
     def _visit_with(
         self,
@@ -6313,6 +7040,7 @@ class _ElementAnalysis:
                 self.bind_target(
                     item.optional_vars, item.context_expr, scope, class_name
                 )
+                _mark_definite_rebinding(item.optional_vars, scope)
         self.visit(statement.body, scope, class_name)
 
     def _visit_try(
@@ -6329,13 +7057,27 @@ class _ElementAnalysis:
             handler_scope = scope.clone()
             if handler.name is not None:
                 self.store(handler.name, None, None, handler_scope)
+                handler_scope.definitely_rebound.add(handler.name)
             self.visit(handler.body, handler_scope, class_name)
             branches.append(handler_scope)
-        else_scope = scope.clone()
-        self.visit(statement.orelse, else_scope, class_name)
-        branches.append(else_scope)
+        if body_scope.reachable:
+            else_scope = body_scope.clone()
+            self.visit(statement.orelse, else_scope, class_name)
+            branches.append(else_scope)
         self._merge(scope, branches)
-        self.visit(statement.finalbody, scope, class_name)
+        continuing = any(branch.reachable for branch in branches)
+        final_branches = [branch.clone() for branch in branches]
+        for branch in final_branches:
+            branch.reachable = True
+        final_scope = scope.clone()
+        self._merge(final_scope, final_branches)
+        self.visit(statement.finalbody, final_scope, class_name)
+        if not continuing:
+            final_scope.reachable = False
+        _copy_scope_state(scope, final_scope)
+        _mark_definite_names(
+            [handler.name for handler in statement.handlers if handler.name], scope
+        )
 
     def _visit_match(
         self, statement: ast.Match, scope: _ElementScope, class_name: str | None
@@ -6345,6 +7087,7 @@ class _ElementAnalysis:
             case_scope = scope.clone()
             for name in _pattern_capture_names(case.pattern):
                 self.store(name, None, None, case_scope)
+                case_scope.definitely_rebound.add(name)
             self.visit(case.body, case_scope, class_name)
             branches.append(case_scope)
         if not any(
@@ -6353,6 +7096,14 @@ class _ElementAnalysis:
         ):
             branches.append(scope.clone())
         self._merge(scope, branches)
+        _mark_definite_names(
+            {
+                name
+                for case in statement.cases
+                for name in _pattern_capture_names(case.pattern)
+            },
+            scope,
+        )
 
     def _class_scope(self, name: str) -> _ElementScope:
         attrs = self.attributes.get(name, {})
@@ -6397,7 +7148,8 @@ class _ElementAnalysis:
             )
             for parameter in parameters:
                 self.store(parameter, None, None, inner)
-            inner.instance_aliases.update(self.parameter_types.get(id(statement), {}))
+            for name, owner in self.parameter_types.get(id(statement), {}).items():
+                inner.instance_aliases[name] = frozenset({owner})
             self.visit(statement.body, inner, class_name)
         elif isinstance(statement, ast.ClassDef):
             scope.aliases.pop(statement.name, None)
@@ -6423,10 +7175,22 @@ class _ElementAnalysis:
         class_name: str | None,
     ) -> None:
         for statement in statements:
+            if not scope.reachable:
+                break
             self.record(statement, scope, class_name)
             if self._apply_statement(statement, scope, class_name):
+                if isinstance(statement, (ast.Return, ast.Raise)):
+                    scope.reachable = False
+                elif isinstance(statement, (ast.Break, ast.Continue)):
+                    scope.reachable = False
+                    scope.escapes_loop = True
                 continue
             self._visit_branches(statement, scope, class_name)
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                scope.reachable = False
+            elif isinstance(statement, (ast.Break, ast.Continue)):
+                scope.reachable = False
+                scope.escapes_loop = True
 
 
 def _element_alias_analysis(
@@ -6629,17 +7393,30 @@ def _call_return_target(
 
 def _class_method_nodes(
     tree: ast.Module,
+    external_methods: (
+        dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] | None
+    ) = None,
+    aliases: dict[str, str] | None = None,
 ) -> dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
     classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
     result: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {
-        class_node.name: {
-            statement.name: statement
-            for statement in class_node.body
-            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        for class_node in classes
+        name: dict(methods) for name, methods in (external_methods or {}).items()
     }
-    bases = _class_bases(classes, _class_alias_map(tree))
+    result.update(
+        {
+            class_node.name: {
+                statement.name: statement
+                for statement in class_node.body
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            for class_node in classes
+        }
+    )
+    bases = _class_bases(
+        classes,
+        aliases or _class_alias_map(tree),
+        set(external_methods or ()),
+    )
     for _ in range(len(classes) + 1):
         changed = False
         for class_node in classes:
@@ -6656,9 +7433,15 @@ def _class_method_nodes(
 
 def _class_init_methods(
     tree: ast.Module,
+    external_methods: (
+        dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] | None
+    ) = None,
+    aliases: dict[str, str] | None = None,
 ) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
     result: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-    for class_name, methods in _class_method_nodes(tree).items():
+    for class_name, methods in _class_method_nodes(
+        tree, external_methods, aliases
+    ).items():
         init = methods.get("__init__")
         if init is not None:
             result[class_name] = init
@@ -6759,42 +7542,82 @@ def _receiver_constructor_call(call: ast.Call) -> ast.Call | None:
     return None
 
 
-def _resolve_return_candidate(
+def _resolve_return_candidates(
     candidate: str,
     call: ast.Call,
     method: ast.FunctionDef | ast.AsyncFunctionDef | None,
     aliases: dict[str, str],
     class_name: str | None = None,
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] | None = None,
-    instance_constructors: dict[int, ast.Call] | None = None,
-) -> str | None:
+    instance_constructors: (dict[int, frozenset[_ConstructorBinding]] | None) = None,
+) -> frozenset[str]:
     if candidate.startswith(INIT_PARAMETER_PREFIX):
-        constructor = _receiver_constructor_call(call)
-        if (
-            constructor is None
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-        ):
-            constructor = (instance_constructors or {}).get(id(call.func.value))
         init_method = (methods or {}).get(class_name or "", {}).get("__init__")
-        if constructor is None or init_method is None:
-            return None
+        if init_method is None:
+            return frozenset()
+        parameters = [
+            parameter.arg
+            for parameter in _function_parameters(init_method)
+            if parameter.arg not in {"self", "cls"}
+        ]
         specification = candidate[len(INIT_PARAMETER_PREFIX) :]
         name, _, suffix = specification.partition(".")
-        resolved = _resolve_method_parameter(constructor, init_method, name, aliases)
-        if resolved is None:
-            return None
-        return f"{resolved}.{suffix}" if suffix else resolved
+        if name not in parameters:
+            return frozenset()
+        index = parameters.index(name)
+        values: set[str] = set()
+        constructor = _receiver_constructor_call(call)
+        if constructor is not None:
+            resolved = _resolve_method_parameter(
+                constructor, init_method, name, aliases
+            )
+            if resolved is not None:
+                values.add(resolved)
+        elif isinstance(call.func, ast.Attribute) and isinstance(
+            call.func.value, ast.Name
+        ):
+            bindings = (instance_constructors or {}).get(
+                id(call.func.value), frozenset()
+            )
+            for binding in bindings:
+                if binding.owner not in {None, class_name}:
+                    continue
+                resolved_value = (
+                    binding.parameter_values[index]
+                    if index < len(binding.parameter_values)
+                    else _resolve_method_parameter(
+                        binding.constructor, init_method, name, aliases
+                    )
+                )
+                if resolved_value is not None:
+                    values.add(resolved_value)
+        return frozenset(f"{value}.{suffix}" if suffix else value for value in values)
     if not candidate.startswith(CALL_PARAMETER_PREFIX):
-        return candidate
+        return frozenset({candidate})
     if method is None:
-        return None
+        return frozenset()
     specification = candidate[len(CALL_PARAMETER_PREFIX) :]
     name, _, suffix = specification.partition(".")
     resolved = _resolve_method_parameter(call, method, name, aliases)
     if resolved is None:
-        return None
-    return f"{resolved}.{suffix}" if suffix else resolved
+        return frozenset()
+    return frozenset({f"{resolved}.{suffix}" if suffix else resolved})
+
+
+def _return_class_names(
+    class_name: str | None,
+    base_node: ast.Name | None,
+    instance_constructors: dict[int, frozenset[_ConstructorBinding]],
+) -> set[str]:
+    names: set[str] = set()
+    if class_name is not None:
+        names.add(class_name)
+        names.add(class_name.rsplit(".", 1)[-1])
+    if base_node is not None:
+        for binding in instance_constructors.get(id(base_node), frozenset()):
+            if binding.owner is not None:
+                names.add(binding.owner)
+    return names
 
 
 def _namespace_call_return_reference(
@@ -6807,7 +7630,7 @@ def _namespace_call_return_reference(
     invalid_classes: frozenset[str],
     contexts: dict[int, str | None],
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
-    instance_constructors: dict[int, ast.Call],
+    instance_constructors: dict[int, frozenset[_ConstructorBinding]],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     if not isinstance(node.value, ast.Call):
@@ -6824,39 +7647,28 @@ def _namespace_call_return_reference(
     class_name = _resolve_class_reference(
         base_node, class_name, class_aliases, class_alias_nodes
     )
-    if class_name is None or class_name not in returns:
-        return
-    if class_name in parameters:
-        return
-    method_node = methods.get(class_name, {}).get(method) if method else None
-    base = returns[class_name].get(method) if method is not None else None
-    if base is not None:
+    for possible_class in _return_class_names(
+        class_name, base_node, instance_constructors
+    ):
+        if possible_class not in returns or possible_class in parameters:
+            continue
+        method_node = methods.get(possible_class, {}).get(method) if method else None
+        base = returns[possible_class].get(method) if method is not None else None
+        suffix = f".{node.attr}" if base is not None else ""
+        if base is None:
+            method_node = methods.get(possible_class, {}).get(node.attr)
+            base = returns[possible_class].get(node.attr)
         for candidate in _return_candidates(base):
-            resolved = _resolve_return_candidate(
+            for resolved in _resolve_return_candidates(
                 candidate,
                 node.value,
                 method_node,
                 aliases,
-                class_name,
+                possible_class,
                 methods,
                 instance_constructors,
-            )
-            if resolved is not None:
-                check(node, f"{resolved}.{node.attr}")
-    else:
-        method_node = methods.get(class_name, {}).get(node.attr)
-        for candidate in _return_candidates(returns[class_name].get(node.attr)):
-            resolved = _resolve_return_candidate(
-                candidate,
-                node.value,
-                method_node,
-                aliases,
-                class_name,
-                methods,
-                instance_constructors,
-            )
-            if resolved is not None:
-                check(node, resolved)
+            ):
+                check(node, f"{resolved}{suffix}")
 
 
 def _namespace_call_chain_reference(
@@ -6869,7 +7681,7 @@ def _namespace_call_chain_reference(
     invalid_classes: frozenset[str],
     contexts: dict[int, str | None],
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
-    instance_constructors: dict[int, ast.Call],
+    instance_constructors: dict[int, frozenset[_ConstructorBinding]],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     inner = node.func
@@ -6887,23 +7699,25 @@ def _namespace_call_chain_reference(
     class_name = _resolve_class_reference(
         base_node, class_name, class_aliases, class_alias_nodes
     )
-    if class_name is None or class_name not in returns or method is None:
+    if method is None:
         return
-    if class_name in parameters:
-        return
-    method_node = methods.get(class_name, {}).get(method)
-    for candidate in _return_candidates(returns[class_name].get(method)):
-        resolved = _resolve_return_candidate(
-            candidate,
-            inner,
-            method_node,
-            aliases,
-            class_name,
-            methods,
-            instance_constructors,
-        )
-        if resolved is not None:
-            check(node, resolved)
+    for possible_class in _return_class_names(
+        class_name, base_node, instance_constructors
+    ):
+        if possible_class not in returns or possible_class in parameters:
+            continue
+        method_node = methods.get(possible_class, {}).get(method)
+        for candidate in _return_candidates(returns[possible_class].get(method)):
+            for resolved in _resolve_return_candidates(
+                candidate,
+                inner,
+                method_node,
+                aliases,
+                possible_class,
+                methods,
+                instance_constructors,
+            ):
+                check(node, resolved)
 
 
 def _namespace_attribute_reference(
@@ -6919,7 +7733,7 @@ def _namespace_attribute_reference(
     invalid_classes: frozenset[str],
     parameters: set[str],
     methods: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]],
-    instance_constructors: dict[int, ast.Call],
+    instance_constructors: dict[int, frozenset[_ConstructorBinding]],
     check: Callable[[ast.AST, str | None], None],
 ) -> None:
     element_alias = element_aliases.get(id(node.value))
@@ -6986,13 +7800,15 @@ def _namespace_reference_violations(
     imported_init_methods: (
         dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None
     ) = None,
+    imported_returns: dict[str, dict[str, str]] | None = None,
     extra_identity_functions: dict[str, str] | None = None,
 ) -> list[Violation]:
-    attributes, returns = _class_namespace_facts(tree, static)
-    for name, attribute_facts in (imported_attributes or {}).items():
-        attributes.setdefault(name, attribute_facts)
+    attributes, returns = _class_namespace_facts(
+        tree, static, imported_attributes, imported_returns
+    )
     contexts = _class_contexts(tree)
     effective_init_methods = dict(imported_init_methods or {})
+    effective_init_methods.update(_class_init_methods(tree, imported_methods, static))
     effective_init_methods.update(init_methods or {})
     analysis = _element_alias_analysis(
         tree,
@@ -7008,9 +7824,7 @@ def _namespace_reference_violations(
     receiver_aliases.update(analysis.instance_alias_nodes)
     class_aliases = _class_alias_map(tree)
     parameters = _function_parameters_for_nodes(tree)
-    class_methods = _class_method_nodes(tree)
-    for name, method_facts in (imported_methods or {}).items():
-        class_methods.setdefault(name, method_facts)
+    class_methods = _class_method_nodes(tree, imported_methods, static)
     violations: list[Violation] = []
 
     def check(node: ast.AST, resolved: str | None) -> None:
@@ -7028,6 +7842,8 @@ def _namespace_reference_violations(
             violations.append(violation)
 
     for node in ast.walk(tree):
+        if id(node) not in states:
+            continue
         aliases = states.get(id(node), static)
         invalid_classes = analysis.invalid_nodes.get(id(node), frozenset())
         _namespace_definition_references(node, aliases, check)
@@ -7201,6 +8017,8 @@ def _runtime_attribute_violations(
 ) -> list[Violation]:
     violations: list[Violation] = []
     for node in ast.walk(tree):
+        if id(node) not in states:
+            continue
         aliases = states.get(id(node), {})
         shadow = shadowed.get(id(node), set())
         if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(
@@ -7287,11 +8105,14 @@ def _runtime_call_access_violations(
     module_paths: set[str],
     static: dict[str, str],
     path: Path,
+    reachable: set[int],
 ) -> list[Violation]:
     violations: list[Violation] = []
     for node, aliases, path_names in _iter_calls_with_aliases(
         tree.body, dict(initial), module_paths, final
     ):
+        if id(node) not in reachable:
+            continue
         call_static = _merge_flow_aliases(static, aliases)
         literal_targets = _literal_indirect_names(
             node, aliases, path_names, call_static
@@ -7354,6 +8175,7 @@ def scan_contract_runtime_access(
         imported_attributes_registry,
         imported_methods_registry,
         imported_init_registry,
+        imported_returns_registry,
         imported_identity_registry,
     ) = _runtime_fact_registry(contract_src, trees)
     for path, tree in trees.items():
@@ -7367,6 +8189,7 @@ def scan_contract_runtime_access(
             imported_attributes_registry,
             imported_methods_registry,
             imported_init_registry,
+            imported_returns_registry,
             imported_identity_registry,
         )
         for name in imported_runtime.identity_functions:
@@ -7447,10 +8270,13 @@ def scan_contract_runtime_access(
                 imported_runtime.attributes,
                 imported_runtime.methods,
                 imported_runtime.init_methods,
+                imported_runtime.returns,
                 imported_runtime.identity_functions,
             )
         )
         for lambda_node, lambda_names in _lambda_reference_names(tree, file_imports):
+            if id(lambda_node) not in states:
+                continue
             forbidden_lambda = {
                 name for name in lambda_names if _is_forbidden_runtime_name(name)
             }
@@ -7460,7 +8286,7 @@ def scan_contract_runtime_access(
                 )
         violations.extend(
             _runtime_call_access_violations(
-                tree, initial, final, module_paths, static, path
+                tree, initial, final, module_paths, static, path, set(states)
             )
         )
     return _dedupe_violations(violations)
