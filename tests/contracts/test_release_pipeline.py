@@ -555,3 +555,259 @@ def test_import_matrix_is_json(engine_smoke: ModuleType) -> None:
     payload = json.loads(IMPORT_MATRIX.read_text(encoding="utf-8"))
     assert payload["paths"]
     assert sys.version_info >= (3, 11)
+
+
+def test_invalid_static_version_is_reported_as_a_release_error(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = write_pyproject(tmp_path, "not-a-version")
+    with pytest.raises(release.ReleaseError, match="invalid version") as error:
+        release.verify_release_tag("contracts-v0.1.0", pyproject)
+    assert str(pyproject) in str(error.value)
+    assert "not-a-version" in str(error.value)
+
+
+def test_release_cli_reports_an_invalid_static_version_without_a_traceback(
+    release: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pyproject = write_pyproject(tmp_path, "not-a-version")
+    assert (
+        release.main(
+            [
+                "check-tag",
+                "--tag",
+                "contracts-v0.1.0",
+                "--pyproject",
+                str(pyproject),
+            ]
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert "invalid version" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.parametrize(
+    ("ref", "tag"),
+    [
+        ("refs/tags/contracts-v0.1.0", "contracts-v0.1.0"),
+        ("refs/tags/contracts-v10.20.30", "contracts-v10.20.30"),
+    ],
+)
+def test_full_tag_ref_is_parsed(release: ModuleType, ref: str, tag: str) -> None:
+    assert release.tag_from_ref(ref) == tag
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "",
+        "   ",
+        "contracts-v0.1.0",
+        "refs/heads/contracts-v0.1.0",
+        "refs/tags/v0.1.0",
+        "refs/tags/contracts-v0.1",
+        "refs/tags/contracts-v0.2.0-rc1",
+        "refs/tags/contracts-v0.1.0+local",
+        " refs/tags/contracts-v0.1.0",
+    ],
+)
+def test_incomplete_or_non_tag_refs_are_rejected(release: ModuleType, ref: str) -> None:
+    with pytest.raises(release.ReleaseError):
+        release.tag_from_ref(ref)
+
+
+def test_full_tag_ref_on_head_returns_the_version(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    assert (
+        release.verify_release_ref(
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            pyproject,
+            head_tags=["contracts-v0.1.0"],
+        )
+        == "0.1.0"
+    )
+
+
+def test_branch_with_a_release_name_is_rejected(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    with pytest.raises(release.ReleaseError, match="full tag ref"):
+        release.verify_release_ref(
+            "refs/heads/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            pyproject,
+            head_tags=["contracts-v0.1.0"],
+        )
+
+
+def test_empty_ref_is_rejected(release: ModuleType, tmp_path: Path) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    with pytest.raises(release.ReleaseError, match="empty"):
+        release.verify_release_ref(
+            "",
+            "contracts-v0.1.0",
+            pyproject,
+            head_tags=["contracts-v0.1.0"],
+        )
+
+
+def test_tag_that_does_not_point_at_head_is_rejected(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    with pytest.raises(release.ReleaseError, match="does not point at HEAD"):
+        release.verify_release_ref(
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            pyproject,
+            head_tags=["contracts-v0.2.0"],
+        )
+
+
+def test_ref_and_short_tag_must_agree(release: ModuleType, tmp_path: Path) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    with pytest.raises(release.ReleaseError, match="does not match the tag ref"):
+        release.verify_release_ref(
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.2.0",
+            pyproject,
+            head_tags=["contracts-v0.1.0"],
+        )
+
+
+def test_tags_pointing_at_head_reads_git(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command, 0, "contracts-v0.1.0\ncontracts-v0.1.1\n", ""
+        )
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    assert release.tags_pointing_at_head() == ["contracts-v0.1.0", "contracts-v0.1.1"]
+    assert captured["command"][:3] == ["git", "tag", "--points-at"]
+
+
+def test_tags_pointing_at_head_reports_a_git_failure(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 128, "", "fatal: not a git repo")
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    with pytest.raises(release.ReleaseError, match="cannot list tags"):
+        release.tags_pointing_at_head()
+
+
+@pytest.mark.parametrize(
+    ("ref", "tag", "head_tags", "exit_code"),
+    [
+        (
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            ["contracts-v0.1.0"],
+            0,
+        ),
+        (
+            "refs/heads/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            ["contracts-v0.1.0"],
+            1,
+        ),
+        ("", "contracts-v0.1.0", ["contracts-v0.1.0"], 1),
+        (
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            ["contracts-v0.2.0"],
+            1,
+        ),
+    ],
+)
+def test_release_cli_enforces_the_full_tag_ref(
+    release: ModuleType,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    ref: str,
+    tag: str,
+    head_tags: list[str],
+    exit_code: int,
+) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    monkeypatch.setattr(release, "tags_pointing_at_head", lambda: head_tags)
+    assert (
+        release.main(
+            [
+                "check-tag",
+                "--ref",
+                ref,
+                "--tag",
+                tag,
+                "--pyproject",
+                str(pyproject),
+            ]
+        )
+        == exit_code
+    )
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+
+
+def test_invalid_expected_version_is_rejected_before_upload(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    artifacts = make_artifacts(tmp_path)
+    with pytest.raises(release.ReleaseError, match="not a valid PEP 440"):
+        release.validate_artifacts(artifacts, "not-a-version")
+
+
+def test_release_cli_reports_an_invalid_expected_version_without_a_traceback(
+    release: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    make_artifacts(tmp_path)
+    monkeypatch.setenv("SOURCECRAFT_PYPI_REGISTRY_ID", "registry123")
+    monkeypatch.setenv("PYPI_REGISTRY_PAT", "s3cr3t")
+    assert (
+        release.main(
+            [
+                "publish",
+                "--dist",
+                str(tmp_path),
+                "--expected-version",
+                "not-a-version",
+            ]
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert "not a valid PEP 440" in error
+    assert "Traceback" not in error
+
+
+def test_missing_local_tags_at_head_are_reported(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    pyproject = write_pyproject(tmp_path, "0.1.0")
+    with pytest.raises(release.ReleaseError, match="no local tags point at HEAD"):
+        release.verify_release_ref(
+            "refs/tags/contracts-v0.1.0",
+            "contracts-v0.1.0",
+            pyproject,
+            head_tags=[],
+        )

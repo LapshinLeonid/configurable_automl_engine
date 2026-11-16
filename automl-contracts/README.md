@@ -200,25 +200,31 @@ builds the same artifacts, but does not upload them. The publication workflow
 runs only for a `contracts-v<version>` tag and refuses to publish when:
 
 - the tag does not match the `contracts-v<version>` mask;
+- the ref is not the full `refs/tags/contracts-v<version>` reference, or that tag
+  does not point at `HEAD`;
 - the tag version differs from the static version in `pyproject.toml`;
 - any release gate fails: contract boundaries, release configuration, Ruff,
-  Mypy, import layers, contract tests, artifact metadata or the clean
-  installation of the exact wheel;
+  Mypy, import layers, contract tests, artifact metadata, the clean
+  installation of the exact wheel or the consumer E2E on that wheel;
 - `SOURCECRAFT_PYPI_REGISTRY_ID` is not configured, or the `PYPI_REGISTRY_PAT`
   secret is missing, expired or lacks upload rights.
 
 The workflow uploads the same wheel and sdist that passed the gates with
 `twine` to the registry `legacy/` endpoint. Published versions are immutable:
 an attempt to upload the same version again fails instead of being skipped.
-After the upload the workflow installs `automl-contracts` back from the
-registry in a clean environment and validates a reference configuration
-through the public models, protocols and packaged JSON Schema, without the
-engine.
+The release tag must be present in the CI checkout; when no local tag points at
+`HEAD`, `preflight` reports that explicitly instead of publishing. After the
+upload the workflow installs `automl-contracts` back from the registry in a
+clean environment and validates a reference configuration through the public
+models, protocols and packaged JSON Schema, without the engine.
 
 Configure the registry identifier as a CI variable in the workflow and keep
-the PAT only in the repository secret. Neither value belongs in a script, a
-committed file or a diagnostic message. The SourceCraft sync workflow pushes
-the `contracts-v*` tag to GitHub so the verification mirror is reachable.
+the PAT only in the repository secret. The workflow exposes the PAT only to the
+cubes that upload the distribution and install it back from the registry; cubes
+that install packages from the public index never receive it. Neither value
+belongs in a script, a committed file or a diagnostic message. The SourceCraft
+sync workflow pushes the `contracts-v*` tag to GitHub so the verification
+mirror is reachable.
 
 ## Using the public API
 

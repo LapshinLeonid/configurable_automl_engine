@@ -26,6 +26,7 @@ from packaging.version import InvalidVersion, Version
 
 DISTRIBUTION_NAME = "automl-contracts"
 TAG_PREFIX = "contracts-v"
+TAG_REF_PREFIX = "refs/tags/"
 DEFAULT_ORGANIZATION = "ooo-ainod"
 REGISTRY_ID_ENV = "SOURCECRAFT_PYPI_REGISTRY_ID"
 PAT_ENV = "PYPI_REGISTRY_PAT"
@@ -179,16 +180,116 @@ def verify_release_tag(tag: str, pyproject: Path) -> str:
 
     Raises:
         ReleaseError: The tag mask is wrong, the distribution is not
-            ``automl-contracts``, or the versions differ.
+            ``automl-contracts``, the static version is invalid, or the
+            versions differ.
     """
     name, version = read_distribution(pyproject)
     if name != DISTRIBUTION_NAME:
         raise ReleaseError(f"{pyproject} declares distribution {name!r}")
     tag_version = parse_release_tag(tag)
-    if Version(tag_version) != Version(version):
+    try:
+        distribution_version = Version(version)
+    except InvalidVersion as error:
+        raise ReleaseError(
+            f"{pyproject} declares invalid version {version!r}; publication is "
+            "not allowed"
+        ) from error
+    if Version(tag_version) != distribution_version:
         raise ReleaseError(
             f"tag {tag!r} resolves to {tag_version}, but {pyproject} declares "
             f"version {version}; publication is not allowed"
+        )
+    return version
+
+
+def tag_from_ref(ref: str) -> str:
+    """Extract the release tag from a full ``refs/tags/`` reference.
+
+    Args:
+        ref: Full Git reference that triggered the publication.
+
+    Returns:
+        The validated ``contracts-v<version>`` tag.
+
+    Raises:
+        ReleaseError: The reference is empty, is not a tag reference, or does
+            not encode a valid release tag.
+    """
+    if not ref or ref != ref.strip():
+        raise ReleaseError(
+            f"release ref {ref!r} is empty or contains whitespace; publication "
+            f"requires {TAG_REF_PREFIX}{TAG_PREFIX}<version>"
+        )
+    if not ref.startswith(TAG_REF_PREFIX):
+        raise ReleaseError(
+            f"ref {ref!r} is not a full tag ref; publication requires "
+            f"{TAG_REF_PREFIX}{TAG_PREFIX}<version>"
+        )
+    tag = ref[len(TAG_REF_PREFIX) :]
+    parse_release_tag(tag)
+    return tag
+
+
+def tags_pointing_at_head(*, timeout: int = 30) -> list[str]:
+    """Return every Git tag that points at ``HEAD``.
+
+    Args:
+        timeout: Git invocation timeout in seconds.
+
+    Returns:
+        Tag names reported by ``git tag --points-at HEAD``.
+
+    Raises:
+        ReleaseError: Git cannot be invoked or the repository is unavailable.
+    """
+    result = _run(["git", "tag", "--points-at", "HEAD"], env=None, timeout=timeout)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ReleaseError(
+            "cannot list tags pointing at HEAD" + (f": {detail}" if detail else "")
+        )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def verify_release_ref(
+    ref: str,
+    tag: str,
+    pyproject: Path,
+    *,
+    head_tags: Sequence[str] | None = None,
+) -> str:
+    """Require a full tag ref that points at ``HEAD`` and matches the version.
+
+    Args:
+        ref: Full Git reference from the CI environment.
+        tag: Short tag name reported by the CI environment.
+        pyproject: Path to ``automl-contracts/pyproject.toml``.
+        head_tags: Tags pointing at ``HEAD``; discovered with Git when omitted.
+
+    Returns:
+        The distribution version that must be published.
+
+    Raises:
+        ReleaseError: The ref is not a full release tag, the short tag differs,
+            the tag is not on ``HEAD``, or the tag and version disagree.
+    """
+    ref_tag = tag_from_ref(ref)
+    if tag != ref_tag:
+        raise ReleaseError(
+            f"tag {tag!r} does not match the tag ref {ref!r}; publication is "
+            "not allowed"
+        )
+    version = verify_release_tag(tag, pyproject)
+    tags = list(head_tags) if head_tags is not None else tags_pointing_at_head()
+    if not tags:
+        raise ReleaseError(
+            "no local tags point at HEAD; fetch the release tag ref in the CI "
+            "checkout before publishing"
+        )
+    if tag not in tags:
+        raise ReleaseError(
+            f"tag {tag!r} does not point at HEAD; local tags at HEAD are "
+            f"{sorted(tags)!r}"
         )
     return version
 
@@ -325,17 +426,30 @@ def validate_artifacts(
 
     Raises:
         ReleaseError: An artifact is missing, duplicated or carries another
-            version.
+            version, or the expected version is not valid PEP 440.
     """
     if not artifacts:
         raise ReleaseError("no distribution artifacts were provided for publication")
+    try:
+        expected = Version(expected_version)
+    except InvalidVersion as error:
+        raise ReleaseError(
+            f"release version {expected_version!r} is not a valid PEP 440 "
+            "version; publication is not allowed"
+        ) from error
     suffixes: set[str] = set()
     checked: list[Path] = []
     for path in artifacts:
         if not path.is_file():
             raise ReleaseError(f"artifact {path} does not exist")
         version = artifact_version(path)
-        if Version(version) != Version(expected_version):
+        try:
+            artifact = Version(version)
+        except InvalidVersion as error:
+            raise ReleaseError(
+                f"artifact {path.name} carries invalid version {version!r}"
+            ) from error
+        if artifact != expected:
             raise ReleaseError(
                 f"artifact {path.name} carries version {version}, but the "
                 f"release version is {expected_version}"
@@ -642,6 +756,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     check_tag.add_argument("--tag", required=True)
     check_tag.add_argument(
+        "--ref",
+        help="Full Git reference; enforces refs/tags/ and tag-on-HEAD.",
+    )
+    check_tag.add_argument(
         "--pyproject",
         type=Path,
         default=Path("automl-contracts/pyproject.toml"),
@@ -693,7 +811,14 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _build_parser().parse_args(argv)
     try:
         if arguments.command == "check-tag":
-            print(verify_release_tag(arguments.tag, arguments.pyproject))
+            if arguments.ref is not None:
+                print(
+                    verify_release_ref(
+                        arguments.ref, arguments.tag, arguments.pyproject
+                    )
+                )
+            else:
+                print(verify_release_tag(arguments.tag, arguments.pyproject))
             return 0
         if arguments.command == "show-endpoints":
             registry_id = registry_id_from_environment()

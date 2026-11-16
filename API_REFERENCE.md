@@ -1554,8 +1554,10 @@ skip the first install command.
 Do not hardcode a registry identifier or a token in a script, image, README or
 task. In CI, keep `SOURCECRAFT_PYPI_REGISTRY_ID` in a repository variable and
 `PYPI_REGISTRY_PAT` in a secret, interpolate them in the shell step and let the
-platform mask the secret. The registry must be connected to the dependent
-repository by an organization administrator.
+platform mask the secret. The release workflow exposes `PYPI_REGISTRY_PAT` only
+to the cubes that upload the distribution and install it back from the registry;
+jobs that install packages from the public index never receive it. The registry
+must be connected to the dependent repository by an organization administrator.
 
 Prefer a single trusted `--index-url`. If an additional index is unavoidable,
 pip gives it no priority, so a package with the same name on that index can win

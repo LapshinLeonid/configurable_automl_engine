@@ -574,8 +574,6 @@ workflows:
       # The identifier is configuration, not a secret, and must not be
       # hardcoded in scripts.
       SOURCECRAFT_PYPI_REGISTRY_ID: ""
-      # The PAT is stored only as a repository secret.
-      PYPI_REGISTRY_PAT: ${{ secrets.PYPI_REGISTRY_PAT }}
     tasks:
       - name: contracts-release
         cubes:
@@ -601,16 +599,13 @@ workflows:
               - |
                 set -e
                 VERSION=$(python3.11 scripts/contract_release.py check-tag \
+                  --ref "${SOURCECRAFT_COMMIT_REF}" \
                   --tag "${SOURCECRAFT_COMMIT_REF_NAME}" \
                   --pyproject automl-contracts/pyproject.toml)
                 printf '%s' "$VERSION" > /tmp/contracts-release-version.txt
                 echo "Release version: $VERSION"
                 test -n "${SOURCECRAFT_PYPI_REGISTRY_ID}" || {
                   echo "SOURCECRAFT_PYPI_REGISTRY_ID is not configured" >&2
-                  exit 1
-                }
-                test -n "${PYPI_REGISTRY_PAT}" || {
-                  echo "PYPI_REGISTRY_PAT secret is not configured" >&2
                   exit 1
                 }
                 python3.11 scripts/contract_release.py show-endpoints
@@ -653,30 +648,44 @@ workflows:
               - |
                 set -e
                 VERSION=$(cat /tmp/contracts-release-version.txt)
-                rm -rf /tmp/publish-venv
+                REPO_DIR="$(pwd)"
+                rm -rf /tmp/publish-venv /tmp/publish-consumer
                 python3.11 -m venv /tmp/publish-venv
                 /tmp/publish-venv/bin/pip install --upgrade pip
-                /tmp/publish-venv/bin/pip install --index-url https://pypi.org/simple "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
+                /tmp/publish-venv/bin/pip install --index-url https://pypi.org/simple "pydantic>=2.12.5,<3" "pydantic-core>=2,<3" "jsonschema>=4.18"
                 CONTRACT_WHEEL=$(ls automl-contracts/dist/*.whl | head -1)
                 /tmp/publish-venv/bin/pip install --no-deps "$CONTRACT_WHEEL"
                 /tmp/publish-venv/bin/python scripts/smoke_contract_install.py
                 /tmp/publish-venv/bin/pip check
-                echo "✅ The exact artifact that will be uploaded installs cleanly"
+                mkdir -p /tmp/publish-consumer
+                (
+                  cd /tmp/publish-consumer
+                  /tmp/publish-venv/bin/python "$REPO_DIR/scripts/e2e_contract_consumer.py" \
+                    --expected-version "$VERSION" \
+                    --reference-config "$REPO_DIR/tests/contracts/data/reference_config.json" \
+                    --forbid-source-root "$REPO_DIR"
+                )
+                echo "✅ The exact artifact that will be uploaded installs and serves a consumer"
 
           - name: publish
+            env:
+              PYPI_REGISTRY_PAT: ${{ secrets.PYPI_REGISTRY_PAT }}
             script:
               - |
                 set -e
                 VERSION=$(cat /tmp/contracts-release-version.txt)
-                if git tag --points-at HEAD | grep -q "^contracts-v"; then
-                  echo "Publishing $VERSION from the contracts-v* tag"
-                fi
+                python3.11 scripts/contract_release.py check-tag \
+                  --ref "${SOURCECRAFT_COMMIT_REF}" \
+                  --tag "${SOURCECRAFT_COMMIT_REF_NAME}" \
+                  --pyproject automl-contracts/pyproject.toml
                 python3.11 scripts/contract_release.py publish \
                   --dist automl-contracts/dist \
                   --expected-version "$VERSION"
                 echo "✅ Published automl-contracts $VERSION"
 
           - name: verify-from-registry
+            env:
+              PYPI_REGISTRY_PAT: ${{ secrets.PYPI_REGISTRY_PAT }}
             script:
               - |
                 set -e

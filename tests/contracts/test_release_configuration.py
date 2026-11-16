@@ -66,6 +66,53 @@ def inside(text: str, block: str, old: str, new: str, *, count: int = 1) -> str:
     return head + tail.replace(old, new, count)
 
 
+def load_document(text: str) -> dict[str, object]:
+    document = yaml.safe_load(text)
+    assert isinstance(document, dict)
+    return document
+
+
+def dump_document(document: dict[str, object]) -> str:
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+def publish_workflow(document: dict[str, object]) -> dict[str, object]:
+    return document["workflows"]["publish-contracts"]  # type: ignore[index]
+
+
+def find_cube(workflow: dict[str, object], name: str) -> dict[str, object]:
+    for task in workflow["tasks"]:  # type: ignore[index]
+        for cube in task.get("cubes", []):
+            if cube.get("name") == name:
+                return cube
+    raise AssertionError(f"cube {name!r} is missing")
+
+
+def cube_script(cube: dict[str, object]) -> str:
+    script = cube["script"]
+    if isinstance(script, list):
+        return "\n".join(str(chunk) for chunk in script)
+    return str(script)
+
+
+def mutate_publish_workflow(text: str, function: object) -> str:
+    document = load_document(text)
+    function(publish_workflow(document))
+    return dump_document(document)
+
+
+def split_publish_tasks(workflow: dict[str, object], *, needs: object = None) -> None:
+    cubes = workflow["tasks"][0]["cubes"]  # type: ignore[index]
+    boundary = next(
+        index for index, cube in enumerate(cubes) if cube["name"] == "publish"
+    )
+    gates = {"name": "gates", "cubes": cubes[:boundary]}
+    upload = {"name": "upload", "cubes": cubes[boundary:]}
+    if needs is not None:
+        upload["needs"] = needs
+    workflow["tasks"] = [gates, upload]
+
+
 def test_repository_release_configuration_is_wired(guard: ModuleType) -> None:
     assert guard.run_checks(REPO_ROOT) == []
 
@@ -553,3 +600,616 @@ def test_guard_cli_reports_failures(
 ) -> None:
     assert guard.main(["--repo-root", str(tmp_path)]) == 1
     assert "release configuration violation" in capsys.readouterr().err
+
+
+PAT_SECRET = "${{ secrets.PYPI_REGISTRY_PAT }}"
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        (
+            "  pull_request:\n"
+            "    - workflows: [quality-checks]\n"
+            "      filter:\n"
+            '        target_branches: ["**"]\n'
+            "    - {workflows: [quality-checks, publish-contracts], "
+            'filter: {target_branches: ["**"]}}'
+        ),
+        (
+            "  pull_request:\n"
+            "    - workflows: [quality-checks]\n"
+            "      filter:\n"
+            '        target_branches: ["**"]\n'
+            "    - {workflows: [publish-contracts], "
+            'filter: {target_branches: ["**"]}}'
+        ),
+        "  pull_request: [publish-contracts]",
+        "  pull_request: publish-contracts",
+    ],
+)
+def test_sourcecraft_rejects_release_workflows_in_pull_request(
+    guard: ModuleType, sourcecraft_text: str, replacement: str
+) -> None:
+    original = (
+        "  pull_request:\n"
+        "    - workflows: [quality-checks]\n"
+        "      filter:\n"
+        '        target_branches: ["**"]'
+    )
+    text = sourcecraft_text.replace(original, replacement, 1)
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "pull_request entry" in violations
+    assert "publish-contracts" in violations
+
+
+def test_sourcecraft_rejects_a_bare_dash_release_pull_request_entry(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "\n  pull_request:\n    - workflows: [quality-checks]",
+        (
+            "\n  pull_request:\n"
+            "    - workflows: [quality-checks]\n"
+            "      filter:\n"
+            '        target_branches: ["**"]\n'
+            "    -\n"
+            "      workflows: [sync-to-github]\n"
+            "      filter:\n"
+            '        target_branches: ["**"]'
+        ),
+        1,
+    )
+    assert text != sourcecraft_text
+    text = messages(guard.check_sourcecraft_ci(text))
+    assert "pull_request entry" in text
+    assert "sync-to-github" in text
+
+
+def test_sourcecraft_rejects_a_needs_dash_that_allows_parallel_tasks(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_needs(workflow: dict[str, object]) -> None:
+        workflow["tasks"][0]["needs"] = ["-"]  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_needs)
+    assert 'needs: ["-"]' in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_parallel_tasks_without_needs(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = mutate_publish_workflow(sourcecraft_text, split_publish_tasks)
+    assert "order is invalid" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_accepts_a_chained_split_task_sequence(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def split(workflow: dict[str, object]) -> None:
+        split_publish_tasks(workflow, needs=["gates"])
+
+    text = mutate_publish_workflow(sourcecraft_text, split)
+    assert guard.check_sourcecraft_ci(text) == []
+
+
+def test_sourcecraft_rejects_a_reordered_task_chain(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def split(workflow: dict[str, object]) -> None:
+        cubes = workflow["tasks"][0]["cubes"]  # type: ignore[index]
+        by_name = {cube["name"]: cube for cube in cubes}
+        workflow["tasks"] = [
+            {
+                "name": "gates",
+                "cubes": [
+                    by_name["preflight"],
+                    by_name["quality-gates"],
+                    by_name["build-and-verify"],
+                ],
+            },
+            {
+                "name": "verify",
+                "cubes": [by_name["verify-from-registry"]],
+                "needs": ["gates"],
+            },
+            {"name": "upload", "cubes": [by_name["publish"]], "needs": ["verify"]},
+        ]
+
+    text = mutate_publish_workflow(sourcecraft_text, split)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "verify-from-registry" in violations
+    assert "publish" in violations
+
+
+def test_sourcecraft_rejects_an_unknown_task_need(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_needs(workflow: dict[str, object]) -> None:
+        workflow["tasks"][0]["needs"] = ["missing-task"]  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_needs)
+    assert "unknown task" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_a_cyclic_task_need(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def split(workflow: dict[str, object]) -> None:
+        split_publish_tasks(workflow)
+        workflow["tasks"][0]["needs"] = ["upload"]  # type: ignore[index]
+        workflow["tasks"][1]["needs"] = ["gates"]  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, split)
+    assert "cyclic" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_an_unknown_cube_need(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_cube_needs(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "publish")
+        cube["needs"] = ["missing-cube"]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_cube_needs)
+    assert "unknown cube" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("cube-allow-failure", "allow_failure"),
+        ("cube-if", "conditional"),
+        ("task-allow-failure", "allow_failure"),
+        ("task-if", "conditional"),
+    ],
+)
+def test_sourcecraft_rejects_neutralized_release_cubes(
+    guard: ModuleType, sourcecraft_text: str, mutation: str, expected: str
+) -> None:
+    def apply(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        if mutation == "cube-allow-failure":
+            cube["allow_failure"] = True
+        elif mutation == "cube-if":
+            cube["if"] = "false"
+        elif mutation == "task-allow-failure":
+            workflow["tasks"][0]["allow_failure"] = True  # type: ignore[index]
+        else:
+            workflow["tasks"][0]["if"] = "false"  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, apply)
+    assert expected in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            'echo "python3.11 scripts/check_contract_boundaries.py"',
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            'printf "%s\\n" "python3.11 scripts/check_contract_boundaries.py"',
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "python3.11 scripts/check_contract_boundaries.py || true",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "python3.11 scripts/check_contract_boundaries.py; true",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "python3.11 scripts/check_contract_boundaries.py && true",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "! python3.11 scripts/check_contract_boundaries.py",
+        ),
+        (
+            'set -e\n                echo "═══════════════════════════════════════════════════════════════"\n                echo "  RELEASE GATES',
+            'set +e\n                echo "═══════════════════════════════════════════════════════════════"\n                echo "  RELEASE GATES',
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "if false; then\n                  python3.11 scripts/check_contract_boundaries.py\n                fi",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "cat <<EOF\n                python3.11 scripts/check_contract_boundaries.py\n                EOF",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "python3.11 scripts/check_contract_boundaries.py || exit 0",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            'python3.11 scripts/check_contract_boundaries.py || echo "skipped"',
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "python3.11 scripts/check_contract_boundaries.py ||\n                  true",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "false && python3.11 scripts/check_contract_boundaries.py",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            "true python3.11 scripts/check_contract_boundaries.py",
+        ),
+        (
+            "python3.11 scripts/check_contract_boundaries.py",
+            ": python3.11 scripts/check_contract_boundaries.py",
+        ),
+    ],
+)
+def test_sourcecraft_rejects_neutralized_gate_commands(
+    guard: ModuleType, sourcecraft_text: str, old: str, new: str
+) -> None:
+    assert old in sourcecraft_text
+    mutated = inside(sourcecraft_text, "  publish-contracts:\n", old, new)
+    assert mutated != sourcecraft_text
+    assert guard.check_sourcecraft_ci(mutated)
+
+
+def test_sourcecraft_rejects_the_pat_at_workflow_level(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        'SOURCECRAFT_PYPI_REGISTRY_ID: ""',
+        f'SOURCECRAFT_PYPI_REGISTRY_ID: ""\n      PYPI_REGISTRY_PAT: {PAT_SECRET}',
+    )
+    assert "workflow level" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "cube_name", ["setup", "quality-gates", "build-and-verify", "preflight"]
+)
+def test_sourcecraft_rejects_the_pat_outside_publication_cubes(
+    guard: ModuleType, sourcecraft_text: str, cube_name: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, cube_name)
+        env = cube.setdefault("env", {})
+        assert isinstance(env, dict)
+        env["PYPI_REGISTRY_PAT"] = PAT_SECRET
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    assert "PYPI_REGISTRY_PAT" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_the_pat_at_task_level(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        workflow["tasks"][0]["env"] = {"PYPI_REGISTRY_PAT": PAT_SECRET}  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    assert "task" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_requires_the_pat_on_registry_installation(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "          - name: verify-from-registry\n"
+        "            env:\n"
+        f"              PYPI_REGISTRY_PAT: {PAT_SECRET}\n",
+        "          - name: verify-from-registry\n",
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "verify-from-registry" in violations
+    assert "PYPI_REGISTRY_PAT" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_guard_accepts_the_pat_only_on_publishing_cubes(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    workflow = publish_workflow(document)
+    for cube_name in ("setup", "quality-gates", "build-and-verify", "preflight"):
+        assert "PYPI_REGISTRY_PAT" not in find_cube(workflow, cube_name).get("env", {})
+    for cube_name in ("publish", "verify-from-registry"):
+        cube = find_cube(workflow, cube_name)
+        assert cube["env"] == {"PYPI_REGISTRY_PAT": PAT_SECRET}
+
+
+def test_sourcecraft_requires_the_full_tag_ref_in_preflight(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        '                  --ref "${SOURCECRAFT_COMMIT_REF}" \\\n',
+        "",
+    )
+    assert '--ref "${SOURCECRAFT_COMMIT_REF}"' in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+def test_sourcecraft_requires_a_failing_tag_check_before_publish(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        """                python3.11 scripts/contract_release.py check-tag \\
+                  --ref "${SOURCECRAFT_COMMIT_REF}" \\
+                  --tag "${SOURCECRAFT_COMMIT_REF_NAME}" \\
+                  --pyproject automl-contracts/pyproject.toml
+""",
+        """                if git tag --points-at HEAD | grep -q "^contracts-v"; then
+                  echo "publishing"
+                fi
+""",
+    )
+    assert "advisory" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_requires_consumer_e2e_before_publish(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        '"$REPO_DIR/scripts/e2e_contract_consumer.py"',
+        '"$REPO_DIR/scripts/removed-consumer.py"',
+    )
+    assert "e2e_contract_consumer.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_a_nested_list_pull_request_entry(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    original = (
+        "  pull_request:\n"
+        "    - workflows: [quality-checks]\n"
+        "      filter:\n"
+        '        target_branches: ["**"]'
+    )
+    text = sourcecraft_text.replace(
+        original,
+        (original + "\n    - [publish-contracts]"),
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "nested workflow list" in violations
+    assert "publish-contracts" in violations
+
+
+def test_sourcecraft_rejects_a_pull_request_entry_without_workflows(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    original = (
+        "  pull_request:\n"
+        "    - workflows: [quality-checks]\n"
+        "      filter:\n"
+        '        target_branches: ["**"]'
+    )
+    text = sourcecraft_text.replace(
+        original,
+        (original + '\n    - filter:\n        target_branches: ["**"]'),
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "pull_request entry" in violations
+    assert "all workflows" in violations
+
+
+def test_sourcecraft_rejects_release_workflows_on_schedule(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "\n  pull_request:",
+        (
+            "\n  schedule:\n"
+            "    - workflows: [publish-contracts]\n"
+            "      interval: 1h\n"
+            "\n  pull_request:"
+        ),
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "schedule" in violations
+    assert "publish-contracts" in violations
+
+
+def test_sourcecraft_rejects_release_workflows_on_an_event_trigger(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "\n  pull_request:",
+        (
+            "\n  issue_comment.create:\n"
+            "    - workflows: [sync-to-github]\n"
+            "\n  pull_request:"
+        ),
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "issue_comment.create" in violations
+    assert "sync-to-github" in violations
+
+
+def test_sourcecraft_rejects_an_all_workflows_push_entry(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "  push:\n",
+        "  push:\n    - filter:\n        branches: [main]\n",
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "push entry" in violations
+    assert "all workflows" in violations
+
+
+def test_sourcecraft_accepts_elif_in_a_gate_script(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    block = (
+        'if [ -z "$X" ]; then\n'
+        "                  echo empty\n"
+        '                elif [ "$X" = 1 ]; then\n'
+        "                  python3.11 scripts/check_contract_boundaries.py\n"
+        "                fi"
+    )
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        "python3.11 scripts/check_contract_boundaries.py",
+        block,
+    )
+    assert guard.check_sourcecraft_ci(text) == []
+
+
+def test_sourcecraft_accepts_set_o_errexit_in_a_gate_script(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def replace_set_e(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["script"] = [cube_script(cube).replace("set -e", "set -o errexit", 1)]
+
+    text = mutate_publish_workflow(sourcecraft_text, replace_set_e)
+    assert guard.check_sourcecraft_ci(text) == []
+
+
+def test_sourcecraft_rejects_the_pat_at_document_level(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    document["env"] = {"PYPI_REGISTRY_PAT": PAT_SECRET}
+    text = dump_document(document)
+    assert "document level" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "gate() {\n  python3.11 scripts/check_contract_boundaries.py\n}",
+        "gate() { python3.11 scripts/check_contract_boundaries.py; }",
+        "function gate { python3.11 scripts/check_contract_boundaries.py; }",
+    ],
+)
+def test_sourcecraft_rejects_a_gate_declared_only_in_a_function(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    def replace_gate(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["script"] = [script]
+
+    text = mutate_publish_workflow(sourcecraft_text, replace_gate)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "check_contract_boundaries.py" in violations
+
+
+def test_sourcecraft_rejects_a_backgrounded_gate(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def background(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["script"] = [
+            cube_script(cube).replace(
+                "python3.11 scripts/check_contract_boundaries.py",
+                "python3.11 scripts/check_contract_boundaries.py &",
+            )
+        ]
+
+    text = mutate_publish_workflow(sourcecraft_text, background)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "python3.11 scripts/check_contract_boundaries.py\nset -e",
+        "set -e\nset +e\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\nset +o errexit\npython3.11 scripts/check_contract_boundaries.py",
+        "if false; then\n  set -e\nfi\npython3.11 scripts/check_contract_boundaries.py",
+    ],
+)
+def test_sourcecraft_requires_effective_errexit_before_the_gate(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    def replace_gate(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["script"] = [script]
+
+    text = mutate_publish_workflow(sourcecraft_text, replace_gate)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "set -e" in violations or "set +e" in violations
+
+
+def test_sourcecraft_requires_ref_and_check_tag_in_the_same_command(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    marker = '                  --ref "${SOURCECRAFT_COMMIT_REF}" \\\n'
+    noop = '                true --ref "${SOURCECRAFT_COMMIT_REF}"\n'
+    text = sourcecraft_text.replace(marker, "", 1)
+    text = text.replace(
+        "                python3.11 scripts/contract_release.py show-endpoints",
+        noop + "                python3.11 scripts/contract_release.py show-endpoints",
+        1,
+    )
+    assert text != sourcecraft_text
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "--ref" in violations
+    assert "check-tag" in violations
+
+
+def test_sourcecraft_inspects_a_string_task_reference(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    workflow = publish_workflow(document)
+    document["tasks"] = [
+        {
+            "name": "extra",
+            "cubes": [
+                {
+                    "name": "publish-again",
+                    "script": [
+                        "set -e",
+                        (
+                            "python3.11 scripts/contract_release.py publish "
+                            "--dist automl-contracts/dist "
+                            "--expected-version 0.1.0"
+                        ),
+                    ],
+                }
+            ],
+        }
+    ]
+    workflow["tasks"].append("extra")  # type: ignore[union-attr]
+    text = dump_document(document)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "publish-again" in violations
+    assert "runs the uploader" in violations
+
+
+def test_sourcecraft_accepts_a_valid_string_task_reference(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    workflow = publish_workflow(document)
+    inline = workflow["tasks"][0]  # type: ignore[index]
+    document["tasks"] = [inline]
+    workflow["tasks"] = ["contracts-release"]
+    text = dump_document(document)
+    assert guard.check_sourcecraft_ci(text) == []
