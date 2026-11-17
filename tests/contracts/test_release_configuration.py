@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -64,6 +65,31 @@ def inside(text: str, block: str, old: str, new: str, *, count: int = 1) -> str:
     head, tail = text[:start], text[start:]
     assert old in tail, (block, old)
     return head + tail.replace(old, new, count)
+
+
+REGISTRY_ID_LINE = re.compile(r"^[ \t]*SOURCECRAFT_PYPI_REGISTRY_ID:.*$", re.MULTILINE)
+
+
+def replace_publish_registry_id(text: str, value: str) -> str:
+    """Set the registry identifier of the publish workflow to ``value``."""
+    start = text.index("  publish-contracts:\n")
+    head, tail = text[:start], text[start:]
+    replaced, count = REGISTRY_ID_LINE.subn(
+        f'      SOURCECRAFT_PYPI_REGISTRY_ID: "{value}"', tail, count=1
+    )
+    assert count == 1, "publish-contracts has no registry identifier"
+    return head + replaced
+
+
+def append_to_publish_registry_env(text: str, line: str) -> str:
+    """Insert ``line`` right after the publish workflow registry identifier."""
+    start = text.index("  publish-contracts:\n")
+    head, tail = text[:start], text[start:]
+    replaced, count = REGISTRY_ID_LINE.subn(
+        lambda match: f"{match.group(0)}\n{line}", tail, count=1
+    )
+    assert count == 1, "publish-contracts has no registry identifier"
+    return head + replaced
 
 
 def load_document(text: str) -> dict[str, object]:
@@ -353,12 +379,7 @@ def test_sourcecraft_publication_requires_each_gate(
 def test_sourcecraft_accepts_a_configured_registry_id(
     guard: ModuleType, sourcecraft_text: str
 ) -> None:
-    text = inside(
-        sourcecraft_text,
-        "  publish-contracts:\n",
-        'SOURCECRAFT_PYPI_REGISTRY_ID: ""',
-        'SOURCECRAFT_PYPI_REGISTRY_ID: "registry123"',
-    )
+    text = replace_publish_registry_id(sourcecraft_text, "registry123")
     assert guard.check_sourcecraft_ci(text) == []
 
 
@@ -860,11 +881,8 @@ def test_sourcecraft_rejects_neutralized_gate_commands(
 def test_sourcecraft_rejects_the_pat_at_workflow_level(
     guard: ModuleType, sourcecraft_text: str
 ) -> None:
-    text = inside(
-        sourcecraft_text,
-        "  publish-contracts:\n",
-        'SOURCECRAFT_PYPI_REGISTRY_ID: ""',
-        f'SOURCECRAFT_PYPI_REGISTRY_ID: ""\n      PYPI_REGISTRY_PAT: {PAT_SECRET}',
+    text = append_to_publish_registry_env(
+        sourcecraft_text, f"      PYPI_REGISTRY_PAT: {PAT_SECRET}"
     )
     assert "workflow level" in messages(guard.check_sourcecraft_ci(text))
 
