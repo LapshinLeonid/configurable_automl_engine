@@ -23,7 +23,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_ROOT = REPO_ROOT / "automl-contracts"
@@ -660,6 +660,9 @@ def _remove_alias_target(target: ast.AST, aliases: dict[str, str]) -> None:
         aliases.pop(dotted, None)
 
 
+_FLAT_SHADOWED_RANGE = "<shadowed-range>"
+
+
 def _bind_alias_target(
     target: ast.AST, value: ast.AST | None, aliases: dict[str, str]
 ) -> None:
@@ -680,7 +683,10 @@ def _bind_alias_target(
         _clear_index_aliases(name, aliases)
         resolved = _assigned_alias_value(value, aliases) if value is not None else None
         if resolved is None:
-            aliases.pop(name, None)
+            if name == "range":
+                aliases[name] = _FLAT_SHADOWED_RANGE
+            else:
+                aliases.pop(name, None)
         else:
             aliases[name] = resolved
         if value is not None:
@@ -745,10 +751,16 @@ def _walk_alias_scope(
     function_arguments: dict[str, dict[str, str]] | None = None,
 ) -> bool:
     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        aliases.pop(statement.name, None)
+        if statement.name == "range":
+            aliases[statement.name] = _FLAT_SHADOWED_RANGE
+        else:
+            aliases.pop(statement.name, None)
         local = dict(aliases)
         for parameter in _function_parameters(statement):
-            local.pop(parameter.arg, None)
+            if parameter.arg == "range":
+                local[parameter.arg] = _FLAT_SHADOWED_RANGE
+            else:
+                local.pop(parameter.arg, None)
             _clear_index_aliases(parameter.arg, local)
         for parameter_name, resolved in (
             (function_arguments or {}).get(statement.name, {}).items()
@@ -768,6 +780,8 @@ def _walk_alias_scope(
     if isinstance(statement, ast.ClassDef):
         aliases.pop(statement.name, None)
         walk(statement.body, dict(aliases))
+        if statement.name == "range":
+            aliases[statement.name] = _FLAT_SHADOWED_RANGE
         return True
     return False
 
@@ -839,17 +853,59 @@ def _statements_escape_loop(statements: Sequence[ast.stmt]) -> bool:
     return False
 
 
+def _statement_breaks_loop(statement: ast.stmt) -> bool:
+    if isinstance(statement, ast.Break):
+        return True
+    if isinstance(statement, ast.If):
+        return _statements_break_loop(statement.body) or _statements_break_loop(
+            statement.orelse
+        )
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return _statements_break_loop(statement.body)
+    if isinstance(statement, (ast.Try, ast.TryStar)):
+        groups = [statement.body, statement.orelse, statement.finalbody]
+        groups.extend(handler.body for handler in statement.handlers)
+        return any(_statements_break_loop(group) for group in groups)
+    if isinstance(statement, ast.Match):
+        return any(_statements_break_loop(case.body) for case in statement.cases)
+    return False
+
+
+def _statements_break_loop(statements: Sequence[ast.stmt]) -> bool:
+    for statement in statements:
+        if isinstance(statement, (ast.Return, ast.Raise)):
+            return False
+        if _statement_breaks_loop(statement):
+            return True
+    return False
+
+
 def _walk_loop_aliases(
     statement: ast.For | ast.AsyncFor | ast.While,
     aliases: dict[str, str],
     walk: FlatAliasWalk,
 ) -> bool:
     body = dict(aliases)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        for name in _iter_target_names(statement.target):
+            if name.id == "range":
+                body[name.id] = _FLAT_SHADOWED_RANGE
+            else:
+                body.pop(name.id, None)
+            _clear_index_aliases(name.id, body)
     body_reachable = walk(statement.body, body)
     orelse = dict(aliases)
     walk(statement.orelse, orelse)
     escapes = _statements_escape_loop(statement.body)
-    branches = [body, orelse] if body_reachable or escapes else [orelse]
+    guaranteed_entry = isinstance(statement, ast.For) and (
+        _iterable_guaranteed_nonempty(
+            statement.iter, allow_range="range" not in aliases
+        )
+    )
+    if guaranteed_entry and not statement.orelse:
+        branches = [body]
+    else:
+        branches = [body, orelse] if body_reachable or escapes else [orelse]
     _merge_flat_alias_branches(aliases, branches)
     return True
 
@@ -882,7 +938,10 @@ def _walk_try_aliases(
     for handler in statement.handlers:
         branch = dict(aliases)
         if handler.name is not None:
-            branch.pop(handler.name, None)
+            if handler.name == "range":
+                branch[handler.name] = _FLAT_SHADOWED_RANGE
+            else:
+                branch.pop(handler.name, None)
         reachable = bool(walk(handler.body, branch))
         all_branches.append(branch)
         reachable_flags.append(reachable)
@@ -908,7 +967,10 @@ def _walk_match_aliases(
     for case in statement.cases:
         branch = dict(aliases)
         for name in _pattern_capture_names(case.pattern):
-            branch.pop(name, None)
+            if name == "range":
+                branch[name] = _FLAT_SHADOWED_RANGE
+            else:
+                branch.pop(name, None)
         reachable = bool(walk(case.body, branch))
         all_branches.append(branch)
         if reachable:
@@ -2513,6 +2575,21 @@ def _iter_for_calls(
     yield from _iter_calls_with_aliases(
         stmt.orelse, orelse, orelse_paths, global_aliases
     )
+    shadowed_range = (
+        isinstance(stmt.iter, ast.Call)
+        and isinstance(stmt.iter.func, ast.Name)
+        and stmt.iter.func.id == "range"
+        and "range" in aliases
+    )
+    if (
+        _iterable_guaranteed_nonempty(stmt.iter)
+        and not shadowed_range
+        and not stmt.orelse
+    ):
+        aliases.clear()
+        aliases.update(inner)
+        _replace_path_names(path_names, inner_paths)
+        return
     _merge_alias_sets(aliases, inner, orelse)
     _replace_path_names(path_names, inner_paths | orelse_paths)
 
@@ -5824,6 +5901,10 @@ class _ElementScope:
     definitely_rebound: set[str] = field(default_factory=set)
     reachable: bool = True
     escapes_loop: bool = False
+    escape_kind: str | None = None
+    bound_names: set[str] = field(default_factory=set)
+    class_bound_names: set[str] = field(default_factory=set)
+    is_class_scope: bool = False
 
     def clone(self) -> _ElementScope:
         return _ElementScope(
@@ -5845,6 +5926,10 @@ class _ElementScope:
             definitely_rebound=set(self.definitely_rebound),
             reachable=self.reachable,
             escapes_loop=self.escapes_loop,
+            escape_kind=self.escape_kind,
+            bound_names=set(self.bound_names),
+            class_bound_names=set(self.class_bound_names),
+            is_class_scope=self.is_class_scope,
         )
 
 
@@ -5973,6 +6058,10 @@ def _copy_scope_state(target: _ElementScope, source: _ElementScope) -> None:
     target.definitely_rebound = source.definitely_rebound
     target.reachable = source.reachable
     target.escapes_loop = source.escapes_loop
+    target.escape_kind = source.escape_kind
+    target.bound_names = source.bound_names
+    target.class_bound_names = source.class_bound_names
+    target.is_class_scope = source.is_class_scope
 
 
 def _merge_scope_shadowed(branches: Sequence[_ElementScope]) -> set[str]:
@@ -5987,13 +6076,6 @@ def _mark_definite_rebinding(target: ast.AST, scope: _ElementScope) -> None:
         scope.definitely_rebound.add(name.id)
         scope.identity_aliases.pop(name.id, None)
         scope.shadowed_identities.add(name.id)
-
-
-def _mark_definite_names(names: Iterable[str], scope: _ElementScope) -> None:
-    for name in names:
-        scope.definitely_rebound.add(name)
-        scope.identity_aliases.pop(name, None)
-        scope.shadowed_identities.add(name)
 
 
 def _pattern_capture_names(pattern: ast.AST) -> set[str]:
@@ -6013,6 +6095,56 @@ def _pattern_is_irrefutable(pattern: ast.AST) -> bool:
     if isinstance(pattern, ast.MatchOr):
         return any(_pattern_is_irrefutable(item) for item in pattern.patterns)
     return False
+
+
+_MapKey = TypeVar("_MapKey")
+_MapValue = TypeVar("_MapValue")
+_SetValue = TypeVar("_SetValue")
+
+
+def _iterable_guaranteed_nonempty(
+    value: ast.AST,
+    scope: _ElementScope | None = None,
+    *,
+    allow_range: bool = True,
+) -> bool:
+    """Return whether a literal iterable always yields at least one element."""
+    if isinstance(value, (ast.List, ast.Set)):
+        return any(not isinstance(element, ast.Starred) for element in value.elts)
+    if isinstance(value, ast.Tuple):
+        return any(not isinstance(element, ast.Starred) for element in value.elts)
+    if isinstance(value, ast.Dict):
+        return any(key is not None for key in value.keys)
+    if isinstance(value, ast.Constant) and isinstance(value.value, (str, bytes)):
+        return bool(value.value)
+    if not (
+        allow_range
+        and isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id == "range"
+        and (
+            scope is None
+            or not ("range" in scope.bound_names or "range" in scope.class_bound_names)
+        )
+        and not value.keywords
+        and 1 <= len(value.args) <= 3
+    ):
+        return False
+    constants: list[int] = []
+    for argument in value.args:
+        if not isinstance(argument, ast.Constant) or not isinstance(
+            argument.value, int
+        ):
+            return False
+        constants.append(int(argument.value))
+    if len(constants) == 1:
+        return constants[0] > 0
+    step = constants[2] if len(constants) == 3 else 1
+    if step == 0:
+        return False
+    if step > 0:
+        return constants[0] < constants[1]
+    return constants[0] > constants[1]
 
 
 def _is_docstring(statement: ast.stmt) -> bool:
@@ -6196,6 +6328,8 @@ class _ElementAnalysis:
         self.instance_alias_nodes: dict[int, str] = {}
         self.instance_constructor_nodes: dict[int, frozenset[_ConstructorBinding]] = {}
         self.invalid_nodes: dict[int, frozenset[str]] = {}
+        self._escape_sinks: list[list[_ElementScope]] = []
+        self._record_enabled = True
 
     def run(self, tree: ast.Module) -> None:
         self.visit(tree.body, _ElementScope(), None)
@@ -6570,6 +6704,8 @@ class _ElementAnalysis:
         source: str = "literal",
     ) -> None:
         was_class = name in self.attributes or name in scope.class_aliases
+        self._bind_scope_name(scope, name)
+        scope.definitely_rebound.discard(name)
         scope.class_aliases.pop(name, None)
         scope.instance_aliases.pop(name, None)
         scope.instance_constructors.pop(name, None)
@@ -6591,6 +6727,7 @@ class _ElementAnalysis:
             scope.invalid_classes.add(name)
 
     def store_class_alias(self, name: str, owner: str, scope: _ElementScope) -> None:
+        self._bind_scope_name(scope, name)
         scope.aliases.pop(name, None)
         scope.containers.pop(name, None)
         scope.container_sources.pop(name, None)
@@ -6723,13 +6860,20 @@ class _ElementAnalysis:
                 return
         identity_name = self._binding_identity_name(value, target.id, scope)
         instance_classes = self._instance_classes(value, scope, class_name)
+        preserved_constructors = (
+            scope.instance_constructors.get(value.id)
+            if isinstance(value, ast.Name) and value.id == target.id
+            else None
+        )
         container, source = self.container_of(value, scope, class_name)
         if container is not None:
             self.store(target.id, None, container, scope, source)
             if instance_classes:
                 scope.instance_aliases[target.id] = instance_classes
-                constructors = self._constructor_bindings(
-                    value, instance_classes, scope
+                constructors = (
+                    preserved_constructors
+                    if preserved_constructors is not None
+                    else self._constructor_bindings(value, instance_classes, scope)
                 )
                 if constructors:
                     scope.instance_constructors[target.id] = constructors
@@ -6750,11 +6894,37 @@ class _ElementAnalysis:
         self.store(target.id, element, None, scope)
         if instance_classes:
             scope.instance_aliases[target.id] = instance_classes
-            constructors = self._constructor_bindings(value, instance_classes, scope)
+            constructors = (
+                preserved_constructors
+                if preserved_constructors is not None
+                else self._constructor_bindings(value, instance_classes, scope)
+            )
             if constructors:
                 scope.instance_constructors[target.id] = constructors
         if identity_name is not None:
             scope.identity_aliases[target.id] = identity_name
+
+    def _bind_loop_literal_target(
+        self,
+        target: ast.AST,
+        value: ast.AST,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> None:
+        if isinstance(target, ast.Name):
+            self._bind_literal_loop_name(target, value, scope, class_name)
+            return
+        if (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+        ):
+            for element_target, element_value in zip(target.elts, value.elts):
+                self._bind_loop_literal_target(
+                    element_target, element_value, scope, class_name
+                )
+            return
+        self.bind_target(target, value, scope, class_name)
 
     def _bind_unpacked_iterable(
         self,
@@ -6762,24 +6932,44 @@ class _ElementAnalysis:
         samples: Sequence[ast.AST] | None,
         scope: _ElementScope,
         class_name: str | None,
+        *,
+        final_iteration_only: bool = False,
     ) -> bool:
         if not isinstance(target, (ast.Tuple, ast.List)) or not samples:
             return False
         if not all(isinstance(sample, (ast.Tuple, ast.List)) for sample in samples):
             return False
-        columns: dict[int, list[str]] = {}
-        for sample in samples:
+        selected_samples = samples[-1:] if final_iteration_only else samples
+        candidate_scopes: list[_ElementScope] = []
+        for sample in selected_samples:
             if not isinstance(sample, (ast.Tuple, ast.List)):
                 continue
-            for index, element in enumerate(sample.elts):
-                resolved = self.value_of(element, scope, class_name)
-                if resolved is not None:
-                    columns.setdefault(index, []).append(resolved)
-        for index, element_target in enumerate(target.elts):
-            candidates = columns.get(index, [])
-            resolved_element = _pick_candidate(candidates) if candidates else None
-            self._bind_resolved_target(element_target, resolved_element, scope)
+            candidate = scope.clone()
+            self._bind_loop_literal_target(target, sample, candidate, class_name)
+            candidate_scopes.append(candidate)
+        if not candidate_scopes:
+            return False
+        self._merge(scope, candidate_scopes, collect_exits=False)
         return True
+
+    def _bind_literal_loop_name(
+        self,
+        target: ast.Name,
+        value: ast.AST,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> None:
+        self.bind_target(target, value, scope, class_name)
+        if (
+            isinstance(value, ast.Name)
+            and target.id not in scope.identity_aliases
+            and target.id not in scope.class_aliases
+            and target.id not in scope.instance_aliases
+            and target.id not in scope.containers
+        ):
+            resolved = self.value_of(value, scope, class_name)
+            if resolved is not None:
+                scope.aliases[target.id] = resolved
 
     def bind_loop(
         self,
@@ -6787,7 +6977,29 @@ class _ElementAnalysis:
         iterable: ast.AST,
         scope: _ElementScope,
         class_name: str | None,
+        *,
+        final_iteration_only: bool = False,
     ) -> None:
+        if isinstance(target, ast.Name) and isinstance(
+            iterable, (ast.List, ast.Tuple, ast.Set)
+        ):
+            literal_elements = iterable.elts
+            if literal_elements and all(
+                not isinstance(element, ast.Starred) for element in literal_elements
+            ):
+                ordered_literal = isinstance(iterable, (ast.List, ast.Tuple))
+                selected_elements = (
+                    literal_elements[-1:]
+                    if final_iteration_only and ordered_literal
+                    else literal_elements
+                )
+                candidate_scopes: list[_ElementScope] = []
+                for element in selected_elements:
+                    candidate = scope.clone()
+                    self._bind_literal_loop_name(target, element, candidate, class_name)
+                    candidate_scopes.append(candidate)
+                self._merge(scope, candidate_scopes, collect_exits=False)
+                return
         if (
             isinstance(iterable, ast.Call)
             and isinstance(iterable.func, ast.Attribute)
@@ -6799,17 +7011,25 @@ class _ElementAnalysis:
             elements = self.elements_of(iterable, scope, class_name)
             self.bind_iterated(target.elts[1], elements, scope)
             return
-        columns = self.columns_of(iterable, scope, class_name)
-        if isinstance(target, (ast.Tuple, ast.List)) and columns:
-            for index, element_target in enumerate(target.elts):
-                candidates = columns.get(index, [])
-                element = _pick_candidate(candidates) if candidates else None
-                self._bind_resolved_target(element_target, element, scope)
-            return
         samples = (
             list(iterable.elts) if isinstance(iterable, (ast.List, ast.Tuple)) else None
         )
-        if self._bind_unpacked_iterable(target, samples, scope, class_name):
+        if self._bind_unpacked_iterable(
+            target,
+            samples,
+            scope,
+            class_name,
+            final_iteration_only=final_iteration_only,
+        ):
+            return
+        columns = self.columns_of(iterable, scope, class_name)
+        if isinstance(target, (ast.Tuple, ast.List)) and columns:
+            for index, element_target in enumerate(target.elts):
+                column_candidates = columns.get(index, [])
+                resolved_element = (
+                    _pick_candidate(column_candidates) if column_candidates else None
+                )
+                self._bind_resolved_target(element_target, resolved_element, scope)
             return
         self.bind_iterated(target, self.elements_of(iterable, scope, class_name), scope)
 
@@ -6911,6 +7131,8 @@ class _ElementAnalysis:
     def record(
         self, node: ast.AST, scope: _ElementScope, class_name: str | None
     ) -> None:
+        if not self._record_enabled:
+            return
         self.invalid_nodes[id(node)] = frozenset(scope.invalid_classes)
         if isinstance(
             node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -6950,38 +7172,179 @@ class _ElementAnalysis:
             for target in targets:
                 self._bind_resolved_target(target, None, scope)
             return True
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                name = alias.asname or alias.name.split(".")[0]
+                self._bind_scope_name(scope, name)
+                scope.aliases.pop(name, None)
+            return True
         return False
+
+    @staticmethod
+    def _bind_scope_name(scope: _ElementScope, name: str) -> None:
+        if scope.is_class_scope:
+            scope.class_bound_names.add(name)
+        else:
+            scope.bound_names.add(name)
+
+    @staticmethod
+    def _normalized_exit(
+        scope: _ElementScope, kind: str | None = None
+    ) -> _ElementScope:
+        exit_scope = scope.clone()
+        exit_scope.reachable = True
+        exit_scope.escapes_loop = False
+        exit_scope.escape_kind = kind if kind is not None else scope.escape_kind
+        return exit_scope
+
+    def _append_loop_exit(self, scope: _ElementScope) -> None:
+        if not self._escape_sinks:
+            return
+        exit_scope = scope.clone()
+        exit_scope.reachable = True
+        exit_scope.escapes_loop = False
+        self._escape_sinks[-1].append(exit_scope)
+
+    def _copy_target_state(
+        self, scope: _ElementScope, source: _ElementScope, target: ast.AST
+    ) -> None:
+        for name_node in _iter_target_names(target):
+            name = name_node.id
+            self._copy_name_scalar(scope.aliases, source.aliases, name)
+            self._copy_name_scalar(scope.class_aliases, source.class_aliases, name)
+            self._copy_name_map(scope.containers, source.containers, name)
+            self._copy_name_scalar(
+                scope.container_sources, source.container_sources, name
+            )
+            self._copy_name_map(scope.container_columns, source.container_columns, name)
+            self._copy_name_set(scope.instance_aliases, source.instance_aliases, name)
+            self._copy_name_set(
+                scope.instance_constructors, source.instance_constructors, name
+            )
+            self._copy_name_scalar(
+                scope.identity_aliases, source.identity_aliases, name
+            )
+            if name in source.invalid_classes:
+                scope.invalid_classes.add(name)
+            else:
+                scope.invalid_classes.discard(name)
+            if name in source.shadowed_identities:
+                scope.shadowed_identities.add(name)
+            else:
+                scope.shadowed_identities.discard(name)
+            if name in source.definitely_rebound:
+                scope.definitely_rebound.add(name)
+            else:
+                scope.definitely_rebound.discard(name)
+
+    @staticmethod
+    def _copy_name_scalar(
+        target: dict[str, str], source: dict[str, str], name: str
+    ) -> None:
+        value = source.get(name)
+        if value is None:
+            target.pop(name, None)
+        else:
+            target[name] = value
+
+    @staticmethod
+    def _copy_name_map(
+        target: dict[str, dict[_MapKey, _MapValue]],
+        source: dict[str, dict[_MapKey, _MapValue]],
+        name: str,
+    ) -> None:
+        value = source.get(name)
+        if value is None:
+            target.pop(name, None)
+        else:
+            target[name] = dict(value)
+
+    @staticmethod
+    def _copy_name_set(
+        target: dict[str, frozenset[_SetValue]],
+        source: dict[str, frozenset[_SetValue]],
+        name: str,
+    ) -> None:
+        value = source.get(name)
+        if value is None:
+            target.pop(name, None)
+        else:
+            target[name] = value
+
+    def _copy_guaranteed_target_state(
+        self,
+        scope: _ElementScope,
+        target: ast.AST,
+        sources: Sequence[_ElementScope],
+    ) -> None:
+        if not sources:
+            return
+        target_names = {name.id for name in _iter_target_names(target)}
+        clean_sources: list[_ElementScope] = []
+        for source in sources:
+            clean = source.clone()
+            clean.definitely_rebound -= target_names
+            clean_sources.append(clean)
+        target_source = clean_sources[0].clone()
+        self._merge(target_source, clean_sources, collect_exits=False)
+        self._copy_target_state(scope, target_source, target)
+        scope.definitely_rebound.update(target_names)
+
+    def _collect_loop_exits(self, branches: Sequence[_ElementScope]) -> None:
+        if not self._escape_sinks:
+            return
+        for branch in branches:
+            if branch.escapes_loop:
+                self._append_loop_exit(branch)
 
     def _merge(
         self,
         scope: _ElementScope,
         branches: Sequence[_ElementScope],
+        *,
+        collect_exits: bool = True,
     ) -> None:
         if not branches:
             scope.reachable = False
             return
-        reachable = [branch for branch in branches if branch.reachable]
+        escaping = [branch for branch in branches if branch.escapes_loop]
+        if collect_exits:
+            self._collect_loop_exits(escaping)
+        reachable = [
+            branch
+            for branch in branches
+            if branch.reachable and not branch.escapes_loop
+        ]
         if reachable:
             merged_branches = reachable
             scope.reachable = True
-            scope.escapes_loop = any(branch.escapes_loop for branch in reachable)
-        else:
-            loop_branches = [branch for branch in branches if branch.escapes_loop]
-            merged_branches = loop_branches or list(branches)
+            scope.escapes_loop = False
+            scope.escape_kind = None
+        elif escaping:
+            merged_branches = escaping
             scope.reachable = False
-            scope.escapes_loop = bool(loop_branches)
+            scope.escapes_loop = True
+            kinds = {branch.escape_kind for branch in escaping}
+            scope.escape_kind = kinds.pop() if len(kinds) == 1 else None
+        else:
+            merged_branches = list(branches)
+            scope.reachable = False
+            scope.escapes_loop = False
+            scope.escape_kind = None
 
         identity_aliases = _merge_scope_scalar_map(merged_branches, "identity_aliases")
         definitely_rebound = set(merged_branches[0].definitely_rebound)
         for branch in merged_branches[1:]:
             definitely_rebound &= branch.definitely_rebound
-        for name in definitely_rebound:
-            identity_aliases.pop(name, None)
         shadowed = _merge_scope_shadowed(merged_branches) | definitely_rebound
         shadowed -= set(identity_aliases)
         invalid_classes: set[str] = set()
+        bound_names: set[str] = set()
+        class_bound_names: set[str] = set()
         for branch in merged_branches:
             invalid_classes |= branch.invalid_classes
+            bound_names |= branch.bound_names
+            class_bound_names |= branch.class_bound_names
 
         scope.aliases = _merge_scope_scalar_map(merged_branches, "aliases")
         scope.class_aliases = _merge_scope_scalar_map(merged_branches, "class_aliases")
@@ -6996,10 +7359,12 @@ class _ElementAnalysis:
         scope.shadowed_identities = shadowed
         scope.definitely_rebound = definitely_rebound
         scope.invalid_classes = invalid_classes
+        scope.bound_names = bound_names
+        scope.class_bound_names = class_bound_names
 
     def _visit_conditional(
         self,
-        statement: ast.If | ast.While,
+        statement: ast.If,
         scope: _ElementScope,
         class_name: str | None,
     ) -> None:
@@ -7008,6 +7373,60 @@ class _ElementAnalysis:
         else_scope = scope.clone()
         self.visit(statement.orelse, else_scope, class_name)
         self._merge(scope, [body_scope, else_scope])
+
+    def _loop_exit_branches(
+        self,
+        statement: ast.For | ast.AsyncFor | ast.While,
+        scope: _ElementScope,
+        guaranteed_entry: bool,
+        normal_body: _ElementScope | None,
+        break_exits: Sequence[_ElementScope],
+        continue_exits: Sequence[_ElementScope],
+        class_name: str | None,
+    ) -> tuple[list[_ElementScope], _ElementScope | None]:
+        while_forever = (
+            isinstance(statement, ast.While)
+            and isinstance(statement.test, ast.Constant)
+            and statement.test.value is True
+        )
+        if while_forever:
+            return list(break_exits), None
+        if statement.orelse:
+            else_inputs: list[_ElementScope] = []
+            if not guaranteed_entry:
+                else_inputs.append(scope.clone())
+            if normal_body is not None:
+                else_inputs.append(normal_body)
+            else_inputs.extend(continue_exits)
+            if not else_inputs:
+                return list(break_exits), None
+            else_scope = scope.clone()
+            self._merge(else_scope, else_inputs, collect_exits=False)
+            self.visit(statement.orelse, else_scope, class_name)
+            return [*break_exits, else_scope], else_scope
+        branches = [*break_exits, *continue_exits]
+        if normal_body is not None:
+            branches.append(normal_body)
+        if not guaranteed_entry:
+            branches.append(scope.clone())
+        return branches, None
+
+    def _replay_loop_body_without_recording(
+        self,
+        statement: ast.For | ast.AsyncFor | ast.While,
+        scope: _ElementScope,
+        class_name: str | None,
+    ) -> list[_ElementScope]:
+        previous = self._record_enabled
+        sink: list[_ElementScope] = []
+        self._record_enabled = False
+        self._escape_sinks.append(sink)
+        try:
+            self.visit(statement.body, scope, class_name)
+        finally:
+            self._escape_sinks.pop()
+            self._record_enabled = previous
+        return sink
 
     def _visit_loop(
         self,
@@ -7015,19 +7434,93 @@ class _ElementAnalysis:
         scope: _ElementScope,
         class_name: str | None,
     ) -> None:
+        guaranteed_entry = isinstance(statement, ast.For) and (
+            _iterable_guaranteed_nonempty(statement.iter, scope)
+        )
+        exits: list[_ElementScope] = []
+        self._escape_sinks.append(exits)
         body_scope = scope.clone()
         if isinstance(statement, (ast.For, ast.AsyncFor)):
-            self.bind_loop(statement.target, statement.iter, body_scope, class_name)
-        self.visit(statement.body, body_scope, class_name)
+            self.bind_loop(
+                statement.target,
+                statement.iter,
+                body_scope,
+                class_name,
+            )
+            for name in _iter_target_names(statement.target):
+                body_scope.definitely_rebound.add(name.id)
+        try:
+            self.visit(statement.body, body_scope, class_name)
+        finally:
+            self._escape_sinks.pop()
+
+        normal_body = body_scope if body_scope.reachable else None
         if body_scope.escapes_loop:
-            body_scope.reachable = True
-            body_scope.escapes_loop = False
-        else_scope = scope.clone()
-        self.visit(statement.orelse, else_scope, class_name)
-        self._merge(scope, [body_scope, else_scope])
+            exits.append(self._normalized_exit(body_scope))
+
+        break_exits: list[_ElementScope] = []
+        continue_exits: list[_ElementScope] = []
+        for exit_scope in exits:
+            if exit_scope.escape_kind == "continue":
+                continue_exits.append(exit_scope)
+            else:
+                break_exits.append(exit_scope)
+
+        final_iteration_only = (
+            guaranteed_entry
+            and not break_exits
+            and not _statements_break_loop(statement.body)
+        )
+        final_target_scope: _ElementScope | None = None
+        post_body = normal_body
+        if final_iteration_only and isinstance(statement, (ast.For, ast.AsyncFor)):
+            final_target_scope = scope.clone()
+            self.bind_loop(
+                statement.target,
+                statement.iter,
+                final_target_scope,
+                class_name,
+                final_iteration_only=True,
+            )
+            replay_exits = self._replay_loop_body_without_recording(
+                statement, final_target_scope, class_name
+            )
+            if final_target_scope.escapes_loop:
+                final_target_scope.reachable = True
+                final_target_scope.escapes_loop = False
+                final_target_scope.escape_kind = None
+            post_body = final_target_scope if final_target_scope.reachable else None
+            continue_exits = [
+                exit_scope
+                for exit_scope in replay_exits
+                if exit_scope.escape_kind == "continue"
+            ]
+
+        branches, else_scope = self._loop_exit_branches(
+            statement,
+            scope,
+            guaranteed_entry,
+            post_body,
+            break_exits,
+            continue_exits,
+            class_name,
+        )
+
+        self._merge(scope, branches)
         scope.escapes_loop = False
-        if isinstance(statement, (ast.For, ast.AsyncFor)):
-            _mark_definite_rebinding(statement.target, scope)
+        scope.escape_kind = None
+        if guaranteed_entry and isinstance(statement, (ast.For, ast.AsyncFor)):
+            target_sources: list[_ElementScope] = list(break_exits)
+            if else_scope is not None:
+                target_sources.append(else_scope)
+            elif post_body is not None:
+                target_sources.append(post_body)
+                target_sources.extend(continue_exits)
+            else:
+                target_sources.extend(continue_exits)
+            if not target_sources:
+                target_sources.append(body_scope)
+            self._copy_guaranteed_target_state(scope, statement.target, target_sources)
 
     def _visit_with(
         self,
@@ -7043,41 +7536,113 @@ class _ElementAnalysis:
                 _mark_definite_rebinding(item.optional_vars, scope)
         self.visit(statement.body, scope, class_name)
 
+    def _finalbody_escape_exits(
+        self,
+        statement: ast.Try | ast.TryStar,
+        base_scope: _ElementScope,
+        escape_states: Sequence[_ElementScope],
+        class_name: str | None,
+    ) -> list[_ElementScope]:
+        grouped: dict[str, list[_ElementScope]] = {}
+        for escape_state in escape_states:
+            kind = escape_state.escape_kind or "break"
+            grouped.setdefault(kind, []).append(escape_state)
+        exits: list[_ElementScope] = []
+        for kind, states in grouped.items():
+            exit_scope = base_scope.clone()
+            normalized = [self._normalized_exit(state, None) for state in states]
+            self._merge(exit_scope, normalized, collect_exits=False)
+            self.visit(statement.finalbody, exit_scope, class_name)
+            if exit_scope.escapes_loop:
+                if exit_scope.escape_kind is not None:
+                    exits.append(self._normalized_exit(exit_scope))
+            elif exit_scope.reachable:
+                exits.append(self._normalized_exit(exit_scope, kind))
+        return exits
+
     def _visit_try(
         self,
         statement: ast.Try | ast.TryStar,
         scope: _ElementScope,
         class_name: str | None,
     ) -> None:
-        branches: list[_ElementScope] = []
-        body_scope = scope.clone()
-        self.visit(statement.body, body_scope, class_name)
-        branches.append(body_scope)
-        for handler in statement.handlers:
-            handler_scope = scope.clone()
-            if handler.name is not None:
-                self.store(handler.name, None, None, handler_scope)
-                handler_scope.definitely_rebound.add(handler.name)
-            self.visit(handler.body, handler_scope, class_name)
-            branches.append(handler_scope)
-        if body_scope.reachable:
-            else_scope = body_scope.clone()
-            self.visit(statement.orelse, else_scope, class_name)
-            branches.append(else_scope)
-        self._merge(scope, branches)
-        continuing = any(branch.reachable for branch in branches)
-        final_branches = [branch.clone() for branch in branches]
-        for branch in final_branches:
-            branch.reachable = True
-        final_scope = scope.clone()
-        self._merge(final_scope, final_branches)
-        self.visit(statement.finalbody, final_scope, class_name)
-        if not continuing:
-            final_scope.reachable = False
-        _copy_scope_state(scope, final_scope)
-        _mark_definite_names(
-            [handler.name for handler in statement.handlers if handler.name], scope
-        )
+        base_scope = scope.clone()
+        sink: list[_ElementScope] = []
+        self._escape_sinks.append(sink)
+        pending_exits: list[_ElementScope] = []
+        try:
+            branches: list[_ElementScope] = []
+            body_scope = scope.clone()
+            self.visit(statement.body, body_scope, class_name)
+            branches.append(body_scope)
+            for handler in statement.handlers:
+                handler_scope = scope.clone()
+                if handler.name is not None:
+                    self.store(handler.name, None, None, handler_scope)
+                    handler_scope.definitely_rebound.add(handler.name)
+                self.visit(handler.body, handler_scope, class_name)
+                if handler.name is not None:
+                    self.store(handler.name, None, None, handler_scope)
+                branches.append(handler_scope)
+            if body_scope.reachable:
+                else_scope = body_scope.clone()
+                self.visit(statement.orelse, else_scope, class_name)
+                branches.append(else_scope)
+
+            sink_snapshot = len(sink)
+            normal_branches = [
+                branch
+                for branch in branches
+                if branch.reachable
+                and not branch.escapes_loop
+                and (branch is not body_scope or not statement.orelse)
+            ]
+            escape_branches = [branch for branch in branches if branch.escapes_loop]
+            pre_escape_states = list(sink[:sink_snapshot])
+            for branch in escape_branches:
+                if branch.escape_kind is not None:
+                    pre_escape_states.append(self._normalized_exit(branch))
+                elif not pre_escape_states:
+                    pre_escape_states.append(self._normalized_exit(branch, "break"))
+
+            if normal_branches:
+                self._merge(scope, normal_branches, collect_exits=False)
+            else:
+                scope.reachable = False
+                scope.escapes_loop = False
+                scope.escape_kind = None
+            continuing = bool(normal_branches)
+
+            final_scope = base_scope.clone()
+            final_inputs = [self._normalized_exit(branch, None) for branch in branches]
+            final_inputs.extend(
+                self._normalized_exit(state, None) for state in pre_escape_states
+            )
+            self._merge(final_scope, final_inputs, collect_exits=False)
+
+            if continuing:
+                continuation = base_scope.clone()
+                self._merge(continuation, normal_branches, collect_exits=False)
+                self.visit(statement.finalbody, continuation, class_name)
+                _copy_scope_state(scope, continuation)
+                if continuation.escapes_loop and continuation.escape_kind is not None:
+                    pending_exits.append(self._normalized_exit(continuation))
+
+            pending_exits.extend(
+                self._finalbody_escape_exits(
+                    statement, base_scope, pre_escape_states, class_name
+                )
+            )
+
+            # Refresh finalbody facts from every possible entry state.
+            self.visit(statement.finalbody, final_scope, class_name)
+            pending_exits.extend(
+                self._normalized_exit(state) for state in sink[sink_snapshot:]
+            )
+        finally:
+            self._escape_sinks.pop()
+        for escape_state in pending_exits:
+            self._append_loop_exit(escape_state)
 
     def _visit_match(
         self, statement: ast.Match, scope: _ElementScope, class_name: str | None
@@ -7096,14 +7661,6 @@ class _ElementAnalysis:
         ):
             branches.append(scope.clone())
         self._merge(scope, branches)
-        _mark_definite_names(
-            {
-                name
-                for case in statement.cases
-                for name in _pattern_capture_names(case.pattern)
-            },
-            scope,
-        )
 
     def _class_scope(self, name: str) -> _ElementScope:
         attrs = self.attributes.get(name, {})
@@ -7117,14 +7674,15 @@ class _ElementAnalysis:
         return _ElementScope(
             containers=containers,
             container_sources={name: "class" for name in containers},
+            is_class_scope=True,
         )
 
     def _visit_branches(
         self, statement: ast.stmt, scope: _ElementScope, class_name: str | None
     ) -> None:
-        if isinstance(statement, (ast.If, ast.While)):
+        if isinstance(statement, ast.If):
             self._visit_conditional(statement, scope, class_name)
-        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+        elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
             self._visit_loop(statement, scope, class_name)
         elif isinstance(statement, (ast.With, ast.AsyncWith)):
             self._visit_with(statement, scope, class_name)
@@ -7145,6 +7703,7 @@ class _ElementAnalysis:
                 instance_constructors=dict(scope.instance_constructors),
                 shadowed_identities=set(scope.shadowed_identities),
                 identity_aliases=dict(scope.identity_aliases),
+                bound_names=set(scope.bound_names),
             )
             for parameter in parameters:
                 self.store(parameter, None, None, inner)
@@ -7166,7 +7725,9 @@ class _ElementAnalysis:
             class_scope.instance_constructors = dict(scope.instance_constructors)
             class_scope.identity_aliases = dict(scope.identity_aliases)
             class_scope.shadowed_identities = set(scope.shadowed_identities)
+            class_scope.bound_names = set(scope.bound_names)
             self.visit(statement.body, class_scope, statement.name)
+            self._bind_scope_name(scope, statement.name)
 
     def visit(
         self,
@@ -7184,13 +7745,20 @@ class _ElementAnalysis:
                 elif isinstance(statement, (ast.Break, ast.Continue)):
                     scope.reachable = False
                     scope.escapes_loop = True
+                    scope.escape_kind = (
+                        "break" if isinstance(statement, ast.Break) else "continue"
+                    )
                 continue
             self._visit_branches(statement, scope, class_name)
             if isinstance(statement, (ast.Return, ast.Raise)):
                 scope.reachable = False
+                scope.escape_kind = None
             elif isinstance(statement, (ast.Break, ast.Continue)):
                 scope.reachable = False
                 scope.escapes_loop = True
+                scope.escape_kind = (
+                    "break" if isinstance(statement, ast.Break) else "continue"
+                )
 
 
 def _element_alias_analysis(

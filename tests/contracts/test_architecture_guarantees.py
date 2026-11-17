@@ -6877,7 +6877,7 @@ def test_identity_shadowing_covers_binding_forms(tmp_path: Path) -> None:
 
         def by_except():
             try:
-                pass
+                raise ValueError()
             except Exception as identity:
                 pass
             return identity(os).environ
@@ -7904,8 +7904,8 @@ def test_identity_fact_survives_loop_shadow_branch(tmp_path: Path) -> None:
         def identity(value):
             return value
 
-        def read(flag):
-            for _ in [flag]:
+        def read(items):
+            for _ in items:
                 identity = lambda value: 42
             return identity(os).environ
         """,
@@ -8414,3 +8414,1392 @@ def test_loop_jump_preserves_flat_alias_after_nested_branch(
     )
     violations = scan_contract_runtime_access(tmp_path)
     assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_nested_loop_jump_preserves_identity_constructor_and_flat_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+        import types
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_identity(flag, items):
+            same = lambda value: types.SimpleNamespace(environ="safe")
+            for item in items:
+                if flag:
+                    same = identity
+                    break
+                same = lambda value: types.SimpleNamespace(environ="safe")
+            return same(os).environ
+
+        def by_constructor(flag, items):
+            loader = Loader("safe")
+            for item in items:
+                if flag:
+                    loader = Loader(os)
+                    break
+            return loader.module.environ
+
+        def by_flat_alias(flag, items):
+            for item in items:
+                if flag:
+                    module = os
+                    break
+            return module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+    messages = " ".join(violation.message for violation in violations)
+    assert "os.environ" in messages
+
+
+def test_while_loop_jump_preserves_identity_constructor_path_and_else(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+        import types
+
+        from pathlib import Path
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_identity(flag):
+            same = lambda value: types.SimpleNamespace(environ="safe")
+            while flag:
+                same = identity
+                break
+            return same(os).environ
+
+        def by_constructor(flag):
+            loader = Loader("safe")
+            while flag:
+                loader = Loader(os)
+                break
+            return loader.module.environ
+
+        def by_path(flag):
+            path = "safe"
+            while flag:
+                path = Path("x")
+                break
+            return path.read_text()
+
+        def by_else(flag):
+            same = identity
+            while flag:
+                break
+            else:
+                same = lambda value: types.SimpleNamespace(environ="safe")
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
+    messages = " ".join(violation.message for violation in violations)
+    assert "os.environ" in messages
+    assert "Path.read_text" in messages
+
+
+def test_loop_jump_preserves_dynamic_import_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        def by_for(flag, items):
+            for item in items:
+                if flag:
+                    loader = importlib
+                    break
+            return loader.import_module("os")
+
+        def by_while(flag):
+            while flag:
+                loader = importlib
+                break
+            return loader.import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"] * 2
+
+
+def test_for_target_with_possible_zero_iterations_keeps_previous_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        from pathlib import Path
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_identity(items):
+            same = identity
+            for same in items:
+                pass
+            return same(os).environ
+
+        def by_constructor(items):
+            loader = Loader(os)
+            for loader in items:
+                pass
+            return loader.module.environ
+
+        def by_path(items):
+            path = Path("x")
+            for path in items:
+                pass
+            return path.read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_for_target_with_guaranteed_iteration_is_rebound(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_identity():
+            for identity in [lambda value: 42]:
+                pass
+            return identity(os).environ
+
+        def by_constructor():
+            loader = Loader(os)
+            for loader in [Loader("safe")]:
+                pass
+            return loader.module.environ
+
+        def by_range():
+            loader = Loader(os)
+            for loader in range(1):
+                loader = Loader("safe")
+            return loader.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_except_handler_name_is_not_definitely_rebound(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        def by_except(flag):
+            try:
+                if flag:
+                    raise ValueError()
+            except ValueError as identity:
+                pass
+            return identity(os).environ
+
+        def by_except_star(flag):
+            try:
+                if flag:
+                    raise ValueError()
+            except* ValueError as identity:
+                pass
+            return identity(os).environ
+
+        def by_multiple_handlers(flag):
+            try:
+                if flag:
+                    raise ValueError()
+            except (TypeError, ValueError) as identity:
+                pass
+            return identity(os).environ
+
+        def by_path(flag):
+            try:
+                if flag:
+                    raise ValueError()
+            except ValueError as identity:
+                pass
+            return identity(Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
+    messages = " ".join(violation.message for violation in violations)
+    assert "Path.read_text" in messages
+
+
+def test_match_capture_name_is_not_definitely_rebound(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        from pathlib import Path
+
+        def identity(value):
+            return value
+
+        def by_mapping(value):
+            same = identity
+            match value:
+                case {"same": same}:
+                    pass
+            return same(os).environ
+
+        def by_sequence(value):
+            same = identity
+            match value:
+                case [same, *_]:
+                    pass
+            return same(os).environ
+
+        def by_mapping_rest(value):
+            same = identity
+            match value:
+                case {**same}:
+                    pass
+            return same(os).environ
+
+        def by_guard(value):
+            same = identity
+            match value:
+                case same if same:
+                    pass
+            return same(os).environ
+
+        def by_path(value):
+            same = identity
+            match value:
+                case {"same": same}:
+                    pass
+            return same(Path("x")).read_text()
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 5
+
+
+def test_irrefutable_capture_and_guaranteed_handler_shadow_identities(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_irrefutable_match(value):
+            match value:
+                case identity:
+                    pass
+            return identity(os).environ
+
+        def by_guaranteed_handler():
+            try:
+                raise ValueError()
+            except Exception as identity:
+                pass
+            return identity(os).environ
+
+        def by_nonempty_literal():
+            for identity in [lambda value: 42]:
+                pass
+            return identity(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_while_true_without_break_does_not_scan_unreachable_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_infinite_loop():
+            same = identity
+            while True:
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_continue():
+            same = identity
+            while True:
+                same = lambda value: 42
+                continue
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_loop_jump_through_try_and_finally_preserves_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_try_finally(flag, items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    if flag:
+                        same = identity
+                        break
+                finally:
+                    pass
+            return same(os).environ
+
+        def by_handler(items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    raise ValueError()
+                except ValueError:
+                    same = identity
+                    break
+            return same(os).environ
+
+        def by_finally_jump(items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    pass
+                finally:
+                    same = identity
+                    break
+            return same(os).environ
+
+        def by_conditional_finally_jump(flag, items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    pass
+                finally:
+                    if flag:
+                        same = identity
+                        break
+                    same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
+
+
+def test_finally_override_replaces_loop_jump_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read(items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    same = identity
+                    break
+                finally:
+                    same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_for_target_with_guaranteed_iteration_keeps_rebound_value(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_helper():
+            same = lambda value: 42
+            for same in [identity]:
+                pass
+            return same(os).environ
+
+        def by_constructor():
+            loader = Loader("safe")
+            for loader in [Loader(os)]:
+                pass
+            return loader.module.environ
+
+        def by_flat_alias():
+            for module in [os]:
+                pass
+            return module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_for_unpacked_target_with_guaranteed_iteration_keeps_rebound_value(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_helper():
+            for same, _ in [(identity, 1)]:
+                pass
+            return same(os).environ
+
+        def by_constructor():
+            for name, loader in [("x", Loader(os))]:
+                pass
+            return loader.module.environ
+
+        def by_flat_alias():
+            for name, module in [("x", os)]:
+                pass
+            return module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_except_and_match_capture_preserve_dynamic_import_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+
+        def identity(value):
+            return value
+
+        def by_except(flag):
+            try:
+                if flag:
+                    raise ValueError()
+            except ValueError as identity:
+                pass
+            return identity(importlib).import_module("os")
+
+        def by_match(value):
+            same = identity
+            match value:
+                case {"same": same}:
+                    pass
+            return same(importlib).import_module("os")
+        """,
+    )
+    violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in violations] == ["dynamic-import"] * 2
+
+
+def test_loop_else_safe_rebinding_is_not_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_for(items):
+            same = identity
+            for item in items:
+                pass
+            else:
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_break(items):
+            same = identity
+            for item in items:
+                same = lambda value: 42
+                break
+            else:
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_guaranteed_target_else():
+            same = identity
+            for same in [identity]:
+                pass
+            else:
+                same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_loop_else_dangerous_branches_are_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_body(items):
+            same = lambda value: 42
+            for item in items:
+                same = identity
+            else:
+                pass
+            return same(os).environ
+
+        def by_else(items):
+            same = lambda value: 42
+            for item in items:
+                pass
+            else:
+                same = identity
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_nested_try_finally_jump_applies_finally_before_loop_exit(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Manager:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *args):
+                return False
+
+        def identity(value):
+            return value
+
+        def by_if(flag, items):
+            same = lambda value: 42
+            for item in items:
+                if flag:
+                    try:
+                        break
+                    finally:
+                        same = identity
+            return same(os).environ
+
+        def by_with(items):
+            same = lambda value: 42
+            for item in items:
+                with Manager():
+                    try:
+                        break
+                    finally:
+                        same = identity
+            return same(os).environ
+
+        def by_match(value, items):
+            same = lambda value: 42
+            for item in items:
+                match value:
+                    case 1:
+                        try:
+                            break
+                        finally:
+                            same = identity
+                    case _:
+                        pass
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_for_target_guaranteed_break_keeps_target_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_break():
+            same = lambda value: 42
+            for same in [identity]:
+                break
+            return same(os).environ
+
+        def by_conditional_break(flag):
+            same = lambda value: 42
+            for same in [identity]:
+                if flag:
+                    break
+            return same(os).environ
+
+        def by_continue():
+            same = lambda value: 42
+            for same in [identity]:
+                continue
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_continue_routes_through_loop_else(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_while(flag):
+            same = lambda value: 42
+            while flag:
+                same = identity
+                continue
+            else:
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_for(items):
+            same = lambda value: 42
+            for item in items:
+                same = identity
+                continue
+            else:
+                same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_continue_with_loop_else_keeps_dangerous_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_while(flag):
+            same = lambda value: 42
+            while flag:
+                same = identity
+                continue
+            else:
+                pass
+            return same(os).environ
+
+        def by_for(items):
+            same = lambda value: 42
+            for item in items:
+                same = identity
+                continue
+            else:
+                pass
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_nested_try_finally_override_is_not_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_if(flag, items):
+            same = lambda value: 42
+            for item in items:
+                if flag:
+                    try:
+                        same = identity
+                        break
+                    finally:
+                        same = lambda value: 42
+            return same(os).environ
+
+        def by_with(items):
+            class Manager:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, *args):
+                    return False
+
+            same = lambda value: 42
+            for item in items:
+                with Manager():
+                    try:
+                        same = identity
+                        break
+                    finally:
+                        same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_guaranteed_for_does_not_merge_zero_iteration_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        from pathlib import Path
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def identity(value):
+            return value
+
+        def by_identity():
+            same = identity
+            for item in [1]:
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_identity_break(flag):
+            same = identity
+            for item in [1]:
+                same = lambda value: 42
+                if flag:
+                    break
+            return same(os).environ
+
+        def by_constructor():
+            loader = Loader(os)
+            for item in [1]:
+                loader = Loader("safe")
+            return loader.module.environ
+
+        def by_path():
+            path = Path("x")
+            for item in [1]:
+                path = "safe"
+            return path.read_text()
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_finally_access_uses_break_entry_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_initial_helper(flag, items):
+            same = identity
+            for item in items:
+                try:
+                    if flag:
+                        break
+                    same = lambda value: 42
+                finally:
+                    same(os).environ
+            return "safe"
+
+        def by_break_branch_helper(flag, items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    if flag:
+                        same = identity
+                        break
+                    same = lambda value: 42
+                finally:
+                    same(os).environ
+            return "safe"
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_finally_access_with_safe_break_entry_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read(flag, items):
+            same = lambda value: 42
+            for item in items:
+                try:
+                    if flag:
+                        break
+                    same = lambda value: 42
+                finally:
+                    same(os).environ
+            return "safe"
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_shadowed_range_is_not_guaranteed_nonempty(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            range = lambda value: []
+            same = identity
+            for same in range(1):
+                same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_try_else_overwrites_body_state_on_normal_path(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            same = lambda value: 42
+            try:
+                same = identity
+            except Exception:
+                pass
+            else:
+                same = lambda value: 42
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_shadowed_or_imported_range_keeps_zero_iteration_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+        import os
+
+        from pathlib import Path
+        from custom import range
+
+        def identity(value):
+            return value
+
+        def by_imported_range():
+            same = identity
+            for same in range(1):
+                same = lambda value: 42
+            return same(os).environ
+
+        def by_flat_range():
+            range = lambda value: []
+            for _ in range(1):
+                module = os
+            return module.environ
+
+        def by_path_range():
+            range = lambda value: []
+            for _ in range(1):
+                path = Path("x")
+            return path.read_text()
+
+        def by_dynamic_range():
+            range = lambda value: []
+            for _ in range(1):
+                loader = importlib
+            return loader.import_module("os")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+    dynamic_violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in dynamic_violations] == ["dynamic-import"]
+
+
+def test_multi_element_literal_uses_last_iteration_for_target(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_last_helper():
+            same = lambda value: 42
+            for same in [lambda value: 42, identity]:
+                pass
+            return same(os).environ
+
+        def by_break_possible(flag):
+            same = lambda value: 42
+            for same in [identity, lambda value: 42]:
+                if flag:
+                    break
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_multi_element_literal_last_safe_is_not_reported(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            same = identity
+            for same in [identity, lambda value: 42]:
+                pass
+            return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_self_target_loop_preserves_constructor(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def by_pass():
+            loader = Loader(os)
+            for loader in [loader]:
+                pass
+            return loader.module.environ
+
+        def by_break():
+            loader = Loader(os)
+            for loader in [loader]:
+                break
+            return loader.module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_multi_element_literal_body_uses_each_element(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_name():
+            for same in [identity, lambda value: 42]:
+                same(os).environ
+
+        def by_unpacking():
+            for name, same in [("x", identity), ("y", lambda value: 42)]:
+                same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 2
+
+
+def test_set_literal_target_keeps_all_element_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            for same in {identity, lambda value: 42}:
+                pass
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_class_range_shadows_builtin(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import importlib
+        import os
+
+        class range:
+            def __init__(self, n):
+                self.n = n
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def by_module_class():
+            loader = Loader(os)
+            for item in range(1):
+                loader = Loader("safe")
+            return loader.module.environ
+
+        def by_local_class():
+            class range:
+                def __init__(self, n):
+                    self.n = n
+
+            loader = Loader(os)
+            for item in range(1):
+                loader = Loader("safe")
+            return loader.module.environ
+
+        def by_flat_class():
+            for _ in range(1):
+                module = os
+            return module.environ
+
+        def by_dynamic_class():
+            for _ in range(1):
+                loader = importlib
+            return loader.import_module("os")
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+    dynamic_violations = scan_contract_dynamic_imports(tmp_path)
+    assert [violation.rule for violation in dynamic_violations] == ["dynamic-import"]
+
+
+def test_unshadowed_range_flat_alias_is_guaranteed(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def read():
+            module = os
+            for item in range(1):
+                module = "safe"
+            return module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_class_attribute_range_does_not_shadow_method_builtin(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        class C:
+            range = 1
+
+            def read(self):
+                same = identity
+                for item in range(1):
+                    same = lambda value: 42
+                return same(os).environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_loop_target_definite_rebinding_does_not_drop_identity_alias(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_if(flag, items):
+            for same in items:
+                same = identity
+                if flag:
+                    pass
+                same(os).environ
+
+        def by_try(flag, items):
+            for same in items:
+                same = identity
+                try:
+                    if flag:
+                        pass
+                except Exception:
+                    pass
+                same(os).environ
+
+        def by_match(value, items):
+            for same in items:
+                same = identity
+                match value:
+                    case 1:
+                        pass
+                    case _:
+                        pass
+                same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 3
+
+
+def test_nested_loop_replay_preserves_recording_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            for same in [identity, lambda value: 42]:
+                for inner in [1]:
+                    pass
+                same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_while_true_uses_collected_break_in_nested_loop_else(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def read():
+            same = lambda value: 42
+            while True:
+                for item in []:
+                    pass
+                else:
+                    same = identity
+                    break
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_flat_loop_target_named_range_shadows_builtin(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def read(items):
+            module = os
+            for range in items:
+                pass
+            for _ in range(1):
+                module = "safe"
+            return module.environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"]
+
+
+def test_for_else_uses_final_literal_target_state(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "good.py",
+        """
+        import os
+
+        class Loader:
+            def __init__(self, module):
+                self.module = module
+
+        def read():
+            for loader in [Loader(os), Loader("safe")]:
+                pass
+            else:
+                pass
+            return loader.module.environ
+        """,
+    )
+    assert scan_contract_runtime_access(tmp_path) == []
+
+
+def test_final_iteration_continue_preserves_dangerous_state(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        import os
+
+        def identity(value):
+            return value
+
+        def by_conditional_continue(flag):
+            same = lambda value: 42
+            for item in [1, 2]:
+                if flag:
+                    same = identity
+                    continue
+            return same(os).environ
+
+        def by_target_continue():
+            same = lambda value: 42
+            for same in [lambda value: 42, identity]:
+                continue
+            return same(os).environ
+
+        def by_else_continue(flag):
+            same = lambda value: 42
+            for item in [1, 2]:
+                if flag:
+                    same = identity
+                    continue
+            else:
+                pass
+            return same(os).environ
+
+        def by_try_finally_continue(flag):
+            same = lambda value: 42
+            for item in [1, 2]:
+                try:
+                    if flag:
+                        same = identity
+                        continue
+                finally:
+                    pass
+            return same(os).environ
+        """,
+    )
+    violations = scan_contract_runtime_access(tmp_path)
+    assert [violation.rule for violation in violations] == ["runtime-access"] * 4
