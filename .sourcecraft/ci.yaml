@@ -573,7 +573,7 @@ workflows:
       # Set the identifier of the SourceCraft PyPI registry from its page.
       # The identifier is configuration, not a secret, and must not be
       # hardcoded in scripts.
-      SOURCECRAFT_PYPI_REGISTRY_ID: ""
+      SOURCECRAFT_PYPI_REGISTRY_ID: "cn1v6bhb3a29dlbdd48d"
     tasks:
       - name: contracts-release
         cubes:
