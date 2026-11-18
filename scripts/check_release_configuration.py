@@ -35,6 +35,11 @@ PAT_NAME = "PYPI_REGISTRY_PAT"
 PAT_SECRET = "${{ secrets.PYPI_REGISTRY_PAT }}"
 REGISTRY_ID_NAME = "SOURCECRAFT_PYPI_REGISTRY_ID"
 PAT_SCOPED_CUBES = ("publish", "verify-from-registry")
+PYTHON_SETUP_SCRIPT = "scripts/setup_python311.sh"
+_PYTHON311_INSTALL = re.compile(
+    r"(?:add-apt-repository[^\n]*ppa:deadsnakes"
+    r"|\bapt(?:-get)?\b[^\n]*\binstall\b[^\n]*python3\.11)"
+)
 SOURCE_CUBE_MARKERS: dict[str, tuple[tuple[str, ...], ...]] = {
     "preflight": (
         (
@@ -1264,6 +1269,55 @@ def _quality_violations(
     ]
 
 
+def _python_setup_violations(
+    path: Path, workflows: dict[str, Any], document: dict[str, Any]
+) -> list[Violation]:
+    """Reject duplicated Python 3.11 installations in workflow tasks."""
+    violations: list[Violation] = []
+    for workflow_name, workflow in workflows.items():
+        if not isinstance(workflow_name, str) or not isinstance(workflow, dict):
+            continue
+        for index, task in enumerate(_tasks(workflow, document)):
+            task_name = _task_name(task, index)
+            raw_cubes = task.get("cubes")
+            if not isinstance(raw_cubes, list):
+                continue
+            cubes = {
+                cube["name"]: cube
+                for cube in raw_cubes
+                if isinstance(cube, dict) and isinstance(cube.get("name"), str)
+            }
+            scripts = {
+                cube_name: _uncommented(_script(cube))
+                for cube_name, cube in cubes.items()
+            }
+            for cube_name, script in scripts.items():
+                if _PYTHON311_INSTALL.search(script):
+                    violations.append(
+                        Violation(
+                            path,
+                            1,
+                            f"cube {cube_name!r} in workflow {workflow_name!r} "
+                            f"installs Python 3.11 inline; call "
+                            f"{PYTHON_SETUP_SCRIPT} instead",
+                        )
+                    )
+            uses_python = any("python3.11" in script for script in scripts.values())
+            delegates = any(
+                PYTHON_SETUP_SCRIPT in script for script in scripts.values()
+            )
+            if uses_python and not delegates:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"task {task_name!r} in workflow {workflow_name!r} "
+                        f"installs Python 3.11 without {PYTHON_SETUP_SCRIPT}",
+                    )
+                )
+    return violations
+
+
 def check_sourcecraft_ci(text: str, path: Path = SOURCECRAFT_CI) -> list[Violation]:
     """Check the SourceCraft triggers and the publication workflow.
 
@@ -1286,6 +1340,7 @@ def check_sourcecraft_ci(text: str, path: Path = SOURCECRAFT_CI) -> list[Violati
     violations.extend(_credential_violations(path, lines))
     violations.extend(_secret_violations(path, lines))
     violations.extend(_quality_violations(path, workflows, document))
+    violations.extend(_python_setup_violations(path, workflows, document))
     return violations
 
 
@@ -1399,6 +1454,7 @@ def check_scripts(root: Path = REPO_ROOT) -> list[Violation]:
         "e2e": root / "scripts" / "e2e_contract_consumer.py",
         "engine": root / "scripts" / "smoke_engine_install.py",
         "guard": root / "scripts" / "check_release_configuration.py",
+        "python": root / PYTHON_SETUP_SCRIPT,
     }
     for path in scripts.values():
         if not path.is_file():
@@ -1421,6 +1477,19 @@ def check_scripts(root: Path = REPO_ROOT) -> list[Violation]:
                 Violation(release, 1, f"release helper has no {marker!r}")
             )
     violations.extend(_check_uploader(release, release_text))
+    python_setup = scripts["python"]
+    if python_setup.is_file():
+        python_setup_text = python_setup.read_text(encoding="utf-8")
+        for marker in (
+            "Acquire::Retries",
+            "add-apt-repository -y ppa:deadsnakes/ppa",
+            "PYTHON311_SETUP_RETRY",
+            "PYTHON311_SETUP_FAILED",
+        ):
+            if marker not in python_setup_text:
+                violations.append(
+                    Violation(python_setup, 1, f"Python setup script has no {marker!r}")
+                )
     for path in scripts.values():
         if path.is_file():
             violations.extend(

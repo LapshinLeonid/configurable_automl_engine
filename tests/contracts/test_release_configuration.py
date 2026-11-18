@@ -426,6 +426,83 @@ def test_sourcecraft_rejects_a_literal_pat(
     assert "literal secret" in messages(guard.check_sourcecraft_ci(text))
 
 
+def test_sourcecraft_installs_python_311_through_the_shared_script(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    assert "add-apt-repository" not in sourcecraft_text
+    assert sourcecraft_text.count("bash scripts/setup_python311.sh") == 6
+    assert guard.check_sourcecraft_ci(sourcecraft_text) == []
+
+
+def test_sourcecraft_rejects_an_inline_python_installation(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        "bash scripts/setup_python311.sh",
+        "apt-get update -qq\n"
+        "                add-apt-repository -y ppa:deadsnakes/ppa\n"
+        "                apt-get install -y -qq python3.11 python3.11-venv",
+    )
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "installs Python 3.11 inline" in violations
+    assert "setup_python311.sh" in violations
+
+
+def test_sourcecraft_requires_the_shared_python_setup(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        "bash scripts/setup_python311.sh",
+        "",
+    )
+    assert "installs Python 3.11 without" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_checks_python_setup_per_task(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    workflow = document["workflows"]["quality-checks"]  # type: ignore[index]
+    task = next(
+        item
+        for item in workflow["tasks"]  # type: ignore[index]
+        if item["name"] == "contracts-guarantees"
+    )
+    for cube in task["cubes"]:
+        cube["script"] = [
+            line.replace("bash scripts/setup_python311.sh", "")
+            for line in cube["script"]
+        ]
+    text = dump_document(document)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "contracts-guarantees" in violations
+    assert "installs Python 3.11 without" in violations
+
+
+@pytest.mark.parametrize(
+    "install_command",
+    [
+        "apt-get install -y python3.11 python3.11-venv",
+        "apt-get -y install python3.11 python3.11-venv",
+        "apt install python3.11 python3.11-venv",
+    ],
+)
+def test_sourcecraft_rejects_inline_python_install_variants(
+    guard: ModuleType, sourcecraft_text: str, install_command: str
+) -> None:
+    text = inside(
+        sourcecraft_text,
+        "  publish-contracts:\n",
+        "bash scripts/setup_python311.sh",
+        install_command,
+    )
+    assert "installs Python 3.11 inline" in messages(guard.check_sourcecraft_ci(text))
+
+
 def test_order_helper_reports_a_publish_before_the_gates(guard: ModuleType) -> None:
     order = ("preflight", "quality-gates", "build-and-verify", "publish")
     actual = ["preflight", "publish", "quality-gates", "build-and-verify"]
@@ -741,6 +818,9 @@ def test_sourcecraft_accepts_a_chained_split_task_sequence(
 ) -> None:
     def split(workflow: dict[str, object]) -> None:
         split_publish_tasks(workflow, needs=["gates"])
+        upload = workflow["tasks"][1]  # type: ignore[index]
+        for cube in upload["cubes"]:
+            cube["script"][0] = f"{cube['script'][0]}\nbash scripts/setup_python311.sh"
 
     text = mutate_publish_workflow(sourcecraft_text, split)
     assert guard.check_sourcecraft_ci(text) == []
