@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Self
@@ -277,9 +280,9 @@ def test_registry_has_version_reads_the_simple_index(
             return b'<a href="automl_contracts-0.1.0-py3-none-any.whl">'
 
     monkeypatch.setattr(
-        release.urllib.request,
-        "urlopen",
-        lambda request, timeout: Response(),
+        release,
+        "_open_registry_url",
+        lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
     )
     assert release.registry_has_version(settings, "0.1.0") is True
     assert release.registry_has_version(settings, "0.2.0") is False
@@ -428,6 +431,684 @@ def test_install_reports_a_missing_version_without_the_token(
     with pytest.raises(release.ReleaseError, match="is not available") as error:
         release.install_from_registry(settings, "9.9.9", python="python")
     assert "s3cr3t-value" not in str(error.value)
+
+
+SIMPLE_INDEX_PAGE = (
+    "<html><body><h1>Links for automl-contracts</h1>"
+    '<a href="./0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl#sha256=aa11" '
+    'data-core-metadata="sha256=bb22">automl_contracts-0.1.0-py3-none-any.whl</a><br>'
+    '<a href="./0.0.9/-/automl_contracts-0.0.9-py3-none-any.whl#sha256=cc33">'
+    "automl_contracts-0.0.9-py3-none-any.whl</a><br>"
+    '<a href="./0.1.0/-/automl_contracts-0.1.0.tar.gz#sha256=dd44">'
+    "automl_contracts-0.1.0.tar.gz</a><br></body></html>"
+)
+SIMPLE_INDEX_BASE = (
+    "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/automl-contracts/"
+)
+MISSING_METADATA_OUTPUT = (
+    "Collecting automl-contracts==0.1.0\n"
+    "  ERROR: HTTP error 404 while getting "
+    "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/"
+    "automl-contracts/0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl.metadata\n"
+    "ERROR: 404 Client Error: Not Found"
+)
+
+
+def test_parse_index_artifacts_extracts_links_and_hashes(release: ModuleType) -> None:
+    artifacts = release.parse_index_artifacts(SIMPLE_INDEX_PAGE, SIMPLE_INDEX_BASE)
+
+    assert [artifact.filename for artifact in artifacts] == [
+        "automl_contracts-0.1.0-py3-none-any.whl",
+        "automl_contracts-0.0.9-py3-none-any.whl",
+        "automl_contracts-0.1.0.tar.gz",
+    ]
+    wheel = artifacts[0]
+    assert wheel.url == (
+        "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/"
+        "automl-contracts/0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl"
+    )
+    assert wheel.sha256 == "aa11"
+
+
+def test_select_artifact_prefers_the_wheel_of_the_requested_version(
+    release: ModuleType,
+) -> None:
+    artifacts = release.parse_index_artifacts(SIMPLE_INDEX_PAGE, SIMPLE_INDEX_BASE)
+
+    selected = release.select_artifact(artifacts, "0.1.0")
+    assert selected.filename == "automl_contracts-0.1.0-py3-none-any.whl"
+
+    sdist_only = tuple(
+        artifact for artifact in artifacts if artifact.filename.endswith(".tar.gz")
+    )
+    assert release.select_artifact(sdist_only, "0.1.0").filename.endswith(".tar.gz")
+    with pytest.raises(release.ReleaseError, match="does not list an artifact"):
+        release.select_artifact(artifacts, "9.9.9")
+
+
+def test_parse_index_artifacts_rejects_encoded_path_traversal(
+    release: ModuleType,
+) -> None:
+    page = (
+        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        '%2e%2e%2f%2e%2e%2f%2e%2e%2ftmp%2fpwned.whl#sha256=aa11">traversal</a>'
+    )
+    assert release.parse_index_artifacts(page, SIMPLE_INDEX_BASE) == ()
+
+
+def test_select_artifact_prefers_a_universal_wheel_among_several(
+    release: ModuleType,
+) -> None:
+    page = (
+        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        'cp311-cp311-manylinux_2_17_x86_64.whl#sha256=aa11">platform</a>'
+        '<a href="./0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl#sha256=bb22">'
+        "universal</a>"
+    )
+    artifacts = release.parse_index_artifacts(page, SIMPLE_INDEX_BASE)
+
+    selected = release.select_artifact(artifacts, "0.1.0")
+    assert selected.filename == "automl_contracts-0.1.0-py3-none-any.whl"
+
+
+def test_select_artifact_rejects_ambiguous_wheels(release: ModuleType) -> None:
+    page = (
+        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        'cp311-cp311-manylinux_2_17_x86_64.whl#sha256=aa11">cp311</a>'
+        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        'cp312-cp312-manylinux_2_17_x86_64.whl#sha256=bb22">cp312</a>'
+    )
+    artifacts = release.parse_index_artifacts(page, SIMPLE_INDEX_BASE)
+
+    with pytest.raises(release.ReleaseError, match="several wheels"):
+        release.select_artifact(artifacts, "0.1.0")
+
+
+def test_download_artifact_verifies_the_advertised_hash(
+    release: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"payload"
+
+    monkeypatch.setattr(
+        release,
+        "_open_registry_url",
+        lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
+    )
+    matching = release.IndexArtifact(
+        filename="automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        sha256="239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
+    )
+    destination = release.download_artifact(
+        settings,
+        matching,
+        tmp_path / matching.filename,
+        registry_url=matching.url,
+    )
+    assert destination.read_bytes() == b"payload"
+
+    mismatched = release.IndexArtifact(
+        filename=matching.filename, url=matching.url, sha256="0" * 64
+    )
+    with pytest.raises(release.ReleaseError, match="advertises") as error:
+        release.download_artifact(
+            settings,
+            mismatched,
+            tmp_path / "other.whl",
+            registry_url=mismatched.url,
+        )
+    assert "s3cr3t-value" not in str(error.value)
+
+
+def test_download_artifact_wraps_network_errors(
+    release: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def raise_timeout(
+        settings_arg: Any, url: str, *, timeout: int, auth_origin: str | None = None
+    ) -> Any:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(release, "_open_registry_url", raise_timeout)
+    artifact = release.IndexArtifact(
+        filename="automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+    )
+    with pytest.raises(
+        release.ReleaseError, match="cannot reach the registry artifact"
+    ) as error:
+        release.download_artifact(
+            settings,
+            artifact,
+            tmp_path / artifact.filename,
+            registry_url=artifact.url,
+        )
+    assert "s3cr3t-value" not in str(error.value)
+
+
+def test_download_artifact_rejects_a_missing_hash(
+    release: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"payload"
+
+    monkeypatch.setattr(
+        release,
+        "_open_registry_url",
+        lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
+    )
+    artifact = release.IndexArtifact(
+        filename="automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        sha256=None,
+    )
+    destination = tmp_path / artifact.filename
+    with pytest.raises(
+        release.ReleaseError, match="does not advertise a sha256"
+    ) as error:
+        release.download_artifact(
+            settings,
+            artifact,
+            destination,
+            registry_url=artifact.url,
+        )
+    assert "s3cr3t-value" not in str(error.value)
+    assert not destination.exists()
+
+
+def test_download_artifact_wraps_truncated_responses(
+    release: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            raise release.http.client.IncompleteRead(b"partial")
+
+    monkeypatch.setattr(
+        release,
+        "_open_registry_url",
+        lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
+    )
+    artifact = release.IndexArtifact(
+        filename="automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        sha256="0" * 64,
+    )
+    with pytest.raises(
+        release.ReleaseError, match="cannot reach the registry artifact"
+    ) as error:
+        release.download_artifact(
+            settings,
+            artifact,
+            tmp_path / artifact.filename,
+            registry_url=artifact.url,
+        )
+    assert "s3cr3t-value" not in str(error.value)
+
+
+def test_redirect_handler_does_not_forward_credentials_to_another_origin(
+    release: ModuleType,
+) -> None:
+    handler = release._CredentialSafeRedirectHandler()
+    request = release.urllib.request.Request(
+        "https://pkg.sourcecraft.tech/pypi/o/r/simple/automl_contracts-0.1.0.whl",
+        headers={"Authorization": "Basic s3cr3t-value"},
+    )
+
+    redirected = handler.redirect_request(
+        request,
+        None,
+        307,
+        "Temporary Redirect",
+        None,
+        "https://storage.yandexcloud.net/artifact-registry/automl_contracts-0.1.0.whl",
+    )
+    assert redirected is not None
+    assert redirected.get_header("Authorization") is None
+    assert "s3cr3t-value" not in "".join(redirected.headers.values())
+
+    same_origin = handler.redirect_request(
+        request,
+        None,
+        307,
+        "Temporary Redirect",
+        None,
+        "https://pkg.sourcecraft.tech/pypi/o/r/simple/automl_contracts-0.1.0.whl",
+    )
+    assert same_origin is not None
+    assert same_origin.get_header("Authorization") == "Basic s3cr3t-value"
+
+
+def test_download_artifact_does_not_send_the_pat_to_a_redirect_host(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+    payload = b"wheel-bytes"
+    received: dict[str, str | None] = {}
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received["authorization"] = self.headers.get("Authorization")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    target_url = (
+        f"http://127.0.0.1:{target.server_port}/automl_contracts-0.1.0-py3-none-any.whl"
+    )
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(307)
+            self.send_header("Location", target_url)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    redirect_url = (
+        f"http://127.0.0.1:{redirect.server_port}/"
+        "automl_contracts-0.1.0-py3-none-any.whl"
+    )
+    servers = (redirect, target)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True) for server in servers
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        artifact = release.IndexArtifact(
+            filename="automl_contracts-0.1.0-py3-none-any.whl",
+            url=redirect_url,
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+        destination = release.download_artifact(
+            settings,
+            artifact,
+            tmp_path / artifact.filename,
+            registry_url=redirect_url,
+        )
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join()
+
+    assert destination.read_bytes() == payload
+    assert received["authorization"] is None
+
+
+def test_artifact_index_install_does_not_authenticate_external_links(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+    payload = b"wheel-bytes"
+    received: dict[str, str | None] = {}
+
+    class ArtifactHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received["authorization"] = self.headers.get("Authorization")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    artifact_server = ThreadingHTTPServer(("127.0.0.1", 0), ArtifactHandler)
+    digest = hashlib.sha256(payload).hexdigest()
+    artifact_url = (
+        f"http://127.0.0.1:{artifact_server.server_port}/"
+        f"automl_contracts-0.1.0-py3-none-any.whl#sha256={digest}"
+    )
+    page = (
+        "<html><body>"
+        f'<a href="{artifact_url}">automl_contracts-0.1.0-py3-none-any.whl</a>'
+        "</body></html>"
+    ).encode()
+
+    class IndexHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    index_server = ThreadingHTTPServer(("127.0.0.1", 0), IndexHandler)
+    index_url = f"http://127.0.0.1:{index_server.server_port}/simple/"
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    servers = (index_server, artifact_server)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True) for server in servers
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        monkeypatch.setattr(release, "_run", fake_run)
+        release.install_artifact_from_index(
+            settings,
+            "0.1.0",
+            python="python",
+            index_url=index_url,
+        )
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join()
+
+    assert received["authorization"] is None
+    assert commands[0][-1].endswith("automl_contracts-0.1.0-py3-none-any.whl")
+
+
+def test_artifact_index_install_wraps_index_http_errors(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def raise_unauthorized(settings_arg: Any, url: str, *, timeout: int = 30) -> str:
+        raise release.urllib.error.HTTPError(url, 401, "Unauthorized", None, None)
+
+    monkeypatch.setattr(release, "_read_registry_page", raise_unauthorized)
+    with pytest.raises(release.ReleaseError, match="PYPI_REGISTRY_PAT") as error:
+        release.install_artifact_from_index(settings, "0.1.0", python="python")
+    assert "s3cr3t-value" not in str(error.value)
+
+
+def test_artifact_index_install_wraps_index_network_errors(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def raise_timeout(settings_arg: Any, url: str, *, timeout: int = 30) -> str:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(release, "_read_registry_page", raise_timeout)
+    with pytest.raises(
+        release.ReleaseError, match="cannot reach the registry index"
+    ) as error:
+        release.install_artifact_from_index(settings, "0.1.0", python="python")
+    assert "s3cr3t-value" not in str(error.value)
+
+
+def test_install_falls_back_to_the_index_artifact_when_metadata_is_missing(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+    commands: list[list[str]] = []
+    fallback: dict[str, Any] = {}
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if "automl-contracts==0.1.0" in command:
+            return subprocess.CompletedProcess(command, 1, "", MISSING_METADATA_OUTPUT)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    def fake_artifact_install(
+        passed_settings: Any,
+        version: str,
+        *,
+        python: str,
+        index_url: str | None,
+        timeout: int,
+    ) -> None:
+        fallback.update(
+            {
+                "settings": passed_settings,
+                "version": version,
+                "python": python,
+                "index_url": index_url,
+            }
+        )
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(release, "install_artifact_from_index", fake_artifact_install)
+    release.install_from_registry(settings, "0.1.0", python="/tmp/venv/bin/python")
+
+    assert fallback["version"] == "0.1.0"
+    assert fallback["python"] == "/tmp/venv/bin/python"
+    assert commands[-1][-2:] == ["pip", "check"]
+
+
+def test_install_reports_both_failures_when_the_fallback_fails(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        if "automl-contracts==0.9.0" in command:
+            return subprocess.CompletedProcess(
+                command, 1, "", MISSING_METADATA_OUTPUT.replace("0.1.0", "0.9.0")
+            )
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    def failing_artifact_install(*args: Any, **kwargs: Any) -> None:
+        raise release.ReleaseError("the registry did not serve the wheel")
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(
+        release, "install_artifact_from_index", failing_artifact_install
+    )
+    with pytest.raises(
+        release.ReleaseError, match="artifact link also failed"
+    ) as error:
+        release.install_from_registry(settings, "0.9.0", python="python")
+
+    message = str(error.value)
+    assert "automl-contracts==0.9.0" in message
+    assert "the registry did not serve the wheel" in message
+    assert "s3cr3t-value" not in message
+
+
+def test_install_wraps_os_errors_from_the_fallback(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        if "automl-contracts==0.1.0" in command:
+            return subprocess.CompletedProcess(command, 1, "", MISSING_METADATA_OUTPUT)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    def failing_artifact_install(*args: Any, **kwargs: Any) -> None:
+        raise TimeoutError("connection timed out")
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(
+        release, "install_artifact_from_index", failing_artifact_install
+    )
+    with pytest.raises(
+        release.ReleaseError, match="artifact link also failed"
+    ) as error:
+        release.install_from_registry(settings, "0.1.0", python="python")
+
+    message = str(error.value)
+    assert "connection timed out" in message
+    assert "s3cr3t-value" not in message
+
+
+def test_install_does_not_fall_back_for_unrelated_failures(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        if "automl-contracts==0.1.0" in command:
+            return subprocess.CompletedProcess(command, 1, "", "504 Gateway Timeout")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(release, "_run", fake_run)
+    monkeypatch.setattr(
+        release,
+        "install_artifact_from_index",
+        lambda *args, **kwargs: pytest.fail("the fallback must not run"),
+    )
+    with pytest.raises(release.ReleaseError, match="504"):
+        release.install_from_registry(settings, "0.1.0", python="python")
+
+
+def test_artifact_index_install_downloads_and_installs_the_wheel(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {
+            "SOURCECRAFT_PYPI_REGISTRY_ID": "registry123",
+            "PYPI_REGISTRY_PAT": "s3cr3t-value",
+        }
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, env: dict[str, str] | None, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    def fake_download(
+        passed_settings: Any,
+        artifact: Any,
+        destination: Path,
+        *,
+        registry_url: str,
+        timeout: int,
+    ) -> Path:
+        destination.write_bytes(b"wheel")
+        return destination
+
+    monkeypatch.setattr(
+        release,
+        "_read_registry_page",
+        lambda settings_arg, url, *, timeout=30: SIMPLE_INDEX_PAGE,
+    )
+    monkeypatch.setattr(release, "download_artifact", fake_download)
+    monkeypatch.setattr(release, "_run", fake_run)
+    release.install_artifact_from_index(settings, "0.1.0", python="python")
+
+    command = commands[0]
+    assert command[:6] == [
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",
+        "--no-cache-dir",
+    ]
+    assert command[-1].endswith("automl_contracts-0.1.0-py3-none-any.whl")
+    assert "s3cr3t-value" not in " ".join(command)
 
 
 def test_release_cli_prints_the_checked_version(

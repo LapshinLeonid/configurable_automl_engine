@@ -10,18 +10,25 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import http.client
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
+from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
 DISTRIBUTION_NAME = "automl-contracts"
@@ -88,6 +95,36 @@ class RegistrySettings:
     def authenticated_index_url(self) -> str:
         """Return the installation index with a quoted PAT for pip."""
         return authenticated_url(self.index_url, self.token)
+
+
+@dataclass(frozen=True)
+class IndexArtifact:
+    """An artifact link advertised by the registry simple index.
+
+    Args:
+        filename: File name of the wheel or source distribution.
+        url: Absolute URL without the ``#sha256=`` fragment.
+        sha256: Hash advertised by the index fragment, when present.
+    """
+
+    filename: str
+    url: str
+    sha256: str | None = None
+
+
+class _AnchorCollector(HTMLParser):
+    """Collect the ``href`` attributes of anchors in a simple index page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for name, value in attrs:
+            if name == "href" and value:
+                self.hrefs.append(value)
 
 
 def read_distribution(pyproject: Path) -> tuple[str, str]:
@@ -519,6 +556,284 @@ def _duplicate_error(version: str) -> ReleaseError:
     )
 
 
+def _project_index_url(index_url: str) -> str:
+    endpoint = index_url.rstrip("/")
+    return f"{endpoint}/{DISTRIBUTION_NAME}/"
+
+
+def _registry_request(settings: RegistrySettings, url: str) -> urllib.request.Request:
+    credentials = base64.b64encode(
+        f"{TWINE_USERNAME}:{settings.token}".encode()
+    ).decode()
+    return urllib.request.Request(
+        url, headers={"Authorization": f"Basic {credentials}"}
+    )
+
+
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme, parts.netloc
+
+
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward registry credentials to another origin."""
+
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: Any,
+        msg: Any,
+        headers: Any,
+        newurl: Any,
+    ) -> Any:
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        if _origin(target) != _origin(req.full_url):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _open_registry_url(
+    settings: RegistrySettings,
+    url: str,
+    *,
+    timeout: int,
+    auth_origin: str | None = None,
+) -> Any:
+    """Open a URL and attach the PAT only to one trusted origin.
+
+    The ``Authorization`` header is sent only when ``url`` has the same scheme
+    and host as ``auth_origin``. Redirects to another origin drop the header as
+    well, so a link from the simple index cannot receive the PAT.
+
+    Args:
+        settings: Registry settings with the PAT.
+        url: URL to open without credentials embedded in it.
+        timeout: HTTP timeout in seconds.
+        auth_origin: Origin that may receive the PAT; ``None`` sends no auth.
+
+    Returns:
+        The response of the final page after redirects.
+    """
+    if auth_origin is not None and _origin(url) == _origin(auth_origin):
+        request = _registry_request(settings, url)
+    else:
+        request = urllib.request.Request(url)
+    opener = urllib.request.build_opener(_CredentialSafeRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
+def _read_registry_page(
+    settings: RegistrySettings, url: str, *, timeout: int = 30
+) -> str:
+    """Read an authenticated registry page as text.
+
+    Args:
+        settings: Registry settings with the PAT.
+        url: Page URL without credentials.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        The decoded response body.
+
+    Raises:
+        urllib.error.HTTPError: The registry answered with an error status.
+        urllib.error.URLError: The registry is unreachable.
+        http.client.HTTPException: The response is malformed or truncated.
+        OSError: The request timed out or the connection failed.
+    """
+    with _open_registry_url(
+        settings, url, timeout=timeout, auth_origin=url
+    ) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _artifact_filename(url: str) -> str | None:
+    """Return a safe artifact file name or ``None`` for an unsafe link.
+
+    The name is percent-decoded, so a link can encode path separators and
+    ``..`` components. Such links are rejected instead of being joined to the
+    temporary download directory.
+    """
+    filename = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+    if not filename or filename in {".", ".."}:
+        return None
+    if "/" in filename or "\\" in filename or "\x00" in filename:
+        return None
+    if Path(filename).name != filename:
+        return None
+    return filename
+
+
+def parse_index_artifacts(body: str, base_url: str) -> tuple[IndexArtifact, ...]:
+    """Parse the artifact links of an HTML simple index page.
+
+    Args:
+        body: HTML body of the project index page.
+        base_url: Project index URL used to resolve relative links.
+
+    Returns:
+        Every artifact link with a safe file name, its absolute URL and
+        advertised hash.
+    """
+    collector = _AnchorCollector()
+    collector.feed(body)
+    collector.close()
+    artifacts: list[IndexArtifact] = []
+    for href in collector.hrefs:
+        url = urllib.parse.urljoin(base_url, href)
+        filename = _artifact_filename(url)
+        if filename is None:
+            continue
+        fragment = urllib.parse.parse_qs(urllib.parse.urlsplit(url).fragment)
+        hashes = fragment.get("sha256")
+        artifacts.append(
+            IndexArtifact(
+                filename=filename,
+                url=url.partition("#")[0],
+                sha256=hashes[0] if hashes else None,
+            )
+        )
+    return tuple(artifacts)
+
+
+def _is_universal_wheel(filename: str) -> bool:
+    """Return ``True`` for a ``py3-none-any`` wheel."""
+    try:
+        tags = parse_wheel_filename(filename)[3]
+    except (InvalidWheelFilename, ValueError):
+        return False
+    return any(
+        tag.interpreter == "py3" and tag.abi == "none" and tag.platform == "any"
+        for tag in tags
+    )
+
+
+def select_artifact(artifacts: Sequence[IndexArtifact], version: str) -> IndexArtifact:
+    """Pick the artifact that carries ``version``, preferring the wheel.
+
+    A single wheel is used as-is. When the index lists several wheels, only a
+    unique universal ``py3-none-any`` wheel is chosen; otherwise the selection
+    is ambiguous and fails instead of picking an uninstallable wheel.
+
+    Args:
+        artifacts: Links parsed from the registry simple index.
+        version: Exact contract version to install.
+
+    Returns:
+        The wheel or, when there is no wheel, the source distribution.
+
+    Raises:
+        ReleaseError: The version is invalid, the index has no artifact for it,
+            or several wheels cannot be told apart deterministically.
+    """
+    try:
+        expected = Version(version)
+    except InvalidVersion as error:
+        raise ReleaseError(
+            f"release version {version!r} is not a valid PEP 440 version"
+        ) from error
+    matches: list[IndexArtifact] = []
+    for artifact in artifacts:
+        match = _ARTIFACT.fullmatch(artifact.filename)
+        if match is None:
+            continue
+        try:
+            if Version(match.group("version")) == expected:
+                matches.append(artifact)
+        except InvalidVersion:
+            continue
+    wheels = [artifact for artifact in matches if artifact.filename.endswith(".whl")]
+    if len(wheels) == 1:
+        return wheels[0]
+    if wheels:
+        universal = [
+            artifact for artifact in wheels if _is_universal_wheel(artifact.filename)
+        ]
+        if len(universal) == 1:
+            return universal[0]
+        names = ", ".join(artifact.filename for artifact in wheels)
+        raise ReleaseError(
+            f"the registry index lists several wheels for {DISTRIBUTION_NAME} "
+            f"{version} and none is a unique universal py3-none-any wheel: {names}"
+        )
+    if matches:
+        return matches[0]
+    raise ReleaseError(
+        f"the registry simple index does not list an artifact for "
+        f"{DISTRIBUTION_NAME} {version}"
+    )
+
+
+def download_artifact(
+    settings: RegistrySettings,
+    artifact: IndexArtifact,
+    destination: Path,
+    *,
+    registry_url: str,
+    timeout: int = 300,
+) -> Path:
+    """Download an index artifact and verify its advertised hash.
+
+    The PAT is attached only when the artifact URL has the same origin as
+    ``registry_url``. External links, such as a presigned storage URL, are
+    fetched without credentials. The download fails closed when the index does
+    not advertise a sha256.
+
+    Args:
+        settings: Registry settings with the PAT.
+        artifact: Link parsed from the registry simple index.
+        destination: File path that receives the artifact.
+        registry_url: Index URL whose origin may receive the PAT.
+        timeout: HTTP timeout in seconds.
+
+    Returns:
+        The ``destination`` path.
+
+    Raises:
+        ReleaseError: The artifact cannot be fetched, the index has no hash, or
+            the bytes do not match the hash advertised by the index.
+    """
+    try:
+        with _open_registry_url(
+            settings,
+            artifact.url,
+            timeout=timeout,
+            auth_origin=registry_url,
+        ) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as error:
+        raise ReleaseError(
+            f"the registry did not serve {artifact.filename}: HTTP {error.code}"
+        ) from error
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise ReleaseError(
+            f"cannot reach the registry artifact {artifact.filename}: {reason}"
+        ) from error
+    if artifact.sha256 is None:
+        raise ReleaseError(
+            f"the registry simple index does not advertise a sha256 for "
+            f"{artifact.filename}; refusing to install an unverified artifact"
+        )
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != artifact.sha256:
+        raise ReleaseError(
+            f"the registry served {artifact.filename} with sha256 {digest}, "
+            f"but the simple index advertises {artifact.sha256}"
+        )
+    try:
+        destination.write_bytes(payload)
+    except OSError as error:
+        raise ReleaseError(
+            f"cannot store {artifact.filename} at {destination}: {error}"
+        ) from error
+    return destination
+
+
 def registry_has_version(
     settings: RegistrySettings,
     version: str,
@@ -540,17 +855,9 @@ def registry_has_version(
     Raises:
         ReleaseError: The index is unreachable or rejects the credentials.
     """
-    endpoint = (index_url or settings.index_url).rstrip("/")
-    url = f"{endpoint}/{DISTRIBUTION_NAME}/"
-    credentials = base64.b64encode(
-        f"{TWINE_USERNAME}:{settings.token}".encode()
-    ).decode()
-    request = urllib.request.Request(
-        url, headers={"Authorization": f"Basic {credentials}"}
-    )
+    url = _project_index_url(index_url or settings.index_url)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
+        body = _read_registry_page(settings, url, timeout=timeout)
     except urllib.error.HTTPError as error:
         if error.code == 404:
             return False
@@ -563,10 +870,9 @@ def registry_has_version(
         raise ReleaseError(
             f"cannot read the registry index: HTTP {error.code}"
         ) from error
-    except urllib.error.URLError as error:
-        raise ReleaseError(
-            f"cannot reach the registry index: {error.reason}"
-        ) from error
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise ReleaseError(f"cannot reach the registry index: {reason}") from error
     pattern = re.compile(rf"automl_contracts-{re.escape(version)}(?:[-.]|\.tar\.gz)")
     return pattern.search(body) is not None
 
@@ -633,6 +939,12 @@ def publish(
     print(f"Published {DISTRIBUTION_NAME} {expected_version}: {names}")
 
 
+def _missing_pep658_metadata(output: str) -> bool:
+    lowered = output.lower()
+    advertises = ".whl.metadata" in lowered or ".tar.gz.metadata" in lowered
+    return advertises and ("404" in lowered or "not found" in lowered)
+
+
 def _install_failure(output: str, version: str) -> ReleaseError:
     lowered = output.lower()
     if any(
@@ -655,6 +967,82 @@ def _install_failure(output: str, version: str) -> ReleaseError:
     )
 
 
+def install_artifact_from_index(
+    settings: RegistrySettings,
+    version: str,
+    *,
+    python: str,
+    index_url: str | None = None,
+    timeout: int = 900,
+) -> None:
+    """Install the contract from the artifact URL advertised by the index.
+
+    The simple index of the SourceCraft registry may advertise PEP 658 core
+    metadata while returning 404 for ``*.whl.metadata``; pip then refuses to
+    install by name. This helper resolves the wheel or sdist link itself,
+    downloads it with the PAT and installs the local file, so that neither the
+    token nor the metadata endpoint is involved in the pip command line.
+
+    Args:
+        settings: Registry settings with the PAT.
+        version: Exact contract version to install.
+        python: Interpreter of the clean environment.
+        index_url: Optional registry index override for local verification.
+        timeout: Timeout for the download and pip invocation in seconds.
+
+    Raises:
+        ReleaseError: The index has no matching artifact, the download fails or
+            the advertised hash does not match, or pip rejects the artifact.
+    """
+    project_url = _project_index_url(index_url or settings.index_url)
+    try:
+        body = _read_registry_page(settings, project_url)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise ReleaseError(
+                "Authentication to the SourceCraft registry failed. "
+                f"{PAT_ENV} is missing, expired or lacks read rights; the token "
+                "was not printed."
+            ) from error
+        raise ReleaseError(
+            f"cannot resolve {DISTRIBUTION_NAME} {version} from the registry "
+            f"index: HTTP {error.code}"
+        ) from error
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise ReleaseError(
+            f"cannot reach the registry index to resolve {DISTRIBUTION_NAME} "
+            f"{version}: {reason}"
+        ) from error
+    artifacts = parse_index_artifacts(body, project_url)
+    artifact = select_artifact(artifacts, version)
+    with tempfile.TemporaryDirectory(prefix="automl-contracts-install-") as directory:
+        path = download_artifact(
+            settings,
+            artifact,
+            Path(directory) / artifact.filename,
+            registry_url=project_url,
+            timeout=timeout,
+        )
+        command = [
+            python,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--no-cache-dir",
+            str(path),
+        ]
+        result = _run(command, env=None, timeout=timeout)
+    if result.returncode != 0:
+        output = redact(f"{result.stdout}\n{result.stderr}", settings.token).strip()
+        raise ReleaseError(
+            f"installing the {artifact.filename} artifact from the registry "
+            f"failed\n{output}"
+        )
+    print(f"Installed the registry artifact {artifact.filename} directly")
+
+
 def install_from_registry(
     settings: RegistrySettings,
     version: str,
@@ -668,7 +1056,9 @@ def install_from_registry(
 
     Runtime dependencies come from the public index because the SourceCraft
     registry serves only the contract. The contract itself is installed with
-    ``--no-deps`` from the authenticated registry index.
+    ``--no-deps`` from the authenticated registry index. When the index
+    advertises PEP 658 metadata that the registry does not serve, the artifact
+    link from the index is installed directly instead.
 
     Args:
         settings: Registry settings with the PAT.
@@ -724,7 +1114,28 @@ def install_from_registry(
     result = _run(install_command, env=environment, timeout=timeout)
     output = redact(f"{result.stdout}\n{result.stderr}", settings.token).strip()
     if result.returncode != 0:
-        raise _install_failure(output, version)
+        if not _missing_pep658_metadata(output):
+            raise _install_failure(output, version)
+        print(
+            "The registry simple index advertises PEP 658 metadata "
+            "(*.whl.metadata) but does not serve it; installing the artifact "
+            "link from the index instead.",
+            file=sys.stderr,
+        )
+        try:
+            install_artifact_from_index(
+                settings,
+                version,
+                python=python,
+                index_url=index_url,
+                timeout=timeout,
+            )
+        except (ReleaseError, OSError, http.client.HTTPException) as error:
+            detail = redact(str(error), settings.token)
+            raise ReleaseError(
+                f"installing {DISTRIBUTION_NAME} from the registry failed\n"
+                f"{output}\nfalling back to the artifact link also failed: {detail}"
+            ) from error
 
     check_result = _run(
         [python, "-m", "pip", "check"],
