@@ -13,7 +13,6 @@ import pytest
 from pydantic import ValidationError
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
-GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
 BASE_CONFIG: dict[str, Any] = {
     "general": {
@@ -129,16 +128,16 @@ def test_config_round_trip_is_stable() -> None:
     )
 
 
-def test_reference_config_serialization_matches_golden() -> None:
+def test_reference_config_serialization_matches_reference() -> None:
     config = contracts.Config.model_validate(load_json("reference_config.json"))
     actual = config.model_dump(mode="json")
-    golden = json.loads(
-        (GOLDEN_DIR / "reference_config_serialized.json").read_text(encoding="utf-8")
+    expected = json.loads(
+        (DATA_DIR / "reference_config_serialized.json").read_text(encoding="utf-8")
     )
-    assert actual == golden, (
+    assert actual == expected, (
         "The serialized reference config changed. Review the contract change, "
-        "then regenerate `tests/contracts/golden/reference_config_serialized.json` "
-        "and update CHANGELOG.md/version."
+        "then regenerate the reference with "
+        "`python -m tests.contracts.update_reference_serializations`."
     )
 
 
@@ -422,7 +421,7 @@ def test_custom_metric_spec_is_structural_and_frozen() -> None:
     assert structural.path == "no_such_module_xyz:f"
 
 
-def test_reference_result_round_trip_matches_golden() -> None:
+def test_reference_result_round_trip_matches_reference() -> None:
     payload = load_json("reference_result.json")
     result = contracts.ExperimentResult.model_validate(payload)
     assert result.status is contracts.RunStatus.completed
@@ -433,13 +432,13 @@ def test_reference_result_round_trip_matches_golden() -> None:
     assert restored == result
     assert restored.to_json() == result.to_json()
     actual = json.loads(result.to_json())
-    golden = json.loads(
-        (GOLDEN_DIR / "reference_result_serialized.json").read_text(encoding="utf-8")
+    expected = json.loads(
+        (DATA_DIR / "reference_result_serialized.json").read_text(encoding="utf-8")
     )
-    assert actual == golden, (
+    assert actual == expected, (
         "The serialized reference result changed. Review the result-model "
-        "change, then regenerate `tests/contracts/golden/reference_result_serialized.json` "
-        "and update CHANGELOG.md/version."
+        "change, then regenerate the reference with "
+        "`python -m tests.contracts.update_reference_serializations`."
     )
 
 

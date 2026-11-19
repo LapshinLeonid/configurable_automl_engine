@@ -65,7 +65,7 @@ import the engine.
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
-| `automl_contracts.preprocessing` | `ObjectScalingSpec`, `ScalingSpec`, scaling and outlier specifications, `PreprocessingPreset`, `PreprocessingOverride`, `AlgorithmClass`, `merge_preprocessing_overrides`, `NO_OUTLIERS` and the deprecated `ScalingType` alias |
+| `automl_contracts.preprocessing` | `ObjectScalingSpec`, `ScalingSpec`, scaling and outlier specifications, `PreprocessingPreset`, `PreprocessingOverride`, `AlgorithmClass`, `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers`, `merge_preprocessing_overrides`, `NO_OUTLIERS` and the deprecated `ScalingType` alias |
 | `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult` |
 | `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` |
 | `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS` |
@@ -73,7 +73,7 @@ import the engine.
 | `automl_contracts.config.sanity_gate` | `SanityGateCfg`, `CorridorMode`, `GeneralizationGapMode`, `ERR_REMOVED_SANITY_GATE_MODE` |
 | `automl_contracts.config.complexity_guard` | `ComplexityGuardCfg`, `ComplexityGuardMode`, `ComplexityGuardUserRangePolicy`, `ComplexityGuardSizeBasis` |
 | `automl_contracts.config.ensemble` | `EnsembleCfg`, `EnsembleWeightMethod` |
-| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` |
+| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `AlgorithmsConfigType`, `ERR_REMOVED_PLUGIN_KEY` |
 
 `ALIAS_TO_SKLEARN` and `BUILTIN_METRIC_DIRECTIONS` are public module data used
 to interpret metric names and result payloads. `to_sklearn_name` is exported
@@ -348,9 +348,9 @@ python schema_generator.py
 
 A release candidate must pass a schema reproducibility check: regenerate the
 schema in a temporary location and require it to match the checked-in canonical
-file byte for byte. The reproducibility check and the golden schema test must be
-wired into CI before the first contract release; they are not implied by the
-manual commands above. Do not edit `config.schema.json` by hand.
+file byte for byte. `tests/contracts/test_json_schema.py` performs this check
+as part of `pytest tests/contracts` in CI. Do not edit `config.schema.json` by
+hand.
 
 ## Versioning and compatibility
 
@@ -409,7 +409,8 @@ The engine's range is deliberately narrow during `0.x`: a MINOR contract
 release may contain an incompatible change, so the engine must not accept
 `0.2.0` automatically. A combination outside the declared range is not
 supported even if an import happens to work. Changing the range is a separate
-change with its own changelog entry and CI check.
+change with its own changelog entry; the contract tests verify the declared
+range.
 
 When the engine and the contract change together, update both distributions in
 one PR, bump the contract version by SemVer, update the engine's range and run
@@ -495,9 +496,11 @@ request. The mandatory order is:
 A documentation-only change does not bump the contract version. A public API
 or schema change without a changelog entry, a compatibility-matrix update where
 required, a regenerated schema and a version decision is incomplete and must
-not be merged. The public API snapshot and golden schema checks required by the
-release gate must make an unnoticed API change fail once they are wired into
-CI; until then, the review checklist catches a missing changelog entry.
+not be merged. The contract tests check the documented public surface, the
+declared version range and the Pydantic declarations; they do not pin a
+snapshot of that surface and do not read `CHANGELOG.md`. The review checklist
+is what catches a missing changelog entry or an undocumented compatibility
+change.
 
 The maintainer process is described above. Registry provisioning and the
 requirements for dependent repositories are documented in the

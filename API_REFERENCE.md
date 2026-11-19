@@ -1506,7 +1506,7 @@ The stable public submodules are:
 | `automl_contracts.protocols` | `MetricFunction`, `ScorerCallable` |
 | `automl_contracts.search_space` | `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` |
 | `automl_contracts.feature_selection` | `FeatureSelectionMode`, `FeatureSelectionMethod`, `FeatureSelectionCfg` |
-| `automl_contracts.preprocessing` | `ImputationStrategy`, `ObjectScalingSpec`, `StringScaling`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ScalingSpec`, `OutlierSpec`, `ObjectOutlierSpec`, `StringOutlierSpec`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `merge_preprocessing_overrides`, `NO_OUTLIERS`, the deprecated `ScalingType` alias |
+| `automl_contracts.preprocessing` | `ImputationStrategy`, `ObjectScalingSpec`, `StringScaling`, `StandardScaling`, `RobustScaling`, `QuantileScaling`, `NoScaling`, `ScalingSpec`, `OutlierSpec`, `ObjectOutlierSpec`, `StringOutlierSpec`, `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `AlgorithmClass`, `PreprocessingPreset`, `PreprocessingOverride`, `coerce_scaling`, `scaling_type`, `coerce_outliers`, `format_outliers`, `merge_preprocessing_overrides`, `NO_OUTLIERS`, the deprecated `ScalingType` alias |
 | `automl_contracts.result` | `AlgorithmRun`, `ExperimentResult`, `MetricDirection`, `RunPhaseAction`, `RunStatus`, `RunStepStatus` |
 | `automl_contracts.config` | `Config`, `GeneralCfg`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, `AlgoCfg`, `OversamplingCfg`, `AlgorithmsConfig` |
 | `automl_contracts.config.general` | `GeneralCfg`, `ComparisonMetric`, `InfPolicy`, `DatetimePolicy`, `SplitAggregation`, `AUTO_HOLDOUT_FRACTION`, `AUTO_HOLDOUT_MIN_ROWS` |
@@ -1514,7 +1514,7 @@ The stable public submodules are:
 | `automl_contracts.config.sanity_gate` | `SanityGateCfg`, `CorridorMode`, `GeneralizationGapMode`, `ERR_REMOVED_SANITY_GATE_MODE` |
 | `automl_contracts.config.complexity_guard` | `ComplexityGuardCfg`, `ComplexityGuardMode`, `ComplexityGuardUserRangePolicy`, `ComplexityGuardSizeBasis` |
 | `automl_contracts.config.ensemble` | `EnsembleCfg`, `EnsembleWeightMethod` |
-| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `ERR_REMOVED_PLUGIN_KEY` |
+| `automl_contracts.config.algorithms` | `AlgoCfg`, `OversamplingCfg`, `OversamplingAlgorithm`, `AlgorithmsConfig`, `AlgorithmsConfigType`, `ERR_REMOVED_PLUGIN_KEY` |
 
 `automl_contracts.config.root` and `automl_contracts.config.general_rules`
 are internal modules. `ScalingType` is a deprecated alias in
@@ -1656,8 +1656,8 @@ python schema_generator.py
 
 The release gate requires a schema reproducibility check: regenerate the schema
 in a temporary location and require a byte-for-byte match with the checked-in
-canonical file. The check and the golden schema test must be wired into CI
-before the first contract release.
+canonical file. `tests/contracts/test_json_schema.py` performs this check as
+part of `pytest tests/contracts` in CI.
 
 ## What the engine re-exports
 
@@ -1683,14 +1683,14 @@ contract replacement.
 | `configurable_automl_engine.common.errors` | `automl_contracts.errors` or the root | — |
 | `configurable_automl_engine.training_engine.config_parser` | `automl_contracts`, `automl_contracts.config.*`, `automl_contracts.search_space`, `automl_contracts.feature_selection`; it re-exports `Config`, `GeneralCfg`, `AlgoCfg`, `AlgorithmsConfig`, `OversamplingCfg`, `OversamplingAlgorithm`, `HPOPhaseCfg`, `SanityGateCfg`, `ComplexityGuardCfg`, `EnsembleCfg`, the phase and enum literals, `AUTO_HOLDOUT_*`, `DEFAULT_PHASE_N_TRIALS`, `ERR_*` and `SearchSpaceEntry` | `read_config`, `SanityGateMode` |
 | `configurable_automl_engine.training_engine.config.general` | `automl_contracts.config.general`; the direct `config.*` module is an internal/deprecated shim | — |
-| `configurable_automl_engine.training_engine.config.algorithms` | `automl_contracts.config.algorithms`; the direct `config.*` module is an internal/deprecated shim | `ALGO_PACKAGE_MAPPING`, `AlgorithmsConfigType`; `REMOVED_ALGORITHM_KEYS` is an internal contract symbol |
+| `configurable_automl_engine.training_engine.config.algorithms` | `automl_contracts.config.algorithms` for `AlgoCfg`, `AlgorithmsConfig`, `AlgorithmsConfigType`, `OversamplingCfg`, `OversamplingAlgorithm` and `ERR_REMOVED_PLUGIN_KEY`; the direct `config.*` module is an internal/deprecated shim | `ALGO_PACKAGE_MAPPING`; `REMOVED_ALGORITHM_KEYS` is an internal contract symbol |
 | `configurable_automl_engine.training_engine.config.phases` | `automl_contracts.config.phases`; the direct `config.*` module is an internal/deprecated shim | — |
 | `configurable_automl_engine.training_engine.config.sanity_gate` | `automl_contracts.config.sanity_gate`; the direct `config.*` module is an internal/deprecated shim | `SanityGateMode` |
 | `configurable_automl_engine.training_engine.config.complexity_guard` | `automl_contracts.config.complexity_guard`; the direct `config.*` module is an internal/deprecated shim | — |
 | `configurable_automl_engine.training_engine.config.ensemble` | `automl_contracts.config.ensemble`; the stable shim re-exports `EnsembleCfg` and `EnsembleWeightMethod` | — |
 | `configurable_automl_engine.feature_selection` | `automl_contracts.feature_selection` for `FeatureSelectionCfg`, `FeatureSelectionMethod`, `FeatureSelectionMode` | `FeatureSelector` |
-| `configurable_automl_engine.preprocessing_presets` | `automl_contracts.preprocessing` for the scaling and outlier specifications, `PreprocessingPreset`, `PreprocessingOverride`, `AlgorithmClass`, `merge_preprocessing_overrides`, `ScalingType` (deprecated alias) | `ALGORITHM_CLASS_MAPPING`, `PRESET_BY_CLASS`, `resolve_preprocessing_preset`, `coerce_scaling`, `scaling_type`, `normalize_algorithm`, `requires_missing_indicator` |
-| `configurable_automl_engine.outliers_presets` | `automl_contracts.preprocessing` for `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS` | `coerce_outliers`, `format_outliers` |
+| `configurable_automl_engine.preprocessing_presets` | `automl_contracts.preprocessing` for the scaling and outlier specifications, `PreprocessingPreset`, `PreprocessingOverride`, `AlgorithmClass`, `coerce_scaling`, `scaling_type`, `merge_preprocessing_overrides`, `ScalingType` (deprecated alias) | `ALGORITHM_CLASS_MAPPING`, `PRESET_BY_CLASS`, `resolve_preprocessing_preset`, `normalize_algorithm`, `requires_missing_indicator` |
+| `configurable_automl_engine.outliers_presets` | `automl_contracts.preprocessing` for `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS`, `coerce_outliers`, `format_outliers` | — |
 | `configurable_automl_engine.hpo.default_spaces` | `automl_contracts.search_space` for `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` | `DEFAULT_SPACES`, `align_*`, `compute_svr_epsilon_bounds`, `clip_search_space`, `normalize_hyperparameter_entry`, `infer_param_numeric_type` |
 | `configurable_automl_engine.experiment.result` | `automl_contracts.result` for `AlgorithmRun`, `ExperimentResult`, `MetricDirection`, `RunPhaseAction`, `RunStatus`, `RunStepStatus` | `ScoreValue`, `ScoreValueOrNone` |
 | `configurable_automl_engine.experiment` | `automl_contracts.result` for the result DTOs and enums | `AutoMLExperiment`, reporters, `ExperimentStore`, `Leaderboard`, `export_experiment`, explain helpers |
@@ -1757,8 +1757,10 @@ The engine declares `automl-contracts>=0.1.0,<0.2.0`:
 A combination outside the declared range is unsupported even if an import
 happens to work. A contract change and the engine change that consumes it are
 made in one PR: both builds run, the contract version is bumped by SemVer, the
-engine range is updated atomically and the schema and `CHANGELOG.md` are
-updated. The full process is in the
+engine range is updated atomically and the schema is regenerated. The contract
+tests check the documented surface and the declared version range;
+`CHANGELOG.md` is release documentation maintained in review, not by a test.
+The full process is in the
 [contract package guide](automl-contracts/README.md#changing-the-contract); the
 registry requirements are in its installation section.
 

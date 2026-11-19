@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -119,6 +120,9 @@ def test_contract_is_usable_in_a_clean_venv(
 
     reference = DATA_DIR / "reference_config.json"
     example = DATA_DIR / "example_config.json"
+    expected_version = tomllib.loads(
+        (CONTRACT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
     script = tmp_path / "consumer.py"
     script.write_text(
         """
@@ -195,7 +199,7 @@ assert json.loads(schema.read_text(encoding="utf-8"))["$defs"]
 
 assert callable(MetricFunction)
 assert callable(ScorerCallable)
-assert contracts.__version__ == "0.1.0"
+assert contracts.__version__ == sys.argv[3]
 print("CONTRACT-OK")
 """,
         encoding="utf-8",
@@ -203,7 +207,7 @@ print("CONTRACT-OK")
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     result = subprocess.run(
-        [str(python), str(script), str(reference), str(example)],
+        [str(python), str(script), str(reference), str(example), expected_version],
         cwd=tmp_path,
         env=env,
         capture_output=True,

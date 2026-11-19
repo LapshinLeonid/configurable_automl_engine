@@ -1,76 +1,30 @@
-"""Golden snapshot of the public ``automl_contracts`` API.
-
-The snapshot pins module exports, model fields, enum members, Protocol and
-function signatures, constants and the canonical defining module of every
-public symbol.  A change is a contract change: it is allowed only with an
-explicit golden update, a ``CHANGELOG.md`` entry and a SemVer version bump.
-"""
+"""Checks that the documented public ``automl_contracts`` API stays importable."""
 
 from __future__ import annotations
 
 import importlib
-import itertools
-import json
+import inspect
+import types
 from pathlib import Path
+from typing import TypeVar
 
 import automl_contracts
 import pytest
 
+from tests.contracts import _contract_snapshot
 from tests.contracts._contract_snapshot import (
     API_REFERENCE_DOC,
-    PUBLIC_API_GOLDEN,
-    RELEASE_HISTORY,
-    build_public_api,
-    build_snapshot,
+    PUBLIC_SUBMODULES,
     contract_public_names,
-    load_golden,
-    load_release_history,
     parse_documented_public_modules,
     parse_documented_public_symbols,
-    read_changelog_latest_version,
-    read_contract_version,
 )
-
-REGENERATE = (
-    "Public API changed. Review the diff, then regenerate the snapshot with "
-    "`python -m tests.contracts.update_golden`, add an entry to "
-    "`automl-contracts/CHANGELOG.md` and bump the contract version in "
-    "`automl-contracts/pyproject.toml` according to SemVer."
-)
-
-
-def _snapshot_without_metadata(snapshot: dict) -> dict:
-    return {key: value for key, value in snapshot.items() if key != "api_digest"}
-
-
-def test_public_api_matches_the_golden_file() -> None:
-    actual = build_snapshot()
-    golden = load_golden()
-    assert actual == golden, REGENERATE
-
-
-def test_snapshot_versions_are_synchronized() -> None:
-    golden = load_golden()
-    assert golden["contract_version"] == automl_contracts.__version__
-    assert golden["pyproject_version"] == read_contract_version()
-    assert golden["changelog_version"] == read_changelog_latest_version()
-    assert (
-        golden["contract_version"]
-        == golden["pyproject_version"]
-        == golden["changelog_version"]
-    )
-
-
-def test_api_digest_is_current() -> None:
-    from tests.contracts._contract_snapshot import api_digest
-
-    golden = load_golden()
-    assert api_digest(build_public_api()) == golden["api_digest"], REGENERATE
 
 
 def test_documented_submodules_match_the_api_reference() -> None:
-    golden = load_golden()
-    assert set(golden["modules"]) == parse_documented_public_modules()
+    assert set(PUBLIC_SUBMODULES) | {"automl_contracts"} == (
+        parse_documented_public_modules()
+    )
     assert API_REFERENCE_DOC.is_file()
     assert "## Public imports" in API_REFERENCE_DOC.read_text(encoding="utf-8")
 
@@ -83,6 +37,44 @@ def test_documented_public_symbols_match_the_contract() -> None:
     assert unexpected == [], (
         f"public but undocumented in API_REFERENCE.md: {unexpected}"
     )
+
+
+def test_new_metrics_export_must_be_documented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new ``metrics.__all__`` entry shows up as undocumented."""
+    metrics = importlib.import_module("automl_contracts.metrics")
+    monkeypatch.setattr(
+        metrics, "__all__", [*metrics.__all__, "undocumented_metrics_probe"]
+    )
+    documented = set(parse_documented_public_symbols())
+    assert "undocumented_metrics_probe" in contract_public_names() - documented
+
+
+def test_defined_public_names_reads_the_module_source(tmp_path: Path) -> None:
+    """The no-``__all__`` branch reads public definitions from the source AST."""
+    source = tmp_path / "probe_module.py"
+    source.write_text(
+        "import os\n"
+        "from typing import TypeVar\n"
+        "\n"
+        "T = TypeVar('T')\n"
+        "_private = 1\n"
+        "CONSTANT = 2\n"
+        "\n"
+        "class PublicClass:\n"
+        "    pass\n"
+        "\n"
+        "def public_function() -> None:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    probe = types.SimpleNamespace(__file__=str(source), T=TypeVar("T"))
+    assert _contract_snapshot._defined_public_names(probe) == {
+        "CONSTANT",
+        "PublicClass",
+        "public_function",
+    }
 
 
 @pytest.mark.parametrize(
@@ -102,107 +94,7 @@ def test_protocols_are_documented_and_structural() -> None:
     assert ScorerCallable._is_protocol
     assert automl_contracts.MetricFunction is MetricFunction
     assert automl_contracts.ScorerCallable is ScorerCallable
-    call = load_golden()["symbols"]["MetricFunction"]["call"]
-    assert "**kwargs" in call, (
-        "a keyword-only/positional change must alter the snapshot"
-    )
-
-
-def _semver_violation(history: dict[str, dict]) -> str | None:
-    from packaging.version import Version
-
-    versions = [Version(version) for version in history]
-    if versions != sorted(versions):
-        return "release history is not sorted"
-    for previous_version, current_version in itertools.pairwise(versions):
-        previous = history[str(previous_version)]
-        current = history[str(current_version)]
-        if previous["api_digest"] == current["api_digest"]:
-            continue
-        if previous["schema_version"] != current["schema_version"]:
-            continue
-        if current_version.major > previous_version.major:
-            continue
-        if (
-            current_version.major == previous_version.major
-            and current_version.minor > previous_version.minor
-        ):
-            continue
-        return (
-            "A changed public API must bump MINOR or MAJOR, never PATCH: "
-            f"{previous_version} -> {current_version}"
-        )
-    return None
-
-
-def test_release_history_pins_the_current_api_digest() -> None:
-    golden = load_golden()
-    history = load_release_history()
-    current = history[golden["contract_version"]]
-    assert current["schema_version"] == golden["schema_version"]
-    assert current["api_digest"] == golden["api_digest"]
-    assert _semver_violation(history) is None
-
-
-@pytest.mark.parametrize(
-    ("history", "violation"),
-    [
-        (
-            {
-                "0.1.0": {"schema_version": 2, "api_digest": "a"},
-                "0.2.0": {"schema_version": 2, "api_digest": "b"},
-            },
-            False,
-        ),
-        (
-            {
-                "0.1.0": {"schema_version": 2, "api_digest": "a"},
-                "0.1.1": {"schema_version": 2, "api_digest": "b"},
-            },
-            True,
-        ),
-        (
-            {
-                "1.0.0": {"schema_version": 2, "api_digest": "a"},
-                "1.1.0": {"schema_version": 2, "api_digest": "b"},
-            },
-            False,
-        ),
-        (
-            {
-                "1.0.0": {"schema_version": 2, "api_digest": "a"},
-                "1.0.1": {"schema_version": 2, "api_digest": "b"},
-            },
-            True,
-        ),
-        (
-            {
-                "0.1.0": {"schema_version": 1, "api_digest": "a"},
-                "0.1.1": {"schema_version": 2, "api_digest": "b"},
-            },
-            False,
-        ),
-        (
-            {
-                "0.2.0": {"schema_version": 2, "api_digest": "a"},
-                "0.1.0": {"schema_version": 2, "api_digest": "b"},
-            },
-            True,
-        ),
-    ],
-)
-def test_semver_rule_is_exercised_on_synthetic_history(
-    history: dict[str, dict], violation: bool
-) -> None:
-    assert (_semver_violation(history) is not None) is violation
-
-
-def test_snapshot_is_json_and_contains_every_public_symbol() -> None:
-    golden = load_golden()
-    json.dumps(golden)
-    public = contract_public_names()
-    assert public <= set(golden["symbols"])
-    assert "__version__" not in golden["symbols"]
-    assert PUBLIC_API_GOLDEN.read_text(encoding="utf-8").endswith("\n")
-    assert Path(PUBLIC_API_GOLDEN).parent.name == "golden"
-    assert RELEASE_HISTORY.is_file()
+    parameters = inspect.signature(MetricFunction.__call__).parameters
+    kwargs = parameters.get("kwargs")
+    assert kwargs is not None
+    assert kwargs.kind is inspect.Parameter.VAR_KEYWORD

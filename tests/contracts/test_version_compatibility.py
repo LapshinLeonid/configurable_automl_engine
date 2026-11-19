@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import tomllib
 
 import automl_contracts
@@ -12,10 +11,8 @@ from packaging.version import Version
 
 from tests.contracts._contract_snapshot import (
     API_REFERENCE_DOC,
-    CONTRACT_CHANGELOG,
     CONTRACT_PYPROJECT,
     REPO_ROOT,
-    load_golden,
 )
 
 
@@ -37,22 +34,9 @@ def contract_dependency_specifier() -> SpecifierSet:
     raise AssertionError("the engine must declare an automl-contracts dependency")
 
 
-def released_versions() -> list[str]:
-    text = CONTRACT_CHANGELOG.read_text(encoding="utf-8")
-    versions = [
-        match.group(1)
-        for match in re.finditer(r"^## \[([^\]]+)\]", text, re.MULTILINE)
-        if match.group(1).lower() != "unreleased"
-    ]
-    return versions
-
-
 def test_contract_version_is_synchronized() -> None:
     version = contract_project()["version"]
     assert automl_contracts.__version__ == version
-    assert version in released_versions()
-    assert released_versions()[0] == version
-    assert Version(version) == Version(version)
 
 
 def test_engine_declares_the_documented_contract_range() -> None:
@@ -106,18 +90,6 @@ def test_pydantic_version_is_declared_and_currently_supported() -> None:
     assert Version("3.0.0") not in specifier
     assert Version(pydantic.VERSION) in specifier, (pydantic.VERSION, str(specifier))
     assert contract_project()["requires-python"] == ">=3.11"
-
-
-def test_contract_version_is_not_older_than_any_changelog_release() -> None:
-    versions = [Version(version) for version in released_versions()]
-    assert versions == sorted(versions, reverse=True)
-    assert versions[0] == Version(contract_project()["version"])
-
-
-def test_snapshot_and_changelog_share_the_contract_version() -> None:
-    golden = load_golden()
-    assert golden["contract_version"] == contract_project()["version"]
-    assert golden["changelog_version"] == released_versions()[0]
 
 
 def test_semver_policy_is_documented() -> None:

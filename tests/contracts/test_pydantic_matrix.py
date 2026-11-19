@@ -21,7 +21,6 @@ from packaging.version import Version
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_SRC = REPO_ROOT / "automl-contracts" / "src"
 DATA_DIR = Path(__file__).resolve().parent / "data"
-GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 SCHEMA = CONTRACT_SRC / "automl_contracts" / "schemas" / "config.schema.json"
 GENERATOR = REPO_ROOT / "automl-contracts" / "scripts" / "generate_schema.py"
 
@@ -106,8 +105,8 @@ def test_serialization_and_schema_on_pydantic_versions(
             str(script),
             str(DATA_DIR / "reference_config.json"),
             str(DATA_DIR / "reference_result.json"),
-            str(GOLDEN_DIR / "reference_config_serialized.json"),
-            str(GOLDEN_DIR / "reference_result_serialized.json"),
+            str(DATA_DIR / "reference_config_serialized.json"),
+            str(DATA_DIR / "reference_result_serialized.json"),
             str(GENERATOR),
             str(SCHEMA),
         ],

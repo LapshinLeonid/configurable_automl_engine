@@ -18,6 +18,7 @@ import pytest
 
 import configurable_automl_engine as engine
 from tests.contracts._contract_snapshot import (
+    PUBLIC_SUBMODULES,
     contract_public_names,
     parse_documented_engine_paths,
 )
@@ -37,10 +38,10 @@ def contract_symbol(name: str) -> Any:
         raise KeyError(name)
     if hasattr(contracts, name):
         return getattr(contracts, name)
-    from automl_contracts import preprocessing
-
-    if hasattr(preprocessing, name):
-        return getattr(preprocessing, name)
+    for module_name in PUBLIC_SUBMODULES:
+        module = importlib.import_module(module_name)
+        if hasattr(module, name):
+            return getattr(module, name)
     raise KeyError(f"{name} is not a documented contract symbol")
 
 
