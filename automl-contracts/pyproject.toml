@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "automl-contracts"
-version = "0.1.2"
+version = "0.1.3"
 description = "Public data contracts of the Configurable AutoML Engine."
 readme = "README.md"
 license = "BSD-3-Clause"
