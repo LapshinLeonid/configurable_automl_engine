@@ -47,6 +47,11 @@ def github_ci_text() -> str:
     return path.read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def engine_pyproject_text() -> str:
+    return (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+
 def messages(violations: list[object]) -> str:
     return "\n".join(violation.message for violation in violations)
 
@@ -706,6 +711,64 @@ def test_github_ci_requires_engine_integration(
     assert "smoke_engine_install.py" in messages(guard.check_github_ci(text))
 
 
+def test_engine_versioning_ignores_contracts_tags(
+    guard: ModuleType, engine_pyproject_text: str
+) -> None:
+    assert guard.check_engine_versioning(engine_pyproject_text) == []
+
+
+def test_engine_versioning_requires_a_version_tag_regex(
+    guard: ModuleType, engine_pyproject_text: str
+) -> None:
+    text = engine_pyproject_text.replace(
+        'tag_regex = "^v(?P<version>\\\\d+\\\\.\\\\d+\\\\.\\\\d+.*)$"',
+        'tag_regex = "^.*$"',
+        1,
+    )
+    assert "tag_regex" in messages(guard.check_engine_versioning(text))
+
+
+def test_engine_versioning_requires_the_tag_mask(
+    guard: ModuleType, engine_pyproject_text: str
+) -> None:
+    text = engine_pyproject_text.replace(
+        '"--match", "v[0-9]*"',
+        '"--match", "*[0-9]*"',
+        1,
+    )
+    assert "v[0-9]*" in messages(guard.check_engine_versioning(text))
+
+
+def test_engine_versioning_rejects_multiple_tag_masks(
+    guard: ModuleType, engine_pyproject_text: str
+) -> None:
+    text = engine_pyproject_text.replace(
+        '"--match", "v[0-9]*"]',
+        '"--match", "v[0-9]*", "--match", "*[0-9]*"]',
+        1,
+    )
+    assert "exactly one" in messages(guard.check_engine_versioning(text))
+
+
+def test_engine_versioning_accepts_a_string_describe_command(
+    guard: ModuleType, engine_pyproject_text: str
+) -> None:
+    text = engine_pyproject_text.replace(
+        'git_describe_command = ["git", "describe", "--dirty", "--tags", '
+        '"--long", "--abbrev=40", "--match", "v[0-9]*"]',
+        'git_describe_command = "git describe --dirty --tags --long '
+        "--match 'v[0-9]*'\"",
+        1,
+    )
+    assert guard.check_engine_versioning(text) == []
+
+
+def test_engine_versioning_requires_the_scm_section(guard: ModuleType) -> None:
+    assert "[tool.setuptools_scm]" in messages(
+        guard.check_engine_versioning("[tool.setuptools]\n")
+    )
+
+
 def test_missing_repository_files_are_reported(
     guard: ModuleType, tmp_path: Path
 ) -> None:
@@ -714,6 +777,7 @@ def test_missing_repository_files_are_reported(
     assert "SourceCraft CI file is missing" in text
     assert "GitHub release workflow is missing" in text
     assert "GitHub CI file is missing" in text
+    assert "engine pyproject.toml is missing" in text
     assert "release helper script is missing" in text
 
 

@@ -75,6 +75,7 @@ include = ["configurable_automl_engine*"]
 local_scheme = "no-local-version"
 write_to = "src/configurable_automl_engine/_version.py"
 tag_regex = "^v(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--abbrev=40", "--match", "v[0-9]*"]
 
 [tool.setuptools.package-data]
 configurable_automl_engine = ["py.typed"]

@@ -1,16 +1,19 @@
-"""Guard the CI configuration of the ``automl-contracts`` release pipeline.
+"""Guard the release configuration of the engine and its contracts.
 
 The checks parse both CI files and keep publication attached to the
 ``contracts-v*`` tag. Every quality gate must run in its own cube or step
 before the upload, the uploader is scanned for forbidden flags, and secrets
-must come from the CI secret store rather than from committed literals.
+must come from the CI secret store rather than from committed literals. The
+engine version configuration must ignore the ``contracts-v*`` tag family.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
+import tomllib
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -22,6 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCECRAFT_CI = REPO_ROOT / ".sourcecraft" / "ci.yaml"
 GITHUB_CI = REPO_ROOT / ".github" / "workflows" / "CI.yaml"
 GITHUB_PUBLISH = REPO_ROOT / ".github" / "workflows" / "publish-contracts.yaml"
+ENGINE_PYPROJECT = REPO_ROOT / "pyproject.toml"
+ENGINE_TAG_MASK = "v[0-9]*"
 
 SOURCE_CUBES = (
     "preflight",
@@ -1439,6 +1444,98 @@ def check_github_ci(text: str, path: Path = GITHUB_CI) -> list[Violation]:
     return violations
 
 
+def _git_describe_masks(command: object) -> list[str] | None:
+    """Return every ``git describe --match`` mask from a configured command.
+
+    Args:
+        command: Value of the ``git_describe_command`` setting.
+
+    Returns:
+        Masks that follow ``--match`` in order, or ``None`` when the command
+        has an unsupported shape.
+    """
+    if isinstance(command, str):
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+    elif isinstance(command, list) and all(isinstance(token, str) for token in command):
+        tokens = command
+    else:
+        return None
+    return [
+        tokens[index + 1]
+        for index, token in enumerate(tokens[:-1])
+        if token == "--match"
+    ]
+
+
+def check_engine_versioning(
+    text: str, path: Path = ENGINE_PYPROJECT
+) -> list[Violation]:
+    """Check that engine versions ignore the ``contracts-v*`` tag family.
+
+    Args:
+        text: Content of the engine ``pyproject.toml``.
+        path: File path used in diagnostics.
+
+    Returns:
+        Every violated engine versioning rule.
+    """
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as error:
+        return [Violation(path, 1, f"engine pyproject.toml is not valid TOML: {error}")]
+    tool = document.get("tool")
+    scm = tool.get("setuptools_scm") if isinstance(tool, dict) else None
+    if not isinstance(scm, dict):
+        return [
+            Violation(
+                path,
+                1,
+                "engine pyproject.toml has no [tool.setuptools_scm]",
+            )
+        ]
+    violations: list[Violation] = []
+    tag_regex = scm.get("tag_regex")
+    if not isinstance(tag_regex, str):
+        violations.append(
+            Violation(
+                path,
+                1,
+                "setuptools-scm has no tag_regex limiting versions to v<version>",
+            )
+        )
+    else:
+        try:
+            pattern = re.compile(tag_regex)
+        except re.error as error:
+            violations.append(
+                Violation(path, 1, f"setuptools-scm tag_regex is invalid: {error}")
+            )
+        else:
+            if not pattern.fullmatch("v1.2.3") or pattern.fullmatch("contracts-v0.1.0"):
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        "setuptools-scm tag_regex must accept v<version> and "
+                        "reject contracts-v<version>",
+                    )
+                )
+    masks = _git_describe_masks(scm.get("git_describe_command"))
+    if masks != [ENGINE_TAG_MASK]:
+        violations.append(
+            Violation(
+                path,
+                1,
+                "setuptools-scm must pass exactly one git describe "
+                f"--match {ENGINE_TAG_MASK}",
+            )
+        )
+    return violations
+
+
 def check_scripts(root: Path = REPO_ROOT) -> list[Violation]:
     """Check the helper scripts that implement the publication rules.
 
@@ -1510,6 +1607,7 @@ def run_checks(root: Path = REPO_ROOT) -> list[Violation]:
     sourcecraft = root / ".sourcecraft" / "ci.yaml"
     github_ci = root / ".github" / "workflows" / "CI.yaml"
     github_publish = root / ".github" / "workflows" / "publish-contracts.yaml"
+    engine_pyproject = root / "pyproject.toml"
     violations: list[Violation] = []
     if not sourcecraft.is_file():
         violations.append(Violation(sourcecraft, 1, "SourceCraft CI file is missing"))
@@ -1532,6 +1630,16 @@ def run_checks(root: Path = REPO_ROOT) -> list[Violation]:
     else:
         violations.extend(
             check_github_ci(github_ci.read_text(encoding="utf-8"), github_ci)
+        )
+    if not engine_pyproject.is_file():
+        violations.append(
+            Violation(engine_pyproject, 1, "engine pyproject.toml is missing")
+        )
+    else:
+        violations.extend(
+            check_engine_versioning(
+                engine_pyproject.read_text(encoding="utf-8"), engine_pyproject
+            )
         )
     violations.extend(check_scripts(root))
     return violations
