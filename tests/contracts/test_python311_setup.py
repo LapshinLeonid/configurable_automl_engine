@@ -14,12 +14,21 @@ STUB_HEADER = "#!/usr/bin/env bash\nset -u\n"
 
 APT_STUB = """\
 printf 'apt-get %s\\n' "$*" >> "$CALL_LOG"
+if [ "${1:-}" = "-c" ] && [ -n "${2:-}" ]; then
+  cp "$2" "$APT_CONFIG_LOG" 2>/dev/null || true
+fi
 case "$*" in
   *install*python3.11*)
     counter="$APT_INSTALL_COUNTER"
     limit="$APT_INSTALL_FAIL_TIMES"
     ;;
   *update*)
+    if [ "${APT_FAIL_ON_DIRTY_PYTHON:-0}" = "1" ] &&
+      [ "$(cat "$PYTHON3_STATE" 2>/dev/null)" != "system" ]; then
+      echo "ModuleNotFoundError: No module named 'apt_pkg'" >&2
+      echo "E: Problem executing scripts APT::Update::Post-Invoke-Success '/usr/lib/cnf-update-db'" >&2
+      exit 100
+    fi
     counter="$APT_UPDATE_COUNTER"
     limit="$APT_UPDATE_FAIL_TIMES"
     ;;
@@ -49,13 +58,58 @@ fi
 exit 0
 """
 
-PYTHON_STUB = """\
+GREP_STUB = """\
+printf 'grep %s\\n' "$*" >> "$CALL_LOG"
+exit "${GREP_EXIT_CODE:-1}"
+"""
+
+PYTHON311_STUB = """\
 printf 'python3.11 %s\\n' "$*" >> "$CALL_LOG"
 if [ "${1:-}" = "--version" ]; then
   echo "Python 3.11.99"
   exit 0
 fi
+if [ "${1:-}" = "-c" ]; then
+  exit 1
+fi
 cat >/dev/null
+"""
+
+PYTHON3_STUB = """\
+printf 'python3 %s\\n' "$*" >> "$CALL_LOG"
+if [ "${1:-}" = "-c" ]; then
+  if [ "$(cat "$PYTHON3_STATE" 2>/dev/null)" = "system" ]; then
+    exit 0
+  fi
+  echo "ModuleNotFoundError: No module named 'apt_pkg'" >&2
+  exit 1
+fi
+exit 0
+"""
+
+APT_CAPABLE_PYTHON_STUB = """\
+printf 'python3.10 %s\\n' "$*" >> "$CALL_LOG"
+exit 0
+"""
+
+BROKEN_PYTHON_STUB = """\
+printf 'python3.10 %s\\n' "$*" >> "$CALL_LOG"
+exit 1
+"""
+
+BROKEN_VERSION_STUB = """\
+printf '%s %s\\n' "$0" "$*" >> "$CALL_LOG"
+exit 1
+"""
+
+UPDATE_ALTERNATIVES_STUB = """\
+printf 'update-alternatives %s\\n' "$*" >> "$CALL_LOG"
+if [ "${1:-}" = "--set" ]; then
+  case "${3:-}" in
+    *python3.11) printf 'python311\\n' > "$PYTHON3_STATE" ;;
+    *) printf 'system\\n' > "$PYTHON3_STATE" ;;
+  esac
+fi
 """
 
 
@@ -72,23 +126,40 @@ def run_setup(
     install_failures: int = 0,
     update_failures: int = 0,
     ppa_failures: int = 0,
+    python3_state: str = "system",
+    apt_fail_on_dirty_python: bool = False,
+    system_python_has_apt_pkg: bool = True,
+    ppa_configured: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     call_log = tmp_path / "calls.log"
+    state_file = tmp_path / "python3-state"
+    state_file.write_text(f"{python3_state}\n", encoding="utf-8")
     write_stub(bin_dir, "apt-get", APT_STUB)
     write_stub(bin_dir, "add-apt-repository", PPA_STUB)
+    write_stub(bin_dir, "grep", GREP_STUB)
+    write_stub(bin_dir, "update-alternatives", UPDATE_ALTERNATIVES_STUB)
+    write_stub(bin_dir, "curl", 'cat <<"PIP"\nprint("pip")\nPIP\n')
+    write_stub(bin_dir, "python3", PYTHON3_STUB)
+    write_stub(bin_dir, "python3.11", PYTHON311_STUB)
+    for version in ("3.14", "3.13", "3.12", "3.9", "3.8", "3.7", "3.6"):
+        write_stub(bin_dir, f"python{version}", BROKEN_VERSION_STUB)
     write_stub(
         bin_dir,
-        "update-alternatives",
-        'printf "update-alternatives %s\\n" "$*" >> "$CALL_LOG"\n',
+        "python3.10",
+        APT_CAPABLE_PYTHON_STUB
+        if system_python_has_apt_pkg
+        else BROKEN_PYTHON_STUB,
     )
-    write_stub(bin_dir, "curl", 'cat <<"PIP"\nprint("pip")\nPIP\n')
-    write_stub(bin_dir, "python3.11", PYTHON_STUB)
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["CALL_LOG"] = str(call_log)
+    env["APT_CONFIG_LOG"] = str(tmp_path / "apt-config.log")
+    env["PYTHON3_STATE"] = str(state_file)
+    env["APT_FAIL_ON_DIRTY_PYTHON"] = "1" if apt_fail_on_dirty_python else "0"
+    env["GREP_EXIT_CODE"] = "0" if ppa_configured else "1"
     env["APT_INSTALL_COUNTER"] = str(tmp_path / "apt-install-count")
     env["APT_UPDATE_COUNTER"] = str(tmp_path / "apt-update-count")
     env["APT_INSTALL_FAIL_TIMES"] = str(install_failures)
@@ -111,6 +182,10 @@ def counter(tmp_path: Path, name: str) -> str:
     return (tmp_path / name).read_text(encoding="utf-8").strip()
 
 
+def calls_text(tmp_path: Path) -> str:
+    return (tmp_path / "calls.log").read_text(encoding="utf-8")
+
+
 def test_installs_once_when_the_mirror_is_healthy(tmp_path: Path) -> None:
     result = run_setup(tmp_path)
 
@@ -119,10 +194,63 @@ def test_installs_once_when_the_mirror_is_healthy(tmp_path: Path) -> None:
     assert "PYTHON311_SETUP_RETRY" not in result.stdout
     assert counter(tmp_path, "apt-install-count") == "1"
     assert counter(tmp_path, "ppa-count") == "1"
-    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    calls = calls_text(tmp_path)
     assert "Acquire::Retries=3" in calls
     assert "--fix-missing" in calls
     assert "ppa:deadsnakes/ppa" in calls
+
+
+def test_disables_apt_post_invoke_hooks(tmp_path: Path) -> None:
+    result = run_setup(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = calls_text(tmp_path)
+    assert "apt-get -c " in calls
+    apt_config = (tmp_path / "apt-config.log").read_text(encoding="utf-8")
+    assert "#clear APT::Update::Post-Invoke-Success;" in apt_config
+    assert "#clear DPkg::Post-Invoke;" in apt_config
+
+
+def test_recovers_when_python3_already_points_to_311(tmp_path: Path) -> None:
+    result = run_setup(
+        tmp_path,
+        python3_state="python311",
+        apt_fail_on_dirty_python=True,
+        ppa_configured=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "python3 cannot import apt_pkg; restoring" in result.stdout
+    assert "Python 3.11 is ready (attempt 1/3)." in result.stdout
+    calls = calls_text(tmp_path)
+    assert "update-alternatives --install /usr/bin/python3 python3" in calls
+    assert "python3.10" in calls
+    assert "update-alternatives --set python3" in calls
+    assert counter(tmp_path, "apt-install-count") == "1"
+
+
+def test_skips_add_apt_repository_when_the_ppa_is_already_configured(
+    tmp_path: Path,
+) -> None:
+    result = run_setup(tmp_path, ppa_configured=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "add-apt-repository" not in calls_text(tmp_path)
+    assert counter(tmp_path, "apt-install-count") == "1"
+
+
+def test_reports_a_worker_without_an_apt_capable_python(tmp_path: Path) -> None:
+    result = run_setup(
+        tmp_path,
+        attempts=2,
+        python3_state="python311",
+        system_python_has_apt_pkg=False,
+    )
+
+    assert result.returncode == 1
+    assert "PYTHON311_SETUP_FAILED" in result.stdout
+    assert "Last failed step: restore the system python3 for apt" in result.stdout
+    assert "Python 3.11 is ready" not in result.stdout
 
 
 def test_retries_after_a_transient_503_on_the_packages(tmp_path: Path) -> None:
