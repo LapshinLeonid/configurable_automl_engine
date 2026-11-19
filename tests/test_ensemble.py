@@ -19,6 +19,8 @@ Covered scenarios (positive / negative / boundary):
   order, deterministic tie-break);
 - P5: the ensemble section reaches ``ExperimentResult`` (JSON round-trip
   keeps it) and the Markdown reporter renders the members table;
+- P6: ensemble members are retrained with ``general.target_transform``
+  (``yeo-johnson`` and the ``auto`` placeholder);
 - N1: k > n candidates → min(k, n) members with a ``RuntimeWarning``;
 - N2: no trained models (an empty leaderboard snapshot) → a clear error,
   and the engine run completes without the ensemble section;
@@ -48,6 +50,7 @@ from configurable_automl_engine.common.definitions import (
     MetricDirection,
     RunStatus,
     SerializationFormat,
+    TargetTransform,
 )
 from configurable_automl_engine.experiment.ensemble import (
     EnsembleMember,
@@ -185,6 +188,53 @@ def test_p1_ensemble_built_from_run_and_predicts(tmp_path: Any) -> None:
     preds = model.predict(_small_df()[["f1", "f2"]])
     assert preds.shape == (40,)
     assert np.all(np.isfinite(preds))
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("yeo-johnson", TargetTransform.yeo_johnson),
+        ("auto", TargetTransform.auto),
+    ],
+)
+def test_p6_ensemble_members_retrain_with_configured_target_transform(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str,
+    expected: TargetTransform,
+) -> None:
+    """P6: ensemble members are retrained with ``general.target_transform``.
+
+    The members must use the same target transformation as the HPO trials
+    and the regular finalists; retraining them with ``TargetTransform.none``
+    would score models whose preprocessing differs from the configuration
+    the weights are based on. ``auto`` stays the configured placeholder
+    without a reserved outer hold-out (the fold-local resolution), so the
+    configured value itself has to reach the member trainer.
+    """
+    from configurable_automl_engine import AutoMLExperiment
+    from configurable_automl_engine.training_engine import ensemble_step
+
+    recorded: list[Any] = []
+    original_fit_finalist = ensemble_step._fit_finalist
+
+    def spying_fit_finalist(*args: Any, **kwargs: Any) -> Any:
+        recorded.append(kwargs.get("target_transform"))
+        return original_fit_finalist(*args, **kwargs)
+
+    monkeypatch.setattr(ensemble_step, "_fit_finalist", spying_fit_finalist)
+    config = _engine_config(tmp_path, k=2)
+    config["general"]["target_transform"] = configured
+    # The helper keeps holdout_fraction=None, so 'auto' is not resolved
+    # globally and reaches the ensemble as the configured placeholder.
+
+    experiment = AutoMLExperiment(config, _small_df(), target="target")
+    result = experiment.run()
+
+    assert result.status is RunStatus.completed
+    assert result.ensemble is not None
+    assert len(recorded) == result.ensemble["k_used"]
+    assert recorded == [expected] * len(recorded)
 
 
 def test_p2_equal_weights_average_math(tmp_path: Any) -> None:

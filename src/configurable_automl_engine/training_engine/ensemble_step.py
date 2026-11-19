@@ -293,6 +293,7 @@ def build_ensemble_from_context(
                 n_folds=prepared.resolved_n_folds,
                 test_size=prepared.resolved_test_size,
                 random_state=cfg.general.random_state,
+                target_transform=cfg.general.target_transform,
                 datetime_expansion=prepared.datetime_expansion,
             )
         except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
