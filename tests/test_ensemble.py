@@ -714,3 +714,122 @@ def test_b11_ensemble_bundle_relocation_predicts(tmp_path: Any) -> None:
     restored = EnsembleModel.load(relocated / ensemble_filename(result))
     frame = _small_df()[["f1", "f2"]]
     assert restored.predict(frame) == pytest.approx(model.predict(frame))
+
+
+def test_holdout_members_refit_on_full_data_comparison_stays_on_train_part(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a reserved outer hold-out the ensemble artifact uses all rows.
+
+    The final member predictors are refit on train + hold-out (100% of the
+    data), while the winner-vs-ensemble comparison keeps using the OOF
+    vectors of a separate train-part fit, aligned to ``prepared.y`` and to
+    the winner's pre-trained trainer.
+    """
+    from configurable_automl_engine import AutoMLExperiment
+    from configurable_automl_engine.training_engine import ensemble_step
+
+    fits: list[tuple[str, int, Any, Any]] = []
+    original_fit = ensemble_step._fit_finalist
+
+    def capturing_fit(
+        algo_name: str,
+        algo_cfg: Any,
+        X: pd.DataFrame,
+        y: pd.Series,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        trainer = original_fit(algo_name, algo_cfg, X, y, *args, **kwargs)
+        fits.append((algo_name, len(X), trainer, y))
+        return trainer
+
+    monkeypatch.setattr(ensemble_step, "_fit_finalist", capturing_fit)
+
+    frame = _small_df()
+    config = _engine_config(tmp_path, k=2)
+    config["general"]["holdout_fraction"] = 0.2
+    experiment = AutoMLExperiment(config, frame, target="target")
+    result = experiment.run()
+
+    assert result.status is RunStatus.completed
+    assert result.ensemble is not None
+    members = [member["algorithm"] for member in result.ensemble["members"]]
+    # Each member is evaluated on the 32-row train part and refit on all 40
+    # rows for the ensemble artifact.
+    for name in members:
+        sizes = [size for algo, size, _, _ in fits if algo == name]
+        assert sizes == [32, 40]
+
+    model = experiment.ensemble_model()
+    for name in members:
+        assert model.predictors[name]._features.X.shape[0] == 40
+
+    comparison = result.ensemble["comparison"]
+    assert comparison is not None
+    winner_eval = next(
+        trainer
+        for algo, size, trainer, _ in fits
+        if algo == result.winner and size == 32
+    )
+    y_train = next(
+        target for algo, size, _, target in fits if algo == result.winner and size == 32
+    )
+    n_repeats = comparison["n_repeats"]
+    if n_repeats > 1:
+        vectors = list(winner_eval.oof_predictions_by_repeat_)
+    else:
+        vectors = [winner_eval.oof_predictions_]
+    expected = []
+    y_values = np.asarray(y_train, dtype=float)
+    for vector in vectors:
+        values = np.asarray(vector, dtype=float)
+        mask = np.isfinite(y_values) & np.isfinite(values)
+        expected.append(float(np.sqrt(np.mean((y_values[mask] - values[mask]) ** 2))))
+    assert comparison["winner_repeat_rmse"] == pytest.approx(expected)
+
+
+def test_holdout_members_use_configured_target_transform(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both the comparison and the final fits use ``target_transform``.
+
+    With a reserved outer hold-out the ensemble trains each member twice: a
+    train-part evaluation fit (for the OOF comparison) and a final fit on all
+    rows. Both must carry the configured target transformation, otherwise the
+    ensemble artifact and the comparison would use a different target scale
+    than the HPO trials and the winner.
+    """
+    from configurable_automl_engine import AutoMLExperiment
+    from configurable_automl_engine.training_engine import ensemble_step
+
+    recorded: list[tuple[str, int, Any]] = []
+    original_fit = ensemble_step._fit_finalist
+
+    def capturing_fit(*args: Any, **kwargs: Any) -> Any:
+        trainer = original_fit(*args, **kwargs)
+        recorded.append((args[0], len(args[2]), kwargs.get("target_transform")))
+        return trainer
+
+    monkeypatch.setattr(ensemble_step, "_fit_finalist", capturing_fit)
+
+    config = _engine_config(tmp_path, k=2)
+    config["general"]["holdout_fraction"] = 0.2
+    config["general"]["target_transform"] = "log1p"
+    experiment = AutoMLExperiment(config, _small_df(), target="target")
+    result = experiment.run()
+
+    assert result.status is RunStatus.completed
+    assert result.ensemble is not None
+    members = [member["algorithm"] for member in result.ensemble["members"]]
+    for name in members:
+        calls = [
+            (size, transform) for algo, size, transform in recorded if algo == name
+        ]
+        assert calls == [
+            (32, TargetTransform.log1p),
+            (40, TargetTransform.log1p),
+        ]
+    model = experiment.ensemble_model()
+    for name in members:
+        assert model.predictors[name].target_transform is TargetTransform.log1p

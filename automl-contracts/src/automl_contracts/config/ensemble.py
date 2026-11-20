@@ -25,13 +25,15 @@ class EnsembleCfg(BaseModel):
 
     The ensemble is built AFTER the terminal select step from the
     completed records of the run's leaderboard: the top-K algorithms are
-    retrained on 100% of the data (exactly once each) and their
-    predictions are averaged with the weights derived from the
-    validation scores. The result of the ensemble is reported in the
-    dedicated ``ensemble`` section of the ``ExperimentResult`` (the
-    winner and the winner artifact are NOT affected: the ensemble is an
-    additional experimental output, not a replacement of the terminal
-    selection).
+    retrained on 100% of the data and their predictions are averaged
+    with the weights derived from the validation scores. When an outer
+    hold-out is reserved, the final members are refit on the train part
+    plus the hold-out, while a separate train-part fit supplies the OOF
+    vectors of the winner comparison. The result of the ensemble is
+    reported in the dedicated ``ensemble`` section of the
+    ``ExperimentResult`` (the winner and the winner artifact are NOT
+    affected: the ensemble is an additional experimental output, not a
+    replacement of the terminal selection).
 
     Attributes:
         enable: Build the ensemble (off by default — the ensemble is an

@@ -4,11 +4,15 @@ The step runs after the terminal select step, when
 ``general.ensemble.enable`` is true: the top-K algorithms of the run's
 leaderboard (``PhaseContext.leaderboard_snapshot`` — the full last-HPO
 phase leaderboard, the same records the result leaderboard is built
-from) are retrained on 100% of the data exactly once each
-(``finalists._fit_finalist`` — the shared assembly point), their
-validation scores in user semantics are converted into normalized
-weights (``experiment.ensemble.compute_weights`` — direction-aware) and
-the predictions are averaged (``experiment.ensemble.EnsembleModel``).
+from) are retrained on 100% of the data (``finalists._fit_finalist`` —
+the shared assembly point), their validation scores in user semantics
+are converted into normalized weights
+(``experiment.ensemble.compute_weights`` — direction-aware) and the
+predictions are averaged (``experiment.ensemble.EnsembleModel``). When
+``general.holdout_fraction`` reserves an outer hold-out, the final
+members are refit on all rows while a separate train-part fit supplies
+the OOF vectors of the winner-vs-ensemble comparison, so the artifact
+uses the full dataset and the comparison stays aligned to ``prepared.y``.
 
 The module imports the pure ensemble core from the ``experiment``
 package (the building-block layer) and the finalists trainer from the
@@ -24,6 +28,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from typing import Any
+
+import pandas as pd
 
 from configurable_automl_engine.common.definitions import MetricDirection
 from configurable_automl_engine.common.metrics import to_user_value, user_direction
@@ -44,6 +50,32 @@ from .state import PhaseContext, PreparedData
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["build_ensemble_from_context", "top_k_from_leaderboard"]
+
+
+def _full_training_data(
+    prepared: PreparedData,
+) -> tuple[pd.DataFrame, pd.Series, bool]:
+    """Return the final-training data and whether an outer hold-out exists.
+
+    With ``general.holdout_fraction`` set, ``prepared.X``/``prepared.y`` carry
+    only the train part of the outer split; the final ensemble members must be
+    refit on the concatenation of both parts, exactly like the winner artifact
+    in ``persist_artifact``. The hold-out rows are appended in the
+    deterministic order produced by ``prepare_dataset``.
+
+    Args:
+        prepared: The prepared data of the run.
+
+    Returns:
+        tuple[pd.DataFrame, pd.Series, bool]: The feature matrix and target
+            for final training (all rows when a hold-out is reserved) and a
+            flag telling whether a reserved outer hold-out was concatenated.
+    """
+    if prepared.holdout_X is None or prepared.holdout_y is None:
+        return prepared.X, prepared.y, False
+    full_X = pd.concat([prepared.X, prepared.holdout_X], axis=0)
+    full_y = pd.concat([prepared.y, prepared.holdout_y], axis=0)
+    return full_X, full_y, True
 
 
 def top_k_from_leaderboard(
@@ -224,8 +256,11 @@ def build_ensemble_from_context(
         cfg: The resolved root config (``Config``); the
             ``general.ensemble`` section drives the size and the weight
             method.
-        prepared: The prepared data and resolved settings (X/y are the
-            data the members are refit on).
+        prepared: The prepared data and resolved settings. Without a
+            reserved outer hold-out, ``X``/``y`` are both the comparison
+            and the final-training data; with a hold-out, the members are
+            evaluated on the train part for the winner comparison and
+            refit on all rows for the ensemble artifact.
         ctx: The final phase context (the leaderboard snapshot, the
             terminal winner).
 
@@ -265,12 +300,26 @@ def build_ensemble_from_context(
         _LOG.warning("Ensemble step skipped: %s", err)
         return None
 
-    # Retrain every member on 100% of the data exactly once (the shared
-    # finalist assembly point; a member that fails to retrain is fatal for
-    # the ensemble — a silently degraded ensemble is not allowed — and the
-    # whole step degrades to "no ensemble" with a warning).
+    # Retrain every member on 100% of the data (the shared finalist assembly
+    # point; a member that fails to retrain is fatal for the ensemble — a
+    # silently degraded ensemble is not allowed — and the whole step degrades
+    # to "no ensemble" with a warning). With a reserved outer hold-out the
+    # final predictors are refit on all rows, while a separate evaluation fit
+    # on the train part supplies OOF vectors aligned to ``prepared.y`` for the
+    # winner-vs-ensemble comparison (the winner trainer is also aligned to the
+    # train part). Without a hold-out both roles share one fit.
+    full_X, full_y, has_holdout = _full_training_data(prepared)
+    if has_holdout:
+        _LOG.info(
+            "Ensemble: reserved outer hold-out detected; members are evaluated "
+            "on the train part (%d rows) and refit on ALL data (%d rows) for "
+            "the ensemble artifact.",
+            len(prepared.X),
+            len(full_X),
+        )
     algos = _algorithms_as_dict(cfg.algorithms)
     predictors: dict[str, Any] = {}
+    evaluation_predictors: dict[str, Any] = {}
     scores: dict[str, float] = {}
     for name in selected:
         if name not in ctx.leaderboard_snapshot:
@@ -283,7 +332,7 @@ def build_ensemble_from_context(
             )
             return None
         try:
-            trainer = _fit_finalist(
+            evaluation_trainer = _fit_finalist(
                 name,
                 algos[name],
                 prepared.X,
@@ -298,6 +347,24 @@ def build_ensemble_from_context(
                 target_transform=cfg.general.target_transform,
                 datetime_expansion=prepared.datetime_expansion,
             )
+            if has_holdout:
+                trainer = _fit_finalist(
+                    name,
+                    algos[name],
+                    full_X,
+                    full_y,
+                    record.params,
+                    cfg,
+                    prepared.metric_sklearn,
+                    validation_strategy=prepared.resolved_validation,
+                    n_folds=prepared.resolved_n_folds,
+                    test_size=prepared.resolved_test_size,
+                    random_state=cfg.general.random_state,
+                    target_transform=cfg.general.target_transform,
+                    datetime_expansion=prepared.datetime_expansion,
+                )
+            else:
+                trainer = evaluation_trainer
         except Exception as err:  # noqa: BLE001 — the ensemble step is best-effort
             _LOG.warning(
                 "Ensemble member %s failed to retrain on the full dataset: %s; "
@@ -307,6 +374,7 @@ def build_ensemble_from_context(
             )
             return None
         predictors[name] = trainer
+        evaluation_predictors[name] = evaluation_trainer
         scores[name] = user_scores[name]
 
     members = [
@@ -332,7 +400,7 @@ def build_ensemble_from_context(
         comparison = _build_winner_comparison(
             prepared=prepared,
             selected=selected,
-            predictors=predictors,
+            predictors=evaluation_predictors,
             weights=weights,
             winner_algo=ctx.winner_algo,
             winner_trainer=ctx.pre_trained_trainer,

@@ -795,12 +795,16 @@ general:
 
 The optional `general.ensemble` block builds a weighted-average ensemble of
 the top-K leaderboard models AFTER the terminal select step: the top-K
-completed algorithms are retrained on 100 % of the data (exactly once each)
-and their predictions are averaged with weights derived from the validation
-scores. When enabled, the run carries the dedicated `ensemble` section in the
-experiment result (members, scores, weights, the artifact path of the
-serialized ensemble — see [`AutoMLExperiment.ensemble_model`](#automlexperiment-object-api)) and the ensemble artifact file is written next
-to the winner model.
+completed algorithms are retrained on 100 % of the data and their
+predictions are averaged with weights derived from the validation scores.
+When `general.holdout_fraction` reserves an outer hold-out, the final member
+predictors are refit on the train part plus the hold-out, while a separate
+train-part fit supplies the OOF vectors of the winner-vs-ensemble comparison
+(so the comparison stays aligned to the winner's OOF rows). When enabled, the
+run carries the dedicated `ensemble` section in the experiment result
+(members, scores, weights, the artifact path of the serialized ensemble — see
+[`AutoMLExperiment.ensemble_model`](#automlexperiment-object-api)) and the
+ensemble artifact file is written next to the winner model.
 
 | Field | Default | Description |
 |-------|---------|-------------|
