@@ -46,13 +46,11 @@ def _columnwise_raw_values(
     The comparison metrics of the engine (RMSE, MSE, MAE, R², NRMSE) are
     computed vectorized over all columns at once with the same non-finite
     masking as ``pooled_scorer_value`` (per column); any other scorer falls
-    back to one ``pooled_scorer_value`` call per column. A column without a
-    valid pair yields NaN.
+    back to one ``pooled_scorer_value`` call per column.
 
     The caller guarantees the BBC-CV common-row contract (``bbc_cv_score``
-    keeps only rows every configuration predicted), so a column without a
-    valid pair can only mean a non-finite target row — reported as NaN, as
-    before.
+    keeps only rows with a finite target that every configuration predicted);
+    a column without a valid pair yields NaN.
 
     Args:
         scorer: A ``make_scorer`` object (its raw metric parts are read

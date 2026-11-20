@@ -123,8 +123,10 @@ DEFAULT_SPACES: dict[str, dict[str, SearchSpaceEntry]] = {
     "ridge": {
         # L2 penalty acts on the sum of squared residuals (not the mean), so
         # the useful alpha grows with n: on standardized features the optimum
-        # is routinely 10–1000 (e.g. ~22 on sklearn's diabetes). The upper
-        # bound of 10 used to clamp the search at the boundary.
+        # is routinely 10–1000 (e.g. ~22 on sklearn's diabetes). The range
+        # [1e-3, 1e3] covers both weak and strong regularization, and the
+        # upper bound of 1e3 leaves room above the optimum, so the search
+        # does not clamp at the boundary.
         "alpha": SearchSpaceEntry.model_validate([1e-3, 1e3, "float_log"]),
     },
     "decision_tree": {

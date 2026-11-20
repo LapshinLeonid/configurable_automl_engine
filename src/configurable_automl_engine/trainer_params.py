@@ -1,12 +1,11 @@
 """Validation of the ``ModelTrainer`` constructor arguments.
 
 Every helper validates (and, where documented, normalizes) one group of the
-constructor arguments and raises ``TrainingError`` with the same messages as
-before, so invalid values are rejected at initialization time, before
-training starts. ``build_trainer_settings`` calls the helpers in the original
-validation order and returns the frozen ``TrainerSettings`` that
-``ModelTrainer`` keeps. The module must not import
-``configurable_automl_engine.trainer``.
+constructor arguments and raises ``TrainingError``, so invalid values are
+rejected at initialization time, before training starts.
+``build_trainer_settings`` calls the helpers in its validation order and
+returns the frozen ``TrainerSettings`` that ``ModelTrainer`` keeps. The
+module must not import ``configurable_automl_engine.trainer``.
 """
 
 from __future__ import annotations

@@ -178,8 +178,8 @@ def _get_estimator(algo: str) -> Any:
 class _OptimizeRunner:
     """A single hyperparameter optimisation run, split into steps.
 
-    ``optimize()`` remains the public entry point with its original signature
-    and delegates all the work to this class through ``run_optimization``:
+    ``optimize()`` is the public entry point and delegates the work to this
+    class through ``run_optimization``:
 
         run()
          ├─ plan_validation()        → ValidationPlan   (repaired X)
@@ -506,18 +506,18 @@ class _OptimizeRunner:
         """Optuna objective function: evaluate_trial + handle_failure.
 
         Splits trial evaluation (``evaluate_trial``) and its failure handling
-        (``handle_failure``) into separate steps. Hyperparameter generation and
-        pipeline assembly run OUTSIDE try/except — as in the original
-        implementation: errors from a user space function or the model
-        constructor must propagate (trial FAIL and an exception from
-        ``study.optimize``) rather than silently become pruning /
-        disqualification. The consecutive fatal failure counter is reset on
-        any non-fatal outcome: success, pruner pruning (optuna.TrialPruned
-        from ``_evaluate_with_intermediate_reports``), or a non-fatal
-        ValueError."""
-        # 1. hyperparameters, model and pipeline assembly — outside try/except
-        #    (contract of the original code: their errors are not fatal
-        #    evaluation failures and are not counted by the circuit breaker).
+        (``handle_failure``) into separate steps. Hyperparameter generation,
+        model creation and pipeline assembly run OUTSIDE try/except: errors
+        from a user space function or the model constructor must propagate
+        (trial FAIL and an exception from ``study.optimize``) rather than
+        silently become pruning / disqualification. The consecutive fatal
+        failure counter is reset on any non-fatal outcome: success, pruner
+        pruning (optuna.TrialPruned from
+        ``_evaluate_with_intermediate_reports``), or a non-fatal ValueError.
+        """
+        # 1. hyperparameters, model and pipeline assembly — outside try/except:
+        #    their errors are not fatal evaluation failures and are not
+        #    counted by the circuit breaker.
         params = self.search.space_fn(trial)
         model_kwargs = dict(params)
         # The model seed follows the run's ``random_state`` (the engine seed),
@@ -619,7 +619,7 @@ class _OptimizeRunner:
         # and the best-trial selection below must work over ONE list —
         # otherwise an empty ``phase_trials`` with non-empty own trials in
         # the study passes the ``n_completed > 0`` check but crashes ``max()``
-        # with ``ValueError`` (the fallback was documented as safe).
+        # with ``ValueError``.
         self.phase_trials = own_trials
         # Recomputed here from own_trials: idempotent with the run() call and
         # safe for direct ``select_best_trial`` callers that did not go
@@ -934,7 +934,7 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
 
     # A single fold count for the early stopping branch (k_fold). The
     # 'auto' strategy could resolve to kfold with a number of folds k that
-    # differs from the original n_folds: in that case the pruning branch
+    # differs from the requested n_folds: in that case the pruning branch
     # must use the computed k, otherwise iter_splits inside
     # _evaluate_with_intermediate_reports would fall back to the default
     # n_folds and the evaluation would diverge from
