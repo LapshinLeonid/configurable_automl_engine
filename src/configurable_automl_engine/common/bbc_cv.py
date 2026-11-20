@@ -137,8 +137,8 @@ def bbc_cv_score(
     predictions of a configuration on a row that SOME other configuration
     predicted are NOT masked per configuration: all configurations are
     compared on the SAME set of rows — the rows every configuration predicted
-    on top of the finite-target rows (the previous per-configuration masking
-    let models with different coverage be scored on different row subsets,
+    on top of the finite-target rows (per-configuration masking would let
+    models with different coverage be scored on different row subsets,
     which especially distorts a leaderboard comparison). Identical
     configurations (duplicate OOF vectors) are collapsed. Ties in the
     selection step go to the first configuration.

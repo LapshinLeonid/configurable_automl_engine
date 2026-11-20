@@ -1,8 +1,8 @@
 """Engine-facing re-exports of the contract result models.
 
-The definitions live in :mod:`automl_contracts.result`; the engine keeps the
-old import path working through re-exports so reporters and stores do not
-depend on the contract module layout.
+The definitions live in :mod:`automl_contracts.result`; the engine
+re-exports them so reporters and stores do not depend on the contract
+module layout.
 """
 
 from __future__ import annotations

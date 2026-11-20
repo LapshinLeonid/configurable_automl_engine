@@ -16,7 +16,7 @@ Policies (documented contract):
 * with a ``path`` configured, every registration is appended to the file
   as one JSON line (JSONL) and the history is restored from the file at
   store creation. A damaged line (truncated write, garbage, or a record
-  that no longer passes model validation after a schema change) is
+  that fails model validation after a schema change) is
   skipped with a :class:`RuntimeWarning` — never a startup crash. If the
   same ``run_id`` appears several times in the file, the last occurrence
   wins (the file is an append-only log);

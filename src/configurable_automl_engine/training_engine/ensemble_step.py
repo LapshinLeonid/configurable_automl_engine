@@ -166,9 +166,9 @@ def _trainer_oof_by_repeat(trainer: Any, n_repeats: int) -> list[Any] | None:
     """Return one OOF prediction vector per repeat (or ``None``).
 
     With one repeat the representative ``oof_predictions_`` vector is
-    wrapped into a one-element list — the same value the single-split
-    behavior has always used. With several repeats the per-repeat vectors
-    are required: a representative vector alone cannot produce the
+    wrapped into a one-element list — the value a single-split run reports.
+    With several repeats the per-repeat vectors are required: a
+    representative vector alone cannot produce the
     "same repeats" comparison.
     """
     if n_repeats > 1:

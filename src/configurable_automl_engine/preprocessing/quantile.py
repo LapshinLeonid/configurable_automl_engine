@@ -11,8 +11,8 @@ on every fold fit.
 
 The fitted transformers are pickled inside saved models, so the module path
 is part of the artifact format (``trainer_state.ARTIFACT_FORMAT_VERSION``):
-renaming or moving the module would break the deserialization of previously
-saved models. The module must not import the other preprocessing modules.
+renaming or moving the module would break the deserialization of saved
+models. The module must not import the other preprocessing modules.
 """
 
 from __future__ import annotations
@@ -147,9 +147,9 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
         """
         check_is_fitted(self, "_transformer_")
         uniform = self._transformer_.transform(X)
-        # A model pickled before the 'normal' remap holds an inner
-        # transformer that already outputs the normal distribution: it is
-        # returned as is, so old artifacts keep predicting identically.
+        # A serialized model may hold an inner transformer fitted with
+        # output_distribution="normal": its output is the normal
+        # distribution, so it is returned as is.
         if (
             self.output_distribution != "normal"
             or self._transformer_.output_distribution == "normal"

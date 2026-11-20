@@ -112,8 +112,7 @@ class ComplexityGuardConfig:
 
         Accepts either a mapping or a Pydantic model exposing ``model_dump``
         (normalized with ``mode='json'`` so that enum fields become their
-        string values). Unknown keys are ignored so that forward/backward
-        compatibility with the config schema is preserved.
+        string values). Unknown keys are ignored.
 
         Args:
             data: A mapping of field names to values, a Pydantic model, or
@@ -436,10 +435,11 @@ def apply_complexity_guard(
     ratio ``n / p_size``, where ``p_size`` is the number of ORIGINAL columns
     (a categorical column counts as 1, before the one-hot expansion): the
     one-hot expansion must not push large-but-wide data into a smaller size
-    mode. When ``p_size`` is not given, it falls back to ``p`` (the
-    pre-fix behavior, kept for direct callers). The rules that depend on the
-    feature count (``max_features``, ``colsample_bytree``) always use ``p`` —
-    the number of features after preprocessing (what the model sees).
+    mode. When ``p_size`` is not given, it falls back to ``p`` (a direct
+    caller may pass only the post-preprocessing count). The rules that
+    depend on the feature count (``max_features``, ``colsample_bytree``)
+    always use ``p`` — the number of features after preprocessing (what the
+    model sees).
 
     Args:
         space: The search space dict (parameter name -> ``SearchSpaceEntry``).

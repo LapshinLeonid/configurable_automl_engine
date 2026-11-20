@@ -313,7 +313,7 @@ def _sanity_gate_section(
     metrics (``n_repeats`` and ``split_aggregation``): the per-candidate
     ``diversity_ratio``/``unique_ratio`` and ``generalization_gap`` are
     medians of the per-repeat values. The per-repeat spread of ``RMSE_oof``
-    is carried when it is available; a single split keeps exactly the classic
+    is carried when it is available; a single split keeps the plain
     section shape.
 
     Args:
@@ -321,7 +321,7 @@ def _sanity_gate_section(
         generalization_gap_mode: The applied circuit D mode.
         overhead_seconds: The wall time of the training and audit.
         n_repeats: The number of repeats recorded by the trainer; repeats
-            invalidated by the M3 scoring layer stay counted in the report but
+            invalidated by the scoring layer stay counted in the report but
             are excluded from the metrics. More than one valid repeat is
             aggregated by the median; exactly one valid repeat uses the
             single-split path.

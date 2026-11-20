@@ -524,7 +524,7 @@ def _to_candidate(
     once from the already-trained trainer; the OOF vector and the aggregated
     ``RMSE_oof`` (with its per-repeat standard deviation) come from the
     trainer's attributes. Only repeats with a finite per-repeat ``RMSE_oof``
-    are forwarded to the Sanity Gate: the M3 scoring layer invalidates a
+    are forwarded to the Sanity Gate: the scoring layer invalidates a
     whole repeat with the ``inf`` sentinel, and the gate must use the same
     repeat set as the ranking aggregate. Without usable score metadata the
     vectors are forwarded as-is."""

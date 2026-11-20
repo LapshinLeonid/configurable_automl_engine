@@ -169,10 +169,10 @@ def requires_dense_input(algorithm: str) -> bool:
 
 
 # ----------------------------------------------------------------------------- #
-#               Legacy parameter mappings (API drift)                          #
+#                  Parameter-name mappings (API drift)                         #
 # ----------------------------------------------------------------------------- #
 LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
-    # ARDRegression: sklearn renamed `n_iter` -> `max_iter` in 1.2+
+    # ARDRegression: sklearn 1.2+ uses `max_iter` instead of `n_iter`
     "ardregression": {"n_iter": "max_iter"},
 }
 
@@ -241,10 +241,8 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     class validation can raise a false "unknown hyperparameter" instead of
     silently passing the name to the estimator.
 
-    Returns
-    -------
-    tuple[frozenset[str], bool]
-        ``(accepted_param_names, accepts_var_kwargs)``
+    Returns:
+        ``(accepted_param_names, accepts_var_kwargs)``.
     """
     sig = inspect.signature(cls)
     # Skip explicit ``self`` and treat ``**kwargs`` as accepting extra keys.
@@ -283,24 +281,18 @@ def clean_hyperparameters(
 ) -> dict[str, Any]:
     """Filter and remap hyperparameters to match the estimator constructor.
 
-    1. **Remap** legacy keys (e.g. ``n_iter`` → ``max_iter`` for ARDRegression)
-       using :data:`LEGACY_PARAM_MAPPINGS`.
+    1. **Remap** the names listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g.
+       ``n_iter`` → ``max_iter`` for ARDRegression).
     2. **Drop** keys that are not accepted by the constructor, unless the
        constructor accepts ``**kwargs``.
     3. **Log** every remap and drop at DEBUG level.
 
-    Parameters
-    ----------
-    algo_key : str
-        Normalised algorithm key (e.g. ``"ardregression"``).
-    estimator_cls : type
-        The sklearn estimator class.
-    hyperparams : dict[str, Any]
-        Raw hyperparameter dict from a sweep / config.
+    Args:
+        algo_key: Normalised algorithm key (e.g. ``"ardregression"``).
+        estimator_cls: The sklearn estimator class.
+        hyperparams: Raw hyperparameter dict from a sweep / config.
 
-    Returns
-    -------
-    dict[str, Any]
+    Returns:
         A clean dict containing only valid constructor kwargs.
     """
     accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
@@ -308,7 +300,7 @@ def clean_hyperparameters(
     cleaned: dict[str, Any] = {}
 
     for key, value in hyperparams.items():
-        # 1. Remap legacy keys
+        # 1. Remap the mapped keys
         if key in mappings:
             new_key = mappings[key]
             if new_key not in hyperparams and (
@@ -330,17 +322,17 @@ def clean_hyperparameters(
 def remap_legacy_param_names(
     algo_key: str, hyperparams: dict[str, Any]
 ) -> dict[str, Any]:
-    """Remap legacy hyperparameter names in a dict, once (before the Optuna loop).
+    """Remap the names from ``LEGACY_PARAM_MAPPINGS``, once before the Optuna loop.
 
-    Renames keys listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g. ``n_iter`` →
+    Renames the keys listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g. ``n_iter`` →
     ``max_iter`` for ARDRegression) in a search-space / parameter dict.
     Unlike :func:`clean_hyperparameters`, which runs on every model
     instantiation and logs every remap, this function normalizes the names a
     single time while the search space is being prepared — otherwise an Optuna
     sweep of ~100 trials would emit ~100 identical "Remapped ..." DEBUG lines.
 
-    If both the legacy and the modern name are present, the legacy key is
-    dropped (the modern name wins), matching the priority used by
+    If both the mapped and the current name are present, the mapped key is
+    dropped (the current name wins), matching the priority used by
     :func:`clean_hyperparameters`.
 
     Args:
@@ -350,7 +342,7 @@ def remap_legacy_param_names(
             raw values, etc.).
 
     Returns:
-        A new dict with legacy keys renamed to their modern equivalents.
+        A new dict with the mapped keys renamed to their current equivalents.
         The input dict is not mutated.
     """
     resolved = resolve_algorithm_name(algo_key)
@@ -362,8 +354,8 @@ def remap_legacy_param_names(
     for key, value in hyperparams.items():
         if key in mappings:
             new_key = mappings[key]
-            # The modern name wins: if it is already present, keep it and
-            # drop the legacy key (same priority as clean_hyperparameters).
+            # The current name wins: if it is already present, keep it and
+            # drop the mapped key (same priority as clean_hyperparameters).
             if new_key in hyperparams:
                 continue
             remapped[new_key] = value
@@ -424,8 +416,8 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
 
     Single source of truth for configuration validation: the allowed set is
     derived from the estimator constructor signature (same criterion as
-    :func:`clean_hyperparameters`) plus the legacy parameter names from
-    :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to a still-existing
+    :func:`clean_hyperparameters`) plus the mapped parameter names from
+    :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to an accepted
     constructor parameter. Tuner-level data-adapter hints are added as
     documented exceptions: ``kernel_type`` for
     ``gaussian_process_regression``, ``feature_index`` for

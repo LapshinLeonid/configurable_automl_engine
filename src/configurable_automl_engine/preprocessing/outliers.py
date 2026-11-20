@@ -5,7 +5,7 @@ self-contained building block with no coupling to the encoders, the column
 selection or the preprocessor builder. Its classes are pickled inside saved
 models, so the module path is part of the artifact format
 (``trainer_state.ARTIFACT_FORMAT_VERSION``) — renaming or moving the module
-would break the deserialization of previously saved models.
+would break the deserialization of saved models.
 """
 
 from __future__ import annotations
@@ -221,14 +221,13 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             )
         arr = np.asarray(X)
         if np.iscomplexobj(arr):
-            # The exact legacy wording is asserted by sklearn's
-            # check_estimators_overwrite_params / complex-data checks.
+            # The exact wording is asserted by the sklearn check_complex_data check.
             raise ValueError("Complex data not supported")
         try:
-            # Conversion before the shape checks mirrors the original
-            # behaviour; dtype checks happen via the conversion failure path
-            # below so that numeric object arrays keep working (sklearn's
-            # check_dtype_object relies on that).
+            # Conversion happens before the shape checks; dtype checks happen
+            # via the conversion failure path below so that numeric object
+            # arrays keep working (sklearn's check_dtype_object relies on
+            # that).
             arr = arr.astype(float)
         except (TypeError, ValueError) as exc:
             # A string (object) input fails inside astype with a bare

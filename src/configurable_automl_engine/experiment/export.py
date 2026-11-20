@@ -555,10 +555,8 @@ def _restore_backups(
        content.
 
     Nothing else is deleted: a destination file that matches a temp
-    entry name may be a previous bundle file just restored in step 2
-    (the step-3 "remove leftover temp targets" of the first draft
-    removed the freshly restored files and is the exact bug the review
-    round 1 reproduced).
+    entry name may be a previous bundle file just restored in step 2, so
+    it must survive the cleanup.
 
     The first error is remembered and re-raised after the loop: one
     failed restoration must not prevent the others. Because the restore

@@ -128,8 +128,8 @@ def run_train_model(
             fs_active = feature_selection_active
     else:
         # Simple API
-        # If None is passed, we do NOT turn it into the string "None" right
-        # away to preserve the original validation logic for the tests.
+        # A None algorithm stays empty here; the type check below raises
+        # "Invalid algorithm" for any non-string/non-dict input.
         algo = cfg_or_algo if cfg_or_algo is not None else ""
         metric = str(metric_or_testsize)
         hyperparams = cast(dict[str, Any], params_or_metric)

@@ -5,8 +5,8 @@ instrumented run result: it converts the pipeline state
 (``PhaseContext`` — the working set, the circuit breaker, the winner,
 the phase timings) plus the prepared data and the resolved settings into
 the pure ``ExperimentResult`` model. The assembly uses
-the SAME sources as the legacy dict result (``persist_artifact``), not the
-dict itself, so the optional dict keys stay backward-compatible.
+the SAME sources as the dict result (``persist_artifact``), not the
+dict itself, so the optional dict keys and the model stay consistent.
 
 Key semantics:
 
@@ -17,7 +17,7 @@ Key semantics:
   ``to_user_value``; trial statistics come from ``TrialStats``;
 * the winner of the terminal select step (``output: winner``) is taken
   from ``ctx.winner_algo``; ``winner_score`` is the user-semantic score of
-  the same record the legacy ``result["score"]`` comes from, so the two
+  the same record the ``result["score"]`` dict value comes from, so the two
   cannot diverge;
 * scores that fail the winner-score invariant (``None``, non-finite,
   the worst-score sentinel class) never enter the model: the record is
@@ -95,8 +95,8 @@ def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
 
 def result_owned_by(result: ExperimentResult, token: uuid.UUID) -> bool:
     """Whether ``result`` was stamped with ``token`` (see
-    :func:`mark_result_owner`). A result without a token (built by an
-    older engine version or by hand) belongs to nobody.
+    :func:`mark_result_owner`). A result without an owner stamp (built by
+    hand or by a caller that does not mark ownership) belongs to nobody.
     """
     return getattr(result, "_owner_token", None) == token
 
@@ -114,7 +114,7 @@ def build_experiment_result(
     """Assemble the ``ExperimentResult`` of a completed run.
 
     The model is built from the pipeline sources (``cfg`` / ``prepared`` /
-    ``ctx``) — the same sources the legacy dict result is assembled from;
+    ``ctx``) — the same sources the dict result is assembled from;
     the values that only exist after the final fit/save (``model_path``,
     ``additional_metrics``, ``oof_score`` / ``holdout_score`` /
     ``bbc_score``) are read from ``result`` — the dict
@@ -124,7 +124,7 @@ def build_experiment_result(
         cfg: The configuration object.
         prepared: The prepared data and resolved settings.
         ctx: The final phase context of ``execute_phases``.
-        result: The legacy dict result of ``persist_artifact``.
+        result: The dict result of ``persist_artifact``.
         run_started_at: The run start time (UTC).
         run_finished_at: The run finish time (UTC).
         run_duration_seconds: The total wall-clock duration (monotonic

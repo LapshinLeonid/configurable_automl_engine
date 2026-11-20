@@ -101,10 +101,10 @@ def build_search_space(
     range" (bounds scaled by the spread of ``y``), which
     ``plan_search_space`` injects once the data is known.
 
-    Legacy hyperparameter names (e.g. ``n_iter`` → ``max_iter`` for
-    ARDRegression) are remapped ONCE here, before the Optuna loop — not at
-    every model instantiation (which would log an identical "Remapped ..."
-    line for ~100 trials).
+    Hyperparameter names mapped in ``LEGACY_PARAM_MAPPINGS`` (e.g.
+    ``n_iter`` → ``max_iter`` for ARDRegression) are remapped ONCE here,
+    before the Optuna loop — not at every model instantiation (which would
+    log an identical "Remapped ..." line for ~100 trials).
 
     The merge is idempotent: merging an already-merged space again changes
     nothing (all ``DEFAULT_SPACES`` keys are already present, and a missing
@@ -127,15 +127,15 @@ def build_search_space(
         if not user_overrides:
             return {}
         # Only the user-listed parameters are searched; everything else
-        # stays at the estimator default. Legacy names are remapped once.
+        # stays at the estimator default. The mapped names are applied once.
         return remap_legacy_param_names(algo_name, user_overrides)
 
     resolved = resolve_algorithm_name(algo_name)
     space = DEFAULT_SPACES.get(resolved, {}).copy()
     if user_overrides:
-        # Remap legacy names in the user overrides BEFORE the merge so that
-        # an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
-        # over the system default of the modern name.
+        # Apply LEGACY_PARAM_MAPPINGS to the user overrides BEFORE the merge so
+        # that an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
+        # over the system default of the current name.
         space.update(remap_legacy_param_names(algo_name, user_overrides))
 
     # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
@@ -147,7 +147,7 @@ def build_search_space(
     if resolved == "svr" and not (user_overrides and "epsilon" in user_overrides):
         space.pop("epsilon", None)
 
-    # Remap legacy names once (e.g. ARDRegression n_iter → max_iter)
+    # Apply LEGACY_PARAM_MAPPINGS once (e.g. ARDRegression n_iter → max_iter)
     # so that per-trial clean_hyperparameters has nothing to remap/log.
     return remap_legacy_param_names(algo_name, space)
 
@@ -247,9 +247,9 @@ def _enqueueable_initial_params(
 ) -> dict[str, Any]:
     """Drop initial params whose value type does not fit the search space.
 
-    A value carried over from an older space (e.g. SVR ``gamma="scale"``
-    from the former categorical default, now a numeric ``float_log``
-    range) would make Optuna fail the enqueued trial. Such a key is
+    A value that does not fit the configured space (e.g. SVR
+    ``gamma="scale"`` against a numeric ``float_log`` range) would make
+    Optuna fail the enqueued trial. Such a key is
     dropped with a warning and sampled from the space instead; numeric
     values outside the range are kept as is (Optuna handles them)."""
     kept: dict[str, Any] = {}

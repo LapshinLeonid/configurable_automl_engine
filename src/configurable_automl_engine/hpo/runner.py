@@ -623,7 +623,7 @@ class _OptimizeRunner:
         self.phase_trials = own_trials
         # Recomputed here from own_trials: idempotent with the run() call and
         # safe for direct ``select_best_trial`` callers that did not go
-        # through run() (the old fallback for a not-yet-filled phase_trials).
+        # through run() (the fallback for a not-yet-filled phase_trials).
         # The duration measured in run() is preserved (select_best_trial does
         # not re-time the loop).
         stats = _count_trial_states(own_trials, self.trial_stats.duration_seconds)
@@ -866,9 +866,9 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     # 'auto' (no-hold-out mode) is a no-op — the fold-local resolution
     # validates the resolved domain per fit.
     validate_target_for_transform(y, request.target_transform, allow_auto=True)
-    # _validate_data may return a repaired feature matrix (e.g. datetime
-    # columns expanded); the None return is kept for backward compatibility
-    # with callers/mocks that treat the helper as a pure validator.
+    # _validate_data returns a repaired feature matrix (e.g. datetime
+    # columns expanded); the isinstance guard tolerates mocks that return
+    # None.
     validated = _validate_data(
         X,
         y,

@@ -92,14 +92,14 @@ BBC-CV estimate would be especially exposed to).
 
 `general.n_repeats` (default `1`) re-draws the resolved validation strategy R
 times, and `general.split_aggregation` (`median` by default, `mean` as the
-classic average) combines the per-repeat estimates into the single score that
+arithmetic average) combines the per-repeat estimates into the single score that
 drives the HPO trial value, the finalist ranking and the ensemble selection.
 The Sanity Gate keeps its own fixed median aggregation of the per-repeat
 values. Repeat `r` uses the deterministic seed `random_state + r` (wrapped
 into the scikit-learn seed range; `None` stays non-deterministic), so two runs
 with the same `random_state` see identical repeated splits.
 
-Every split of a repeated run is a `RepeatedSplit` — the classic split tuple
+Every split of a repeated run is a `RepeatedSplit` — the split tuple
 plus a `repeat_index` attribute — so the existing unpacking and the OOF
 channel keep working. Each repeat produces its own OOF vector and its own
 estimate: the trainer combines the per-repeat values by
@@ -109,7 +109,7 @@ A non-finite repeat is penalized with `HPO_WORST_SCORE` (or excluded from the
 trainer aggregate) with a WARNING while the remaining repeats still carry the
 evidence; the trial fails only when every repeat failed.
 
-With `n_repeats = 1` the behavior is exactly the classic single split. The
+With `n_repeats = 1` the behavior is exactly the single split. The
 `loo` strategy has deterministic folds, so any `n_repeats > 1` is ignored with
 a WARNING — the same applies when `auto` resolves to `loo`. Every repeat
 multiplies the validation cost, so the contract `check_multi_split` rule

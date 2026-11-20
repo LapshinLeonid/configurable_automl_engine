@@ -123,7 +123,7 @@ def repeat_oof_buffer(
     """Return the OOF row-buffer of one repeat.
 
     With several repeats the collector allocates a ``(n_repeats, n_rows)``
-    matrix; with one repeat the classic flat ``(n_rows,)`` buffer is kept.
+    matrix; with one repeat a flat ``(n_rows,)`` buffer is kept.
 
     Args:
         oof_out: The OOF buffer of the trial (``None`` — not collecting).
@@ -142,8 +142,8 @@ def penalize_non_finite_repeat(value: float, repeat_index: int) -> float:
 
     A degenerate metric value of one repeat (NaN/±inf) must not fail the
     whole trial: the repeat is penalized, the remaining repeats still carry
-    the evidence. Only when EVERY repeat is non-finite the aggregate becomes
-    the worst-score sentinel as well (the classic score semantics).
+    the evidence. Only when EVERY repeat is non-finite does the aggregate
+    become the worst-score sentinel as well.
 
     Args:
         value: The raw score of the repeat.
@@ -182,7 +182,7 @@ def run_repeat_scores(
     A repeat whose evaluation raises a non-fatal ``ValueError`` (all folds of
     the repeat failed, or non-finite hold-out predictions) is penalized with
     ``HPO_WORST_SCORE`` and a WARNING; the other repeats continue. When ALL
-    repeats fail, the trial fails as before (the ``ValueError`` is re-raised).
+    repeats fail, the ``ValueError`` is re-raised and the trial fails.
 
     Args:
         score_repeat: The per-repeat evaluator.
@@ -264,7 +264,7 @@ def phase_oof_matrix(
     With ``n_repeats > 1`` every trial stores one OOF vector per repeat
     (``(n_repeats, n_rows)``): the repeats are stacked along the
     configuration axis, so every repeat of every trial becomes a separate
-    BBC-CV configuration. A single-repeat trial keeps the classic
+    BBC-CV configuration. A single-repeat trial keeps a
     ``(n_rows,)`` vector and contributes one row. Above ``max_cells`` the
     matrix is not built (the BBC-CV budget) and ``None`` is returned with a
     WARNING.

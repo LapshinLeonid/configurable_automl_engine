@@ -62,8 +62,7 @@ class HpoRequest:
             already applied).
         n_folds: The number of folds of ``'k_fold'``.
         n_repeats: The number of repeats of the validation strategy in the
-            multi-split (repeated) mode (``1`` — the classic single-split
-            behavior).
+            multi-split (repeated) mode (``1`` — a single split).
         split_aggregation: How the per-repeat trial scores are combined
             (``'median'`` by default, or ``'mean'``).
         train_test_split_test_size: The hold-out size of

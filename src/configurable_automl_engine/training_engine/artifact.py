@@ -267,10 +267,10 @@ def _finite_float_or_none(value: Any) -> float | None:
 def _effective_repeat_count(trainer: Any) -> int:
     """Return the number of repeats the final trainer actually scored.
 
-    ``repeat_scores_`` is ``None`` for the classic single-split run (and for
-    an older artifact); its length is the effective repeat count. Reading the
-    trainer state instead of the config keeps a strategy whose repeats were
-    ignored (``loo``) reported as one split.
+    ``repeat_scores_`` is ``None`` for a single-split run (and for an
+    artifact that does not record the field); its length is the effective
+    repeat count. Reading the trainer state instead of the config keeps a
+    strategy whose repeats were ignored (``loo``) reported as one split.
     """
     repeat_scores = getattr(trainer, "repeat_scores_", None)
     if isinstance(repeat_scores, (list, tuple)) and repeat_scores:
@@ -284,14 +284,13 @@ def _add_repeat_statistics(
     winner_repeat_scores: tuple[float, ...] | None = None,
     oof_score_std: float | None = None,
 ) -> None:
-    """Attach the multi-split spread to the legacy result dict.
+    """Attach the multi-split spread to the dict result.
 
     The aggregate values (``score`` / ``oof_score``) keep their existing
-    keys, so a single-split run is byte-for-byte the classic report. With
+    keys, so a single-split run produces the plain report. With
     more than one repeat the dict additionally carries ``n_repeats`` and the
     finite spreads of the winner and OOF estimates. The keys are omitted for
-    a single split and for non-finite/absent statistics, which keeps the
-    legacy serialization backward compatible.
+    a single split and for non-finite/absent statistics.
 
     ``score_std`` must describe the same estimate as ``result["score"]``.
     With a reserved outer hold-out the artifact trainer is refit on all rows,
@@ -373,8 +372,9 @@ def _oof_score_with_std_in_user_metric(
     combined by the same policy. The spread is computed in the same
     comparison metric (never from the trainer's ``RMSE_oof`` diagnostics) so
     the report always pairs ``oof_score`` with the matching std. A trainer
-    without per-repeat vectors (for example an older saved artifact) falls
-    back to its representative ``oof_predictions_`` vector and no spread.
+    without per-repeat vectors (for example a saved artifact without the
+    per-repeat field) falls back to its representative ``oof_predictions_``
+    vector and no spread.
 
     Args:
         metric_user: The user-facing comparison metric name.

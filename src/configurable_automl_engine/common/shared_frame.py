@@ -153,8 +153,8 @@ def _shm_has_free_space(size: int) -> bool:
     run this is a best-effort guard against the 64MB /dev/shm default.
 
     When the backing path cannot be determined (non-Linux POSIX systems),
-    no check is possible and True is returned: the existing behaviour (an
-    attempt that may or may not fail with ENOMEM) is preserved there.
+    no check is possible and True is returned: the segment creation attempt
+    may or may not fail with ENOMEM.
 
     Args:
         size: The requested segment size in bytes.
@@ -352,8 +352,8 @@ class SharedDataFrame:
         # semantics (nullable values, categorical encoding) that is silently
         # lost in the SHM round-trip, and e.g. a numeric category promotes to
         # float64, which changes the astype(str) encoding ('10' → '10.0') and
-        # can collapse big int ids into indistinguishable float64 values,
-        # while the earlier parquet path preserved the exact int64.
+        # can collapse big int ids into indistinguishable float64 values
+        # that do not round-trip as exact int64.
         allowed_kinds = {"i", "u", "f", "b"}
         if not all(
             isinstance(dt, np.dtype) and dt.kind in allowed_kinds for dt in df.dtypes

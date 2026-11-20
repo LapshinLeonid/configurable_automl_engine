@@ -461,8 +461,8 @@ def assemble_estimator(
                 ),
             )
         )
-    # New step: feature selection is activated strictly between the
-    # preprocessor and the oversampler.
+    # Feature selection sits strictly between the preprocessor and the
+    # oversampler.
     if apply_fs:
         steps.append(
             ("feature_selector", _fs_transformer_factory(fs_cfg, random_state))

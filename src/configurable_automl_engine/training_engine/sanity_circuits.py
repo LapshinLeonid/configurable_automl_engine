@@ -46,8 +46,8 @@ D. Generalization Gap (``check_generalization_gap``) — ``RMSE_oof /
    signal for possible target leakage. With ``n_repeats > 1``
    (``check_generalization_gap_repeats``) the reported gap is the median of
    the per-repeat ratios; a repeat whose ratio cannot be computed is
-   excluded, and only a total non-computability yields NaN (the classic
-   single-split semantics).
+   excluded, and only a total non-computability yields NaN
+   (the single-split semantics).
 
 Threshold comparison sides are fixed in one place (module-level helpers
 ``_fails_below`` / ``_fails_above`` / ``_diversity_fails``):

@@ -57,7 +57,8 @@ log = _logging.getLogger(__name__)
 def _build_scorer(name: str) -> Any:
     """Create a scorer object from a metric name."""
     try:
-        # Use the new API, which returns either a make_scorer object or a string
+        # get_scorer_object returns a scorer callable (a make_scorer or
+        # sklearn scorer object)
         return get_scorer_object(name)
     except Exception as err:
         raise HyperoptError(f"Unknown metric name: '{name}'") from err
@@ -200,7 +201,7 @@ def _evaluate_with_intermediate_reports(
             ``len(X)``; when given, the out-of-fold predictions of the
             successful folds are written into it by position (the rows of
             failed folds stay untouched).
-        n_repeats: The number of repeats (``1`` — the classic single split).
+        n_repeats: The number of repeats (``1`` — a single split).
         split_aggregation: How the per-repeat scores are combined.
         step_offset: The global Optuna step offset of the repeat (the
             intermediate reports of every repeat keep distinct steps).
@@ -413,7 +414,7 @@ def _evaluate_pooled_cv(
         oof_out: An optional buffer of length
             ``len(X)``; when given, the out-of-fold predictions of the
             successful folds are written into it by position.
-        n_repeats: The number of repeats (``1`` — the classic single split).
+        n_repeats: The number of repeats (``1`` — a single split).
         split_aggregation: How the per-repeat scores are combined.
         validation: The resolved validation plan (the repeat seeds).
         scores_out: An optional collector of the per-repeat scores.
@@ -645,8 +646,8 @@ def score_trial(
     else:
         oof = None
     # The repeat-specific keyword arguments are passed only for a real
-    # multi-split run: with one repeat the classic evaluator call (and its
-    # monkeypatchable signature) stays exactly as before.
+    # multi-split run: with one repeat the evaluator is called without them,
+    # through the same monkeypatchable signature.
     repeat_options: dict[str, Any] = {}
     fold_options: dict[str, Any] = {}
     if n_repeats > 1:
@@ -889,7 +890,7 @@ def _score_fold_mean_once(
     scorer: Any,
     oof_out: np.ndarray | None,
 ) -> float:
-    """The fold-average score of one repeat (the classic path)."""
+    """The fold-average score of one repeat."""
     if oof_out is None:
         scores = model_selection.cross_val_score(
             estimator,

@@ -107,10 +107,10 @@ for the inclusion rules, versioning policy and contract-change process.
   step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`); with
   `parallel_mode: "threads"` setting either of them is a configuration error.
   See [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#run_parallelfunc-args_seq-).
-* **Signature-Aware Hyperparameter Names** — legacy parameter names are
-  remapped (e.g. `n_iter` → `max_iter` for ARDRegression); unknown names are
-  rejected so typos do not go unnoticed (except `xgboosting`, which accepts
-  arbitrary `**kwargs`).
+* **Signature-Aware Hyperparameter Names** — the names in
+  `LEGACY_PARAM_MAPPINGS` are remapped (e.g. `n_iter` → `max_iter` for
+  ARDRegression); unknown names are rejected so typos do not go unnoticed
+  (except `xgboosting`, which accepts arbitrary `**kwargs`).
 * ⚠️ **Experimental**: **Target-Aware Oversampling** — random oversampling,
   SMOTE or ADASYN (requires `imbalanced-learn`), applied only to the training
   part of each fold. See [Oversampling section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#oversampling-section)

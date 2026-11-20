@@ -51,8 +51,7 @@ class ValidationPlan:
             (the integer row count of the ``'auto'`` decision when resolved
             from ``'auto'``, else ``test_size``).
         n_repeats: The effective number of repeats of the validation strategy
-            (``1`` — the classic single-split behavior; LOO repeats are
-            resolved away to ``1``).
+            (``1`` — a single split; LOO repeats are resolved away to ``1``).
         repeat_seeds: The deterministic seed of every repeat
             (``random_state + r``, wrapped into the sklearn seed range).
         split_aggregation: How the per-repeat trial scores are combined
@@ -158,10 +157,10 @@ class TrialScore:
         oof: The out-of-fold predictions by row position (NaN where the
             trial did not predict); ``None`` when not collected. With several
             repeats the shape is ``(n_repeats, n_rows)`` — one OOF vector per
-            repeat; with one repeat the classic ``(n_rows,)`` vector is kept.
+            repeat; with one repeat a ``(n_rows,)`` vector is kept.
         repeat_scores: The per-repeat scores of a multi-split trial (the
             penalized worst-score sentinel for a failed/non-finite repeat);
-            empty with one repeat (the classic single-score behavior).
+            empty with one repeat (a single trial score).
     """
 
     value: float

@@ -37,7 +37,7 @@ Documented contract:
 * records that may not appear in a leaderboard are filtered out before
   ranking: a ``completed`` record without a valid score (the score fields
   of the model already reject ``None``/non-finite/sentinel values, but a
-  hand-built result may still carry ``score=None`` on a completed record),
+  hand-built result may carry ``score=None`` on a completed record),
   and every ``failed`` / ``disqualified`` record (their exclusion reason
   is preserved in the run history, not in the leaderboard);
 * an empty leaderboard (a failed experiment, no valid records) is not an

@@ -317,7 +317,7 @@ class ModelTrainer(TrainerViewMixin):
                 ``n_repeats > 1`` the base validation strategy is re-drawn
                 with the deterministic seeds ``random_state + r`` and the
                 per-repeat estimates are combined by ``split_aggregation``;
-                ``1`` (default) keeps the classic single-split behavior.
+                ``1`` (default) — a single split.
             split_aggregation: How the per-repeat estimates are combined:
                 ``'median'`` (default, robust to one degenerate repeat) or
                 ``'mean'``. Used only when ``n_repeats > 1``.

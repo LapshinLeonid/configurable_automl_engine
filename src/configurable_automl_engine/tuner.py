@@ -159,8 +159,8 @@ def optimize(
             ``val_method`` (takes precedence).
         n_folds: Number of cross-validation folds. Defaults to 5.
         n_repeats: Number of repeats of the validation strategy in the
-            multi-split (repeated) mode. ``1`` (default) — the classic
-            single-split behavior; ``R > 1`` — the base strategy is re-drawn
+            multi-split (repeated) mode. ``1`` (default) — a single split;
+            ``R > 1`` — the base strategy is re-drawn
             ``R`` times with the deterministic seeds ``random_state + r`` and
             the per-repeat trial scores are combined by
             ``split_aggregation``. LOO repeats are ignored with a WARNING.
@@ -181,8 +181,8 @@ def optimize(
             data splits stay fixed across phases. This keeps CV evaluations
             comparable between phases (score monotonicity of
             ``enqueue_trial``, consistent TPE history). ``None`` (default) —
-            the sampler falls back to ``random_state`` (backward-compatible
-            behavior for direct callers).
+            the sampler falls back to ``random_state`` (the seed direct
+            callers pass).
         train_test_split_test_size: Test size for split validation.
             Defaults to 0.2.
         space_overrides: Search space overrides keyed by the

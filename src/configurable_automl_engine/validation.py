@@ -7,7 +7,7 @@ automatically assesses data sufficiency and can lower the validation complexity
 (e.g. fall back from K-Fold to Train-Test Split) to prevent statistical
 unreliability on small samples.
 Supported strategies (ValidationStrategy):
-    • train_test_split : Classic split (80/20 by default).
+    • train_test_split : A single hold-out split (80/20 by default).
     • k_fold           : Cross-validation (K-Fold CV) with a fixed seed.
     • loo              : Leave-One-Out (validation on each sample), for small samples.
     • auto             : Automatic selection between LOO/k_fold/train_test_split
@@ -24,14 +24,13 @@ Implementation features:
        ``n_repeats = R > 1`` the base strategy is re-drawn R times with the
        deterministic seeds ``random_state + r`` (r = 0..R-1), so two runs with
        the same ``random_state`` produce identical sets of repeated splits.
-       Every yielded split of a repeated run is a ``RepeatedSplit`` — the same
-       4/5-element tuple as before, tagged with the ``repeat_index`` attribute.
-       With ``n_repeats = 1`` the behavior is byte-in-byte the classic
-       single-split one (plain tuples, no tags). The 'loo' strategy has
-       deterministic folds, so repeating it only multiplies the cost: repeats
-       are ignored with a WARNING. The per-split estimates are combined
-       downstream by ``aggregate_split_scores`` (the ``general.split_aggregation``
-       config field).
+       Every yielded split of a repeated run is a ``RepeatedSplit`` — a
+       4/5-element tuple tagged with the ``repeat_index`` attribute. With
+       ``n_repeats = 1`` the yields are plain, untagged tuples. The 'loo'
+       strategy has deterministic folds, so repeating it only multiplies the
+       cost: repeats are ignored with a WARNING. The per-split estimates are
+       combined downstream by ``aggregate_split_scores`` (the
+       ``general.split_aggregation`` config field).
 """
 
 from __future__ import annotations
@@ -71,7 +70,7 @@ SUPPORTED_VALIDATION_METHODS: tuple[str, ...] = (
 
 #: Aggregation policies of the per-repeat (per-split) scores
 #: (``general.split_aggregation``): 'median' (default) — robust to a
-#: "lucky" split on a micro-sample; 'mean' — the classic fold-average.
+#: "lucky" split on a micro-sample; 'mean' — the arithmetic fold-average.
 SUPPORTED_SPLIT_AGGREGATIONS: tuple[str, ...] = ("mean", "median")
 
 #: The repeat index attribute name of a repeated split tuple
@@ -88,7 +87,7 @@ class RepeatedSplit(tuple):
     """A split tuple tagged with its repeat index (attribute-only tag).
 
     A lightweight ``tuple`` subclass: the elements and the unpacking are
-    identical to the classic split tuples, the only addition is the
+    identical to the plain split tuples, the only addition is the
     ``repeat_index`` attribute (set by ``iter_splits`` when ``n_repeats > 1``,
     read via ``repeat_index_of``). The attribute lives in the instance
     ``__dict__`` (empty ``__slots__``: a ``tuple`` subtype cannot declare
@@ -194,7 +193,7 @@ def with_repeat_index(
 ) -> Split | SplitWithIndices:
     """Tag a split tuple with its repeat index (returns the same length).
 
-    The tag is an attribute on the yielded tuple, so the classic
+    The tag is an attribute on the yielded tuple, so the usual
     ``for X_tr, X_te, y_tr, y_te, ... in iter_splits(...)`` unpacking and the
     OOF channel (``include_indices=True``) keep working unchanged; a caller
     that needs the repeat reads it via ``repeat_index_of``. Built-in tuples
@@ -233,7 +232,7 @@ def aggregate_split_scores(
     """Combine the per-repeat (per-split) scores into a single estimate.
 
     Pure function of the scores and the policy: 'median' (default) is
-    robust to a "lucky" split on a micro-sample, 'mean' is the classic
+    robust to a "lucky" split on a micro-sample, 'mean' is the arithmetic
     average. Non-finite scores (NaN from failed folds, ±inf from degenerate
     metric values) are excluded before the aggregation with a WARNING (the
     count and the policy are logged once per call); a non-finite repeat
@@ -288,7 +287,7 @@ def make_cv(
         random_state: The random number generator initializer for reproducibility.
         n_features: The number of features P. Required for the 'auto' strategy.
         n_repeats: The number of repeats of the base strategy
-            (R = 1 — the classic single-split behavior). The repeats are
+            (R = 1 — a single split). The repeats are
             materialized by ``iter_splits`` with the wrapped seeds
             ``repeated_seed(random_state, r)``; ``make_cv`` only validates
             the count (a non-positive or non-integer value is a
@@ -491,11 +490,10 @@ def iter_splits(
             Defaults to False — only the 4-element tuples are yielded.
         n_repeats: The number of repeats of the base strategy with the
             deterministic seeds ``random_state + r`` (r = 0..R-1). 1 (default)
-            — the classic single-split behavior (plain tuples, byte-in-byte
-            the pre-multi-split output). R > 1 — the base strategy is
+            — a single split with plain tuples. R > 1 — the base strategy is
             re-drawn R times and every yielded tuple carries the
             ``repeat_index`` attribute (read via ``repeat_index_of``), so
-            the existing unpacking-based consumers keep working unchanged.
+            the unpacking-based consumers keep working unchanged.
             Repeats are resolved against the RESOLVED strategy: the 'loo'
             strategy (explicit or resolved from 'auto') has deterministic
             folds — any ``n_repeats > 1`` is ignored with a WARNING.
@@ -541,7 +539,7 @@ def iter_splits(
     # applied here (the single point where the resolved method is known) so
     # it covers every strategy resolution path, explicit or 'auto'.
     repeats = resolved_n_repeats(n_repeats, final_method)
-    # 2b. The n_samples sanity check (issue-211): a repeat cycle of the
+    # 2b. The n_samples sanity check: a repeat cycle of the
     # k-fold strategy evaluates every row R * n_splits times — on a tiny
     # sample this is both a wasted budget and a statistics-free estimate.
     # The config rule cannot know n_samples, so the check lives at the
@@ -562,8 +560,8 @@ def iter_splits(
     # 3. Generate the splits: one generator of (train_idx, test_idx) pair
     # sets per repeat, one loop that yields the subsets. The repeat wrapper
     # is built into this single point of extension: with repeats = 1 the
-    # seed is exactly ``random_state`` and the output is byte-in-byte the
-    # classic single-split one (plain, untagged tuples).
+    # seed is exactly ``random_state`` and the output is the plain
+    # single-split one (untagged tuples).
     if final_method == "train_test_split":
         # Each repeat is its own pair set (a single hold-out split per
         # repeat, seed ``random_state + r``).

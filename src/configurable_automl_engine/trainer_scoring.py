@@ -361,7 +361,7 @@ def _single_repeat_scores(
     pool_additive: dict[str, bool],
     algorithm: str,
 ) -> ValidationScores:
-    """Build the single-split result (exactly the classic behavior)."""
+    """Build the single-split result."""
     if not outcome.fold_raw:
         _raise_all_folds_failed(outcome)
 

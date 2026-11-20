@@ -82,9 +82,9 @@ __all__ = ["execute_phases", "train_best_model"]
 _LOG = logging.getLogger(__name__)
 
 # The instrumented run result of the LAST ``train_best_model`` call in this
-# process (the experiment-result plumbing): the public API still returns
-# the legacy dict (backward compatibility), and the ``ExperimentResult``
-# model assembled from the same sources is stored here for the consumers
+# process (the experiment-result plumbing): the public API returns the dict
+# result, and the ``ExperimentResult`` model assembled from the same sources
+# is stored here for the consumers
 # (the facade and the experiment store). The global is NOT reset
 # between calls: a consumer that cannot pass its own ``run_token`` (the
 # owner stamp, see ``run_result.mark_result_owner``) must snapshot this
@@ -662,7 +662,7 @@ def train_best_model(
     The last phase of a valid config is a terminal select
     (``output: winner``), whose result determines the artifact.
 
-    The run is instrumented: alongside the legacy dict the full run history
+    The run is instrumented: alongside the dict result the full run history
     (per-algorithm / per-phase records, trial statistics, phase and run
     timings, the resolved validation settings) is assembled into the
     ``ExperimentResult`` model (``training_engine.run_result``), which is
@@ -685,7 +685,7 @@ def train_best_model(
         run_token: The caller's private run token (an opaque UUID);
             when given, the assembled ``ExperimentResult`` is stamped
             with it for owner recognition (see
-            ``run_result.mark_result_owner``). The legacy dict return
+            ``run_result.mark_result_owner``). The dict result return
             value is not affected.
     Returns:
         Dict[str, Any]: A dict with the results: the algorithm name, ``score``
@@ -760,9 +760,9 @@ def _winner_repeat_scores(record: PhaseResult) -> tuple[float, ...] | None:
     ``result["score"]`` is the winner's HPO score. The final artifact trainer
     can be refit on a different row set (when an outer hold-out is reserved),
     so its repeat scores cannot be paired with that score. The best trial
-    keeps the per-repeat values as Optuna user attributes (M2); they are the
-    source of ``score_std``. ``None`` for a single split or an older/mocked
-    record without the attribute.
+    keeps the per-repeat values as Optuna user attributes; they are the
+    source of ``score_std``. ``None`` for a single split or a serialized or
+    mocked record without the attribute.
     """
     best_value = float("-inf")
     best_scores: tuple[float, ...] | None = None

@@ -140,7 +140,7 @@ class FinalistCandidate:
         y_pred_oof_by_repeat (list[np.ndarray | pd.Series] | None): The OOF
             vectors of the valid repeats of the multi-split validation,
             aligned to the rows of X and each one-dimensional (NaN marks an
-            uncovered row); repeats invalidated by the M3 scoring layer are
+            uncovered row); repeats invalidated by the scoring layer are
             excluded. ``None`` when the trainer keeps no usable per-repeat
             vectors or keeps no per-repeat metadata at all.
         has_valid_oof (bool): ``False`` when per-repeat metadata is present

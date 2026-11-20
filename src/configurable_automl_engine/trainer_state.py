@@ -39,11 +39,12 @@ if TYPE_CHECKING:
 
 #: The version of the saved ``ModelTrainer`` state. It is recorded in the
 #: artifact metadata; ``ModelTrainer.load`` refuses any other version.
-#: 1 — the flat attributes of the engine up to 0.4.x (no recorded version);
-#: 2 — the grouped state of the 0.5.0 development builds;
-#: 3 — 0.5.0: the preprocessing encoders, ``ColumnNameSelector`` and
-#: ``DataOversampler`` moved into the ``preprocessing`` / ``oversampling``
-#: packages (a pickle records the module path of every class).
+#: 1 — the flat attribute state;
+#: 2 — the grouped state;
+#: 3 — the grouped state whose preprocessing encoders, ``ColumnNameSelector``
+#: and ``DataOversampler`` are pickled from the ``preprocessing`` /
+#: ``oversampling`` packages (a pickle records the module path of every
+#: class).
 ARTIFACT_FORMAT_VERSION = 3
 
 
@@ -51,13 +52,11 @@ def _frozen_slots_setstate(self, state: Any) -> None:
     """Restore a frozen slots-dataclass state, tolerating shorter states.
 
     A pickle of a slots dataclass stores the field values as a list zipped
-    against the current fields. Artifacts of the current format (3) saved
-    before an additive field was introduced carry a shorter list: the
-    default ``zip`` restores them without an error but leaves the trailing
-    slots unset, and a later access would fail with ``AttributeError``.
-    Fill the missing tail fields with their dataclass defaults (additive
-    fields are appended with a default, so the legacy behavior is
-    preserved).
+    against the current fields. A serialized state may carry fewer values
+    than the current fields (the tail fields are appended with a default):
+    the default ``zip`` restores it without an error but leaves the trailing
+    slots unset, and a later access would fail with ``AttributeError``. Fill
+    the missing tail fields with their dataclass defaults.
 
     Raises:
         TypeError: If the state is not a list/tuple (corrupt pickle).
@@ -67,7 +66,7 @@ def _frozen_slots_setstate(self, state: Any) -> None:
             f"Unexpected {type(self).__name__} pickle state: {type(state).__name__}"
         )
     # Fields with defaults (the tail of the field list) keep their default
-    # when the legacy state is shorter; fill from the state first, then
+    # when the serialized state is shorter; fill from the state first, then
     # patch the unset tail with the defaults.
     fields_ = fields(self)
     for i, field_ in enumerate(fields_):
@@ -116,22 +115,22 @@ class TrainerSettings:
     #: The ``|skew(y)|`` threshold of the fold-local ``target_transform:
     #: 'auto'`` resolution (``general.target_transform_skew_threshold``).
     #: ``None`` — the ``AutoTargetTransformer`` module default. Additive
-    #: field: legacy pickles restore the default via ``__setstate__``.
+    #: field: a shorter pickle restores the default via ``__setstate__``.
     target_transform_skew_threshold: float | None = None
     #: The number of repeated validation splits (``general.n_repeats``).
-    #: 1 — the classic single-split behavior. Additive field: legacy pickles
-    #: restore the default via ``__setstate__``.
+    #: 1 — a single split. Additive field: a shorter pickle restores the
+    #: default via ``__setstate__``.
     n_repeats: int = 1
     #: The per-repeat score aggregation (``general.split_aggregation``):
-    #: 'median' or 'mean'. Additive field: legacy pickles restore the
+    #: 'median' or 'mean'. Additive field: a shorter pickle restores the
     #: default via ``__setstate__``.
     split_aggregation: str = "median"
 
 
 # ``@dataclass(slots=True)`` rebuilds the class and (for frozen dataclasses)
 # unconditionally overwrites ``__setstate__`` with its own ``zip``-based
-# helper, which silently leaves trailing additive slots unset for a legacy
-# (shorter) state list. Re-assert the custom implementation AFTER the
+# helper, which silently leaves trailing additive slots unset for a shorter
+# state list. Re-assert the custom implementation AFTER the
 # decorator so it survives on every supported Python version.
 TrainerSettings.__setstate__ = _frozen_slots_setstate  # type: ignore[attr-defined]
 

@@ -69,14 +69,14 @@ class SanityCheckResult:
             2/3/4 — one/two/three or more disqualification reasons.
             In ``warn_only`` mode it never exceeds 1.
         n_repeats: The total number of repeats recorded by the trainer,
-            including repeats invalidated by the M3 scoring layer. The select
+            including repeats invalidated by the scoring layer. The select
             step fills this value; a direct ``ModelSanityGate.check`` caller
             sees the number of valid repeat vectors it passed.
         n_valid_repeats: The number of valid repeat vectors used by this
             audit (0 when the audit was skipped or failed). More than one
             valid vector is aggregated by the median; exactly one valid
             vector uses the single-split path even when ``n_repeats > 1``.
-            ``1`` also covers a classic single OOF vector.
+            ``1`` also covers a single OOF vector.
     """
 
     is_valid: bool

@@ -109,9 +109,9 @@ def _format_number(value: Any) -> str:
     """Render a number, or ``n/a`` for a missing/non-finite value.
 
     Report sections are JSON-safe mappings assembled by the engine; a
-    circuit that could not be computed is serialized as ``None`` and a
-    legacy section may still carry a raw NaN. Neither may crash the report,
-    so both render as the explicit not-available marker.
+    circuit that could not be computed is serialized as ``None``, and a
+    section may carry a raw NaN. Neither may crash the report, so both
+    render as the explicit not-available marker.
     """
     if value is None:
         return _NA
@@ -153,7 +153,7 @@ def _repeat_note(result: ExperimentResult) -> str | None:
 def _format_spread(value: Any, std: Any, result: ExperimentResult) -> str:
     """Render an aggregate with its spread for a repeated-validation run.
 
-    A single split keeps the classic scalar rendering exactly. For several
+    A single split renders as a plain scalar. For several
     repeats the value is shown as ``aggregate ± std``; an absent/non-finite
     spread renders as ``n/a`` instead of failing the whole report.
     """
@@ -182,8 +182,8 @@ def _has_repeat_markers(value: Any) -> bool:
 
     A section with a per-repeat spread (``*_std``), an explicit median key or
     a nested repeat count is a multi-split section even when the result-level
-    ``n_repeats`` was not recorded (a legacy/serialized producer). Such a
-    section is rendered instead of being silently dropped.
+    ``n_repeats`` is absent (a deserialized result). Such a section is
+    rendered instead of being silently dropped.
     """
     if isinstance(value, dict):
         for key, item in value.items():
@@ -210,10 +210,10 @@ def _has_repeat_markers(value: Any) -> bool:
 def _has_aggregated_audit(value: Any) -> bool:
     """True when a gate section actually records aggregated audit values.
 
-    The section-level ``n_repeats`` alone does not prove aggregation: M4
-    records it on every section, including the single-split one. A candidate
-    is aggregated when its ``n_valid_repeats`` is greater than one or it
-    carries an explicit per-repeat spread/median key. ``n_repeats`` is the
+    The section-level ``n_repeats`` alone does not prove aggregation: the
+    trainer records it on every section, including the single-split one.
+    A candidate is aggregated when its ``n_valid_repeats`` is greater than one
+    or it carries an explicit per-repeat spread/median key. ``n_repeats`` is the
     trainer total and may stay above one when only a single valid repeat was
     audited, so it must not be used as the aggregation marker. Only an
     actually aggregated audit lets the report state that the circuits use
@@ -266,9 +266,9 @@ def _format_count(value: Any) -> str:
 def _text_items(value: Any) -> list[str]:
     """Normalize a report list-or-string value to a list of plain strings.
 
-    A legacy/hand-written section may carry ``reasons`` as a single string
-    instead of a list; iterating that string would split it into characters.
-    Both shapes are rendered correctly.
+    A section may carry ``reasons`` as a single string instead of a list;
+    iterating that string would split it into characters. Both shapes are
+    rendered correctly.
     """
     if value is None:
         return []
@@ -431,7 +431,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
     def _render_honest_scores(self, lines: list[str], result: ExperimentResult) -> None:
         # The last flag tells whether the estimate itself is repeated. The
         # hold-out and BBC estimates stay single-split even in a repeated run,
-        # so they keep the classic scalar rendering (no "± n/a").
+        # so they render as plain scalars (no "± n/a").
         honest: list[tuple[str, float | None, float | None, str, bool]] = [
             (
                 "Hold-out score",
@@ -501,16 +501,19 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
     def _render_sanity_gate(self, lines: list[str], result: ExperimentResult) -> None:
         """Render the Sanity Gate report sections of a repeated run.
 
-        The new table is rendered only when the section itself records
-        multi-split data (a candidate ``n_repeats > 1``, an explicit spread or
-        a median/mean key); a classic one-repeat section keeps the previous
-        report unchanged, regardless of the result-level repeat count. When
-        the audit carries aggregates, the caption says so and uses their
-        medians; otherwise the circuits are explicitly labelled as values of
-        one representative repeat. A section-level ``RMSE_oof`` spread is
-        described separately because it does not aggregate the circuits. A
-        missing/non-finite circuit statistic (a disabled or non-computable
-        circuit) renders as ``n/a`` and never fails the report.
+        The Sanity Gate section is rendered only when the ``sanity_gate``
+        mapping contains multi-split markers in at least one section (a
+        candidate ``n_repeats > 1``, an explicit spread or a median/mean key);
+        a fully single-split result renders no Sanity Gate section at all.
+        Once rendered, every recorded section is printed: a section without
+        its own repeat markers shows plain scalar values (its caption names
+        one representative OOF repeat), regardless of the result-level repeat
+        count. When the audit carries aggregates, the caption says so and uses
+        their medians; otherwise the circuits are explicitly labelled as
+        values of one representative repeat. A section-level ``RMSE_oof``
+        spread is described separately because it does not aggregate the
+        circuits. A missing/non-finite circuit statistic (a disabled or
+        non-computable circuit) renders as ``n/a`` and never fails the report.
 
         The renderer is a pure function of the result: it only reads the
         JSON-safe ``sanity_gate`` mapping and never reaches into the engine.

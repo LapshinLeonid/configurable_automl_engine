@@ -110,8 +110,7 @@ def _resolve_expected_valid_mask(
         yp: The predictions as a float array.
         expected: An optional boolean mask aligned with ``yp``: True where
             the model was required to produce a finite prediction.
-            ``None`` — every row is expected (the legacy masking contract:
-            any non-finite pair is dropped).
+            ``None`` — every row is expected: any non-finite pair is dropped.
 
     Returns:
         np.ndarray: The boolean mask of the rows entering the estimate.
@@ -149,16 +148,14 @@ def oof_rmse(y_true: Any, y_pred: Any, *, expected: Any | None = None) -> float:
     given, such a row raises ``InvalidPredictionError`` instead of being
     silently masked (a model that fails on most validation rows must not
     get a good estimate from the few rows it predicted). Without
-    ``expected`` the legacy masking contract holds: any non-finite pair is
-    dropped.
+    ``expected`` any non-finite pair is dropped.
 
     Args:
         y_true: True values aligned with ``y_pred`` by position.
         y_pred: OOF predictions aligned with ``y_true`` by position.
         expected: An optional boolean mask aligned with ``y_pred``: True
             where the model was required to produce a finite prediction
-            (validation rows). ``None`` — every row is expected (the legacy
-            masking contract).
+            (validation rows). ``None`` — every row is expected.
 
     Returns:
         float: RMSE over all valid pairs (lower is better).
@@ -259,7 +256,7 @@ def pooled_scorer_value(
     raises ``InvalidPredictionError``: the model was required to predict it,
     and silently scoring only the rows it happened to predict would reward a
     model that fails on most of the validation rows. Without ``expected``
-    the legacy masking contract holds: any non-finite pair is dropped.
+    any non-finite pair is dropped.
 
     Args:
         scorer: A scikit-learn ``make_scorer`` object (its raw metric parts
@@ -269,8 +266,7 @@ def pooled_scorer_value(
         y_pred: Predictions aligned with ``y_true`` by position.
         expected: An optional boolean mask aligned with ``y_pred``: True
             where the model was required to produce a finite prediction
-            (validation rows). ``None`` — every row is expected (the legacy
-            masking contract).
+            (validation rows). ``None`` — every row is expected.
 
     Returns:
         float: The raw (sign-applied) metric value over all valid pairs.
@@ -703,7 +699,7 @@ def get_scorer_object(
         name: Name of the requested scorer.
         global_y: Optional target array for global metrics.
     Returns:
-        Union[Callable[..., Any], str]: A Scorer object or a system sklearn string.
+        A scorer callable (a custom scorer or an sklearn scorer object).
     """
     custom = lookup_custom_metric(name)
     if custom is not None:

@@ -25,21 +25,20 @@ DEFAULT_TARGET_BINS = 8
 #: imbalanced-learn needs at least two groups to resample.
 MIN_TARGET_BINS = 2
 
-#: Backward-compatible aliases of :data:`DEFAULT_TARGET_BINS` and
-#: :data:`MIN_TARGET_BINS` kept for earlier callers of the module.
+#: Alternative public names of :data:`DEFAULT_TARGET_BINS` and
+#: :data:`MIN_TARGET_BINS`.
 CONTINUOUS_TARGET_QUANTILES = DEFAULT_TARGET_BINS
 CONTINUOUS_TARGET_MIN_BINS = MIN_TARGET_BINS
 
 
-#: Backward-compatible alias of :func:`_bin_regression_target` kept for
-#: earlier callers of the module.
+#: Alias of :func:`_bin_regression_target` under the continuous-target name.
 def _bin_continuous_target(
     y: pd.Series,
 ) -> tuple[bool, pd.Series, dict[int, float]]:
     """Discretize a continuous regression target into quantile bin codes.
 
-    Backward-compatible alias of :func:`_bin_regression_target` with the
-    default bin count."""
+    Equivalent to :func:`_bin_regression_target` with the default bin
+    count."""
     return _bin_regression_target(y, DEFAULT_TARGET_BINS)
 
 
@@ -110,11 +109,10 @@ def _is_continuous_target(y: pd.Series) -> bool:
 def _prepare_continuous_bins(y: pd.Series) -> tuple[pd.Series, dict[int, float]]:
     """Discretize a continuous target into quantile bins (class codes).
 
-    Kept for backward compatibility: equivalent to
-    :func:`_bin_regression_target` with the default bin count. The bin codes
-    are computed on the finite target values; rows with a missing target keep
-    code ``-1`` and are passed through the samplers unchanged (like an extra
-    class that is not resampled)."""
+    Equivalent to :func:`_bin_regression_target` with the default bin count.
+    The bin codes are computed on the finite target values; rows with a
+    missing target keep code ``-1`` and are passed through the samplers
+    unchanged (like an extra class that is not resampled)."""
     is_continuous, binned, bin_mids = _bin_regression_target(y, DEFAULT_TARGET_BINS)
     if not is_continuous:
         raise ValueError(

@@ -201,7 +201,7 @@ def resolve_metric_direction(direction: MetricDirection | str) -> MetricDirectio
 
 
 def _resolve_direction(direction: MetricDirection | str) -> MetricDirection:
-    """Backward-compatible alias of :func:`resolve_metric_direction`."""
+    """Alias of :func:`resolve_metric_direction`."""
     return resolve_metric_direction(direction)
 
 
