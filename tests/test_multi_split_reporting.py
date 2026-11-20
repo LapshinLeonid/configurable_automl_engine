@@ -8,7 +8,7 @@ Covered behavior:
   has no Sanity Gate table;
 * with ``n_repeats > 1`` the winner and OOF estimates render as
   ``aggregate ± std`` together with the repeat count;
-* an absent/non-finite spread renders as ``н/д`` instead of failing;
+* an absent/non-finite spread renders as ``n/a`` instead of failing;
 * the Sanity Gate section renders the RMSE spread and marks circuit values
   as aggregated only when the audit actually records per-repeat aggregates;
 * additional metrics are aggregated by the same policy as the winner score.
@@ -182,8 +182,9 @@ def test_missing_spread_renders_not_available_instead_of_failing() -> None:
     result = _repeated_result(score_std=None, oof_score_std=None)
     report = MarkdownReporter().report(result)
 
-    assert "0.072 ± н/д" in report
-    assert "0.080 ± н/д" in report
+    assert "0.072 ± n/a" in report
+    assert "0.080 ± n/a" in report
+    assert "н/д" not in report
 
 
 def test_large_spread_is_visible() -> None:
@@ -374,7 +375,8 @@ def test_sanity_gate_non_finite_values_render_not_available() -> None:
     }
     report = MarkdownReporter().report(result)
 
-    assert "н/д" in report
+    assert "| ridge | no | n/a | n/a | 1 | n/a ± n/a | Circuit D |" in report
+    assert "н/д" not in report
     assert "inf" not in report
     assert "nan" not in report
 
@@ -493,7 +495,8 @@ def test_sanity_gate_handles_non_numeric_overhead_and_string_reasons() -> None:
     )
     report = MarkdownReporter().report(result)
 
-    assert "- Overhead: н/д" in report
+    assert "- Overhead: n/a" in report
+    assert "н/д" not in report
     assert "∞ (infinite)" in report
     assert "Circuit D; soft warning" in report
 

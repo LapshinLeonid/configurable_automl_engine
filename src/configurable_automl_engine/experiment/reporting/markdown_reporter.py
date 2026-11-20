@@ -53,7 +53,7 @@ _EMPTY_LEADERBOARD_ROW = (
 )
 
 #: The placeholder of an absent or non-finite multi-split statistic.
-_NA = "н/д"
+_NA = "n/a"
 
 
 def _escape_cell(value: object) -> str:
@@ -106,7 +106,7 @@ def _format_score(score: float | None) -> str:
 
 
 def _format_number(value: Any) -> str:
-    """Render a number, or ``н/д`` for a missing/non-finite value.
+    """Render a number, or ``n/a`` for a missing/non-finite value.
 
     Report sections are JSON-safe mappings assembled by the engine; a
     circuit that could not be computed is serialized as ``None`` and a
@@ -155,7 +155,7 @@ def _format_spread(value: Any, std: Any, result: ExperimentResult) -> str:
 
     A single split keeps the classic scalar rendering exactly. For several
     repeats the value is shown as ``aggregate ± std``; an absent/non-finite
-    spread renders as ``н/д`` instead of failing the whole report.
+    spread renders as ``n/a`` instead of failing the whole report.
     """
     if _repeat_count(result) <= 1:
         return _format_score(value if value is None else float(value))
@@ -254,7 +254,7 @@ def _has_rmse_spread(value: dict[str, Any]) -> bool:
 
 
 def _format_count(value: Any) -> str:
-    """Render an integer count, or ``н/д`` for a missing value."""
+    """Render an integer count, or ``n/a`` for a missing value."""
     if value is None:
         return _NA
     try:
@@ -284,7 +284,7 @@ def _format_gap(value: Any, std: Any, infinite: Any) -> str:
 
     The engine serializes a non-finite gap as ``null`` plus
     ``generalization_gap_infinite: true``. The flag is authoritative: the
-    report must show an infinite gap instead of the generic ``н/д`` marker.
+    report must show an infinite gap instead of the generic ``n/a`` marker.
     """
     if infinite:
         try:
@@ -431,7 +431,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
     def _render_honest_scores(self, lines: list[str], result: ExperimentResult) -> None:
         # The last flag tells whether the estimate itself is repeated. The
         # hold-out and BBC estimates stay single-split even in a repeated run,
-        # so they keep the classic scalar rendering (no "± н/д").
+        # so they keep the classic scalar rendering (no "± n/a").
         honest: list[tuple[str, float | None, float | None, str, bool]] = [
             (
                 "Hold-out score",
@@ -510,7 +510,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
         one representative repeat. A section-level ``RMSE_oof`` spread is
         described separately because it does not aggregate the circuits. A
         missing/non-finite circuit statistic (a disabled or non-computable
-        circuit) renders as ``н/д`` and never fails the report.
+        circuit) renders as ``n/a`` and never fails the report.
 
         The renderer is a pure function of the result: it only reads the
         JSON-safe ``sanity_gate`` mapping and never reaches into the engine.
