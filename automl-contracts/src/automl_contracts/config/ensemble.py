@@ -36,9 +36,12 @@ class EnsembleCfg(BaseModel):
     Attributes:
         enable: Build the ensemble (off by default — the ensemble is an
             experimental feature outside the MVP pipeline).
-        k: The requested ensemble size (the number of top leaderboard
-            members, ≥ 1). When ``k`` exceeds the number of available
-            completed algorithms, ``min(k, n)`` is used with a warning.
+        k: The maximum ensemble size (the number of top leaderboard
+            members, ≥ 1). ``k`` is a strict upper bound: when the
+            terminal winner is outside the top-``k``, it replaces the
+            lowest-ranked member instead of extending the ensemble. When
+            ``k`` exceeds the number of available completed algorithms,
+            ``min(k, n)`` is used with a warning.
         weight_method: How the member weights are derived from the
             validation scores: ``"score_weighted"`` (default) —
             direction-aware conversion (inverse for error metrics,
@@ -64,10 +67,13 @@ class EnsembleCfg(BaseModel):
         default=3,
         ge=1,
         description=(
-            "The requested ensemble size: the number of top leaderboard "
-            "members to combine (>= 1). When k exceeds the number of "
-            "completed algorithms, min(k, n) members are used with a "
-            "warning; k=1 is the valid single-model boundary case"
+            "The maximum ensemble size: the number of top leaderboard "
+            "members to combine (>= 1). k is a strict upper bound: when the "
+            "terminal winner is outside the top-k, it replaces the "
+            "lowest-ranked member instead of extending the ensemble. When k "
+            "exceeds the number of completed algorithms, min(k, n) members "
+            "are used with a warning; k=1 is the valid single-model "
+            "boundary case"
         ),
     )
     weight_method: EnsembleWeightMethod = Field(

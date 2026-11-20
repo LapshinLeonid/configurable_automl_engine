@@ -805,18 +805,20 @@ to the winner model.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enable` | `false` | Build the ensemble. Off by default. |
-| `k` | `3` | The requested ensemble size: the number of top leaderboard members to combine (≥ 1). When `k` exceeds the number of completed algorithms, `min(k, n)` members are used with a WARNING; `k=1` is the valid single-model boundary case. |
+| `k` | `3` | The strict maximum ensemble size: the number of top leaderboard members to combine (≥ 1). When `k` exceeds the number of completed algorithms, `min(k, n)` members are used with a WARNING; `k=1` is the valid single-model boundary case. The ensemble never contains more than `k` members. |
 | `weight_method` | `"score_weighted"` | How the member weights are derived from the validation scores: `"score_weighted"` — direction-aware conversion (inverse for error metrics like RMSE/MAE, proportional for score metrics like R²); `"equal"` — the uniform weights baseline. |
 
 Selection of the members reuses the documented select-step top-K semantics:
 the best `k` candidates of the run's leaderboard in user semantics, ties
-broken by the configuration order. The terminal winner is **always** kept in
-the ensemble: by construction it is the best user-semantic score (rank 1 of
-the top-K); if an unexpected snapshot/winner divergence ever drops it, it is
-inserted at its score position — not appended blindly — so the member order
-stays the best-first order of the user-semantic scores (with `k=1` the
-ensemble is the winner's single model). The block has `extra="forbid"`:
-unknown keys are rejected at config load.
+broken by the configuration order. `k` is a strict maximum: the ensemble
+never contains more than `k` members. The terminal winner is **always** kept
+in the ensemble: by construction it is the best user-semantic score (rank 1
+of the top-K); if an unexpected snapshot/winner divergence ever drops it, the
+lowest-ranked selected member makes room for the winner, which keeps its
+score position among the remaining members, so the member order stays the
+best-first order of the user-semantic scores (with `k=1` the ensemble is the
+winner's single model). The block has `extra="forbid"`: unknown keys are
+rejected at config load.
 
 Example:
 

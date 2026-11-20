@@ -280,10 +280,11 @@ def test_p4_top_k_reuses_select_semantics() -> None:
     assert select_top_k({"first": 2.0, "second": 2.0}, 1, "minimize") == ["first"]
 
 
-def test_p4_winner_inserted_at_score_position() -> None:
-    """P4 (winner insertion): the terminal winner absent from the top-K
-    is inserted at its SCORE position, so the member order (and the
-    reported ranks) stays best-first — not appended with the last rank.
+def test_p4_winner_replaces_last_member_when_outside_top_k() -> None:
+    """P4 (winner inclusion): the terminal winner absent from the top-K
+    replaces the lowest-ranked member, so ``k`` stays a strict maximum.
+    The winner keeps its SCORE position among the remaining members, so
+    the member order (and the reported ranks) stays best-first.
     The snapshot holds raw optimizer scores (negated for rmse)."""
     from configurable_automl_engine.training_engine.ensemble_step import (
         top_k_from_leaderboard,
@@ -303,23 +304,28 @@ def test_p4_winner_inserted_at_score_position() -> None:
         return ctx
 
     # minimize (rmse, raw scores negated): a defensive divergence where
-    # the winner is not in the top-K — it is inserted at its score
-    # position (after both better members), not blindly appended.
+    # the winner is not in the top-K — the lowest-ranked member 'b' makes
+    # room for it, so the ensemble never exceeds k=2 members.
     ctx = _ctx({"a": -1.0, "b": -2.0, "w": -2.5}, "w")
     selected, scores = top_k_from_leaderboard(ctx, "rmse", 2)
-    assert selected == ["a", "b", "w"]
+    assert selected == ["a", "w"]
+    assert len(selected) == 2
     assert scores["w"] == 2.5
 
-    # The same for a maximize metric (a defensive divergence where the
-    # winner is not in the top-2: 'w' (0.5) loses to 'a' (0.9) and
-    # 'b' (0.6)) → inserted after both, by score position.
+    # The same for a maximize metric: 'w' (0.5) loses to 'a' (0.9) and
+    # 'b' (0.6), so it replaces 'b' in the top-2.
     ctx = _ctx({"a": 0.9, "b": 0.6, "w": 0.5, "c": 0.3}, "w")
     selected, _ = top_k_from_leaderboard(ctx, "r2", 2)
-    assert selected == ["a", "b", "w"]
+    assert selected == ["a", "w"]
+
+    # k=1 is the single-model boundary: the divergent winner replaces the
+    # only selected member instead of extending the ensemble.
+    ctx = _ctx({"a": -1.0, "b": -2.0, "w": -2.5}, "w")
+    selected, _ = top_k_from_leaderboard(ctx, "rmse", 1)
+    assert selected == ["w"]
 
     # Ties: the winner tied with the top member stays behind it (the same
-    # tie-break as the top-K ranking; k=2 here — at k=1 the winner
-    # replaces the selection by the terminal-select contract).
+    # tie-break as the top-K ranking).
     ctx = _ctx({"a": -1.0, "b": -2.0, "w": -1.0}, "w")
     selected, _ = top_k_from_leaderboard(ctx, "rmse", 2)
     assert selected == ["a", "w"]

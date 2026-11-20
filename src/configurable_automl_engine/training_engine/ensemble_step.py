@@ -57,20 +57,24 @@ def top_k_from_leaderboard(
     (``experiment.ensemble.select_top_k``) over the user-semantic scores
     of the leaderboard snapshot: raw optimizer scores are converted with
     ``to_user_value`` (positive RMSE/MAE, plain R²), so the direction
-    handling lives in one place. The winner of the terminal select step
-    is always kept in the selection: the ensemble must include the best
-    model even when the snapshot ordering and the terminal select disagree
-    on ties.
+    handling lives in one place. ``k`` is a strict maximum ensemble size.
+    The winner of the terminal select step is always kept in the
+    selection: the ensemble must include the best model even when the
+    snapshot ordering and the terminal select disagree. When that
+    divergence puts the winner outside the top-K, the lowest-ranked
+    selected member makes room for it, so the result never grows beyond
+    ``k`` members.
 
     Args:
         ctx: The final phase context (the leaderboard snapshot and the
             terminal winner are read).
         metric_user: The user-facing comparison metric name.
-        k: The requested ensemble size (≥ 1).
+        k: The maximum ensemble size (≥ 1).
 
     Returns:
         tuple[list[str], dict[str, float]]: The selected member names in
-            rank order (best first) and their user-semantic scores.
+            rank order (best first) and their user-semantic scores. The
+            list holds at most ``k`` names.
 
     Raises:
         ValueError: The leaderboard snapshot is empty (no valid scores —
@@ -88,43 +92,41 @@ def top_k_from_leaderboard(
     }
     selected = select_top_k(user_scores, k, direction=metric_user)
     if ctx.winner_algo and ctx.winner_algo not in selected:
-        # Defensive branch: by construction the terminal winner is the
-        # best user-semantic score (raw scores are monotone in user
-        # semantics for both directions), so it is always rank 1 of the
-        # top-K. It can be absent only through an unexpected
-        # snapshot/winner divergence — in that case the winner is
-        # inserted at its score position (not appended blindly), so the
-        # member order — and therefore the reported ranks — stays the
-        # best-first order of the user-semantic scores. K=1 keeps the
-        # single best member.
+        # The terminal winner usually is rank 1 of the top-K (raw scores
+        # are monotone in user semantics for both directions), but a
+        # select step may rank it differently (e.g. sanity_gate ranks by
+        # the OOF aggregate), so it can legitimately fall outside the
+        # top-K. ``k`` is a strict maximum: the lowest-ranked selected
+        # member is dropped to make room, and the winner is inserted at
+        # its score position among the remaining members so the reported
+        # ranks stay best-first. K=1 therefore keeps only the winner.
         if ctx.winner_algo not in user_scores:
             # No record at all: the winner cannot become a member (no
             # score, no retrain source) — the top-K selection stays as is.
             return selected, user_scores
-        if len(selected) == 1:
-            selected = [ctx.winner_algo]
+        if selected:
+            selected.pop()
+        winner_score = user_scores[ctx.winner_algo]
+        resolved = resolve_metric_direction(metric_user)
+        if resolved is MetricDirection.maximize:
+            # Descending order: the first member with a strictly
+            # smaller score is the winner's insertion point.
+            position = len(selected)
+            for idx, name in enumerate(selected):
+                if user_scores[name] < winner_score:
+                    position = idx
+                    break
         else:
-            winner_score = user_scores[ctx.winner_algo]
-            resolved = resolve_metric_direction(metric_user)
-            if resolved is MetricDirection.maximize:
-                # Descending order: the first member with a strictly
-                # smaller score is the winner's insertion point.
-                position = len(selected)
-                for idx, name in enumerate(selected):
-                    if user_scores[name] < winner_score:
-                        position = idx
-                        break
-            else:
-                # Ascending order (minimize): the first member with a
-                # strictly greater score is the winner's insertion point;
-                # ties keep the earlier member ahead (the same tie-break
-                # as the top-K ranking).
-                position = len(selected)
-                for idx, name in enumerate(selected):
-                    if user_scores[name] > winner_score:
-                        position = idx
-                        break
-            selected.insert(position, ctx.winner_algo)
+            # Ascending order (minimize): the first member with a
+            # strictly greater score is the winner's insertion point;
+            # ties keep the earlier member ahead (the same tie-break
+            # as the top-K ranking).
+            position = len(selected)
+            for idx, name in enumerate(selected):
+                if user_scores[name] > winner_score:
+                    position = idx
+                    break
+        selected.insert(position, ctx.winner_algo)
     return selected, user_scores
 
 
