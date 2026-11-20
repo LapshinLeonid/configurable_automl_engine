@@ -29,9 +29,12 @@ The repository ships two independently versioned Python distributions:
   JSON Schema. It installs without the engine and without the machine-learning
   stack.
 
-The engine depends on `automl-contracts>=0.1.0,<0.2.0`. Existing imports from
-`configurable_automl_engine` keep working through re-exports, but new code
-should import contract symbols from `automl_contracts`. See the
+Both distributions are released to public PyPI. A contract release is
+published before the engine release that depends on it. The engine declares
+`automl-contracts>=0.1.0,<0.2.0`, so installing the engine also installs a
+compatible contract. Existing imports from `configurable_automl_engine` keep
+working through re-exports, but new code should import contract symbols from
+`automl_contracts`. See the
 [contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/README.md),
 the [contracts package API section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#contracts-package-automl-contracts),
 the [migration table](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#migration-from-engine-imports)
@@ -143,7 +146,7 @@ The required dependencies (installed automatically):
 * PyYAML (>=6.0.3)
 * Joblib (>=1.5.3)
 * `automl-contracts` (>=0.1.0,<0.2.0) — the public data contract, installed
-  from the SourceCraft PyPI registry for organization consumers
+  automatically from PyPI
 
 ## Optional Dependencies
 
@@ -159,34 +162,23 @@ These distributions will not be installed automatically. You can install them us
 
 # Installation
 
-The engine depends on `automl-contracts`, which is installed from the
-SourceCraft PyPI registry rather than from the public PyPI. The registry is
-provisioned outside this repository and the first contract release is published
-by the release pipeline; until that release exists, install the wheel built
-from the repository.
-
-The registry does not proxy PyPI: install the contract's runtime dependencies
-from the public index first, then install the contract with `--no-deps`, then
-the engine. Set `SOURCECRAFT_PYPI_REGISTRY_ID` and the secret
-`PYPI_REGISTRY_PAT` as described in the
-[contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/README.md#installing-from-the-sourcecraft-pypi-registry),
-then run:
+`configurable-automl-engine` and `automl-contracts` are published on public
+PyPI. The engine declares the compatible contract range, so one command
+installs both:
 
 ```bash
-python -m pip install --index-url https://pypi.org/simple \
-  "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
-
-python -m pip install --no-deps \
-  --index-url "https://iam:${PYPI_REGISTRY_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
-  automl-contracts
-
 python -m pip install configurable-automl-engine
 ```
 
-`--no-deps` keeps the private index from trying to resolve `pydantic` and
-`pydantic-core`; run `python -m pip check` after the install. When both
-distributions are served by the same registry, the same `--index-url` can be
-used for the engine command too.
+Run `python -m pip check` after the installation to confirm that all
+requirements resolve. To use the contract without the engine:
+
+```bash
+python -m pip install automl-contracts
+```
+
+See the [contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/README.md)
+for the package contents, the JSON Schema and the public import paths.
 
 With the optional XGBoost algorithm:
 

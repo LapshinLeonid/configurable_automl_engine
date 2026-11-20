@@ -1424,9 +1424,9 @@ does not install the engine, scikit-learn, pandas, NumPy, Optuna or PyYAML.
 
 The engine keeps its public import paths as re-exports of the same objects, so
 existing code continues to work. New code should import contract symbols from
-`automl_contracts`; full consumer documentation, installation from the
-SourceCraft PyPI registry, versioning rules and the contract-change process are
-in the [contract package guide](automl-contracts/README.md).
+`automl_contracts`; full consumer documentation, installation from public
+PyPI, versioning rules and the contract-change process are in the
+[contract package guide](automl-contracts/README.md).
 
 ## What belongs to the contract
 
@@ -1524,48 +1524,25 @@ are internal modules. `ScalingType` is a deprecated alias in
 
 ## Installing the contract
 
-`automl-contracts` is released to the SourceCraft PyPI registry after an
-organization administrator provisions the registry and connects it to this
-repository. The registry identifier is configuration, not a secret, and is
-passed through `SOURCECRAFT_PYPI_REGISTRY_ID`; the token is passed through the
-secret `PYPI_REGISTRY_PAT`.
-
-The registry does not proxy PyPI, so its runtime dependencies are installed
-from the public index first:
+`automl-contracts` is published on public PyPI. The contract and its runtime
+dependencies install in one step:
 
 ```bash
-# SOURCECRAFT_PYPI_REGISTRY_ID is the registry id from the SourceCraft
-# registry page; in CI it is the repository variable of the same name.
-test -n "${SOURCECRAFT_PYPI_REGISTRY_ID:?set the registry id from the SourceCraft registry page}"
-read -rsp "SourceCraft PAT: " PYPI_REGISTRY_PAT
-export PYPI_REGISTRY_PAT
-
-python -m pip install --index-url https://pypi.org/simple \
-  "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
-
-python -m pip install --no-deps \
-  --index-url "https://iam:${PYPI_REGISTRY_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
-  automl-contracts
+python -m pip install automl-contracts
 ```
 
-`--no-deps` is required for a clean environment: without it pip tries to resolve
-`pydantic` and `pydantic-core` against the private registry and fails. Run
-`python -m pip check` afterwards; if the dependencies are already installed,
-skip the first install command.
+The engine declares `automl-contracts>=0.1.0,<0.2.0`, so
+`pip install configurable-automl-engine` installs a compatible contract
+automatically. A clean environment needs no credentials, private index or
+`--no-deps` workaround. Run `python -m pip check` after installation to confirm
+that the requirements resolve.
 
-Do not hardcode a registry identifier or a token in a script, image, README or
-task. In CI, keep `SOURCECRAFT_PYPI_REGISTRY_ID` in a repository variable and
-`PYPI_REGISTRY_PAT` in a secret, interpolate them in the shell step and let the
-platform mask the secret. The release workflow exposes `PYPI_REGISTRY_PAT` only
-to the cubes that upload the distribution and install it back from the registry;
-jobs that install packages from the public index never receive it. The registry
-must be connected to the dependent repository by an organization administrator.
-
-Prefer a single trusted `--index-url`. If an additional index is unavoidable,
-pip gives it no priority, so a package with the same name on that index can win
-the resolution. Pin versions and use hash-checked requirements or constraints,
-and do not publish `automl-contracts` under the same name on a public index.
-See [Index configuration and dependency-confusion risk](automl-contracts/README.md#index-configuration-and-dependency-confusion-risk).
+The project publishes and owns the `automl-contracts` name on PyPI. Prefer a
+single trusted index. If an additional index is unavoidable, pip gives it no
+priority, so a same-named package can win the resolution: mirror the PyPI
+artifacts with their hashes and pin exact versions in requirements or
+constraints. See
+[Index configuration and dependency-confusion risk](automl-contracts/README.md#index-configuration-and-dependency-confusion-risk).
 
 ## Validating a configuration without the engine
 

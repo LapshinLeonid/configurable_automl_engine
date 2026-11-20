@@ -1,8 +1,9 @@
-name: Verify automl-contracts release tag
+name: Publish automl-contracts to PyPI
 
-# The contract has its own release line. The SourceCraft workflow is the only
-# publisher; this GitHub mirror verifies that the tagged commit passes the same
-# release gates and builds the same artifacts.
+# The contract has its own release line. A `contracts-v*` tag is synced from
+# SourceCraft to GitHub; this workflow runs the release gates, builds the exact
+# artifacts, publishes them to public PyPI with Trusted Publishing and installs
+# the published distribution back as an external consumer.
 on:
   push:
     tags:
@@ -17,9 +18,12 @@ permissions:
 
 jobs:
   publish:
-    name: Verify automl-contracts release
+    name: Publish automl-contracts release
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Check out the release tag
         uses: actions/checkout@v4
@@ -82,3 +86,75 @@ jobs:
           /tmp/publish-venv/bin/pip install --no-deps "$CONTRACT_WHEEL"
           /tmp/publish-venv/bin/python scripts/smoke_contract_install.py
           /tmp/publish-venv/bin/pip check
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: automl-contracts/dist
+
+      - name: Verify installation from PyPI
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/pypi-verify-venv /tmp/pypi-verify-consumer
+          python -m venv /tmp/pypi-verify-venv
+          PIP_CONFIG_FILE=/dev/null /tmp/pypi-verify-venv/bin/pip install --isolated --upgrade pip
+          for attempt in 1 2 3 4 5 6; do
+            if PIP_CONFIG_FILE=/dev/null /tmp/pypi-verify-venv/bin/pip install \
+              --isolated \
+              --index-url https://pypi.org/simple \
+              --disable-pip-version-check \
+              --no-cache-dir \
+              --retries 5 \
+              --timeout 60 \
+              "automl-contracts==${VERSION}"; then
+              installed=1
+              break
+            fi
+            echo "PyPI is not serving automl-contracts ${VERSION} yet; retrying..."
+            sleep 10
+          done
+          test "${installed:-0}" = "1"
+          /tmp/pypi-verify-venv/bin/python scripts/smoke_contract_install.py
+          /tmp/pypi-verify-venv/bin/pip check
+          PIP_CONFIG_FILE=/dev/null /tmp/pypi-verify-venv/bin/pip install \
+            --isolated --index-url https://pypi.org/simple "jsonschema>=4.18" packaging
+          mkdir -p /tmp/pypi-verify-consumer
+          cd /tmp/pypi-verify-consumer
+          /tmp/pypi-verify-venv/bin/python "$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py" \
+            --expected-version "$VERSION" \
+            --reference-config "$GITHUB_WORKSPACE/tests/contracts/data/reference_config.json" \
+            --forbid-source-root "$GITHUB_WORKSPACE"
+
+      - name: Verify sdist installation from PyPI
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/pypi-sdist-venv /tmp/pypi-sdist-consumer
+          python -m venv /tmp/pypi-sdist-venv
+          PIP_CONFIG_FILE=/dev/null /tmp/pypi-sdist-venv/bin/pip install --isolated --upgrade pip
+          for attempt in 1 2 3 4 5 6; do
+            if PIP_CONFIG_FILE=/dev/null /tmp/pypi-sdist-venv/bin/pip install \
+              --isolated \
+              --index-url https://pypi.org/simple \
+              --disable-pip-version-check \
+              --no-cache-dir \
+              --no-binary automl-contracts \
+              --retries 5 \
+              --timeout 60 \
+              "automl-contracts==${VERSION}"; then
+              installed=1
+              break
+            fi
+            echo "PyPI is not serving the automl-contracts ${VERSION} source distribution yet; retrying..."
+            sleep 10
+          done
+          test "${installed:-0}" = "1"
+          /tmp/pypi-sdist-venv/bin/python scripts/smoke_contract_install.py
+          /tmp/pypi-sdist-venv/bin/pip check
+          PIP_CONFIG_FILE=/dev/null /tmp/pypi-sdist-venv/bin/pip install \
+            --isolated --index-url https://pypi.org/simple "jsonschema>=4.18" packaging
+          mkdir -p /tmp/pypi-sdist-consumer
+          cd /tmp/pypi-sdist-consumer
+          /tmp/pypi-sdist-venv/bin/python "$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py" \
+            --expected-version "$VERSION" \
+            --reference-config "$GITHUB_WORKSPACE/tests/contracts/data/reference_config.json" \
+            --forbid-source-root "$GITHUB_WORKSPACE"

@@ -2,9 +2,10 @@
 
 The checks parse both CI files and keep publication attached to the
 ``contracts-v*`` tag. Every quality gate must run in its own cube or step
-before the upload, the uploader is scanned for forbidden flags, and secrets
-must come from the CI secret store rather than from committed literals. The
-engine version configuration must ignore the ``contracts-v*`` tag family.
+before the upload, the public PyPI upload works through Trusted Publishing,
+the uploader is scanned for forbidden flags, and secrets must come from the CI
+secret store rather than from committed literals. The engine version
+configuration must ignore the ``contracts-v*`` tag family.
 """
 
 from __future__ import annotations
@@ -90,6 +91,27 @@ GITHUB_STEPS = (
     "Run release quality gates",
     "Build and verify the distribution",
     "Install the exact artifact in a clean environment",
+)
+GITHUB_PYPI_PUBLISH_STEP = "Publish to PyPI"
+GITHUB_PYPI_VERIFY_STEP = "Verify installation from PyPI"
+GITHUB_PYPI_SDIST_VERIFY_STEP = "Verify sdist installation from PyPI"
+GITHUB_PYPI_ACTION = "pypa/gh-action-pypi-publish@release/v1"
+GITHUB_PYPI_PACKAGES_DIR = "automl-contracts/dist"
+GITHUB_PYPI_PUBLISH_INPUTS = frozenset({"packages-dir"})
+GITHUB_PYPI_INSTALL_COMMAND = "automl-contracts==${VERSION}"
+GITHUB_PYPI_INSTALL_MARKERS = (
+    "--isolated",
+    "PIP_CONFIG_FILE=/dev/null",
+    "--index-url https://pypi.org/simple",
+    "--no-cache-dir",
+)
+GITHUB_PYPI_VERIFY_MARKERS = (
+    "scripts/smoke_contract_install.py",
+    '"$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py"',
+)
+GITHUB_PYPI_SDIST_INSTALL_MARKERS = (
+    "--no-binary automl-contracts",
+    *GITHUB_PYPI_INSTALL_MARKERS,
 )
 GITHUB_STEP_MARKERS = {
     "Check the release tag": ("scripts/contract_release.py check-tag",),
@@ -1349,8 +1371,210 @@ def check_sourcecraft_ci(text: str, path: Path = SOURCECRAFT_CI) -> list[Violati
     return violations
 
 
+def _has_write_permission(
+    document: dict[str, Any], job: dict[str, Any], permission: str
+) -> bool:
+    """Return whether a workflow grants ``permission: write`` to a job.
+
+    A job-level ``permissions`` block replaces the workflow-level block
+    entirely, so an unlisted scope there is ``none`` even when the workflow
+    grants it. The ``write-all`` shorthand applies to the whole block.
+    """
+    job_permissions = job.get("permissions")
+    if isinstance(job_permissions, dict):
+        return job_permissions.get(permission) == "write"
+    if job_permissions is not None:
+        return job_permissions == "write-all"
+    workflow_permissions = document.get("permissions")
+    if isinstance(workflow_permissions, dict):
+        return workflow_permissions.get(permission) == "write"
+    return workflow_permissions == "write-all"
+
+
+def _shell_commands(text: str) -> list[str]:
+    """Join backslash continuations into complete shell commands."""
+    commands: list[str] = []
+    current: list[str] = []
+    for raw_line in _uncommented(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.endswith("\\"):
+            current.append(line[:-1].rstrip())
+            continue
+        current.append(line)
+        commands.append(" ".join(current))
+        current = []
+    if current:
+        commands.append(" ".join(current))
+    return commands
+
+
+def _verify_step_violations(
+    path: Path,
+    name: str,
+    step: Any,
+    markers: tuple[str, ...],
+    install_markers: tuple[str, ...],
+) -> list[Violation]:
+    """Require a post-upload verification step with all of its markers.
+
+    The isolation and index markers must be on the command that resolves
+    ``automl-contracts==${VERSION}``, not merely somewhere in the step.
+    """
+    if not isinstance(step, dict):
+        return [Violation(path, 1, f"GitHub release job has no {name!r} step")]
+    run = step.get("run")
+    if not isinstance(run, str):
+        return [Violation(path, 1, f"step {name!r} has no run script")]
+    clean = _uncommented(run)
+    violations = [
+        Violation(path, 1, f"step {name!r} has no {marker!r}")
+        for marker in markers
+        if marker not in clean
+    ]
+    install_commands = [
+        command
+        for command in _shell_commands(run)
+        if GITHUB_PYPI_INSTALL_COMMAND in command
+    ]
+    if not install_commands:
+        violations.append(
+            Violation(
+                path,
+                1,
+                f"step {name!r} has no install command for "
+                f"{GITHUB_PYPI_INSTALL_COMMAND!r}",
+            )
+        )
+        return violations
+    for command in install_commands:
+        for marker in install_markers:
+            if marker not in command:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"install command in step {name!r} has no {marker!r}",
+                    )
+                )
+    return violations
+
+
+def _github_pypi_violations(
+    path: Path,
+    document: dict[str, Any],
+    job: dict[str, Any],
+    steps: list[Any],
+) -> list[Violation]:
+    """Require an OIDC PyPI publication and a post-upload consumer check."""
+    violations: list[Violation] = []
+    steps_by_name = {
+        step["name"]: step
+        for step in steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    ordered_names = [
+        step["name"]
+        for step in steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    ]
+    publish_step = steps_by_name.get(GITHUB_PYPI_PUBLISH_STEP)
+    if not isinstance(publish_step, dict):
+        violations.append(
+            Violation(
+                path,
+                1,
+                f"GitHub release job has no {GITHUB_PYPI_PUBLISH_STEP!r} step",
+            )
+        )
+    else:
+        uses = publish_step.get("uses")
+        if uses != GITHUB_PYPI_ACTION:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"step {GITHUB_PYPI_PUBLISH_STEP!r} must use {GITHUB_PYPI_ACTION}",
+                )
+            )
+        options = publish_step.get("with")
+        if not isinstance(options, dict):
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"step {GITHUB_PYPI_PUBLISH_STEP!r} has no input mapping",
+                )
+            )
+        else:
+            unexpected = sorted(set(options) - GITHUB_PYPI_PUBLISH_INPUTS)
+            if unexpected:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"step {GITHUB_PYPI_PUBLISH_STEP!r} has unsupported "
+                        f"inputs {unexpected!r}",
+                    )
+                )
+            if options.get("packages-dir") != GITHUB_PYPI_PACKAGES_DIR:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"step {GITHUB_PYPI_PUBLISH_STEP!r} must publish "
+                        f"{GITHUB_PYPI_PACKAGES_DIR}",
+                    )
+                )
+    violations.extend(
+        _verify_step_violations(
+            path,
+            GITHUB_PYPI_VERIFY_STEP,
+            steps_by_name.get(GITHUB_PYPI_VERIFY_STEP),
+            GITHUB_PYPI_VERIFY_MARKERS,
+            GITHUB_PYPI_INSTALL_MARKERS,
+        )
+    )
+    violations.extend(
+        _verify_step_violations(
+            path,
+            GITHUB_PYPI_SDIST_VERIFY_STEP,
+            steps_by_name.get(GITHUB_PYPI_SDIST_VERIFY_STEP),
+            GITHUB_PYPI_VERIFY_MARKERS,
+            GITHUB_PYPI_SDIST_INSTALL_MARKERS,
+        )
+    )
+    required_order = (
+        *GITHUB_STEPS,
+        GITHUB_PYPI_PUBLISH_STEP,
+        GITHUB_PYPI_VERIFY_STEP,
+        GITHUB_PYPI_SDIST_VERIFY_STEP,
+    )
+    present = [name for name in ordered_names if name in required_order]
+    if present != list(required_order):
+        violations.append(
+            Violation(
+                path,
+                1,
+                "GitHub release job must run the release gates, build, install, "
+                "publish to PyPI and verify the published wheel and sdist in "
+                "that order",
+            )
+        )
+    if not _has_write_permission(document, job, "id-token"):
+        violations.append(
+            Violation(
+                path,
+                1,
+                "GitHub release job needs id-token: write for PyPI Trusted Publishing",
+            )
+        )
+    return violations
+
+
 def check_github_publish(text: str, path: Path = GITHUB_PUBLISH) -> list[Violation]:
-    """Check the GitHub verification mirror of the release workflow.
+    """Check the public PyPI publication workflow for the contract.
 
     Args:
         text: Content of ``.github/workflows/publish-contracts.yaml``.
@@ -1379,7 +1603,10 @@ def check_github_publish(text: str, path: Path = GITHUB_PUBLISH) -> list[Violati
         )
     jobs = document.get("jobs")
     job = next(iter(jobs.values())) if isinstance(jobs, dict) and jobs else None
-    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(job, dict):
+        violations.append(Violation(path, 1, "GitHub release job has no steps"))
+        return violations
+    steps = job.get("steps")
     if not isinstance(steps, list):
         violations.append(Violation(path, 1, "GitHub release job has no steps"))
         return violations
@@ -1407,6 +1634,7 @@ def check_github_publish(text: str, path: Path = GITHUB_PUBLISH) -> list[Violati
     violations.extend(
         _order_violation(path, GITHUB_STEPS, actual_order, "GitHub release job")
     )
+    violations.extend(_github_pypi_violations(path, document, job, steps))
     for name, script in by_name.items():
         if "scripts/contract_release.py publish" in script:
             violations.append(

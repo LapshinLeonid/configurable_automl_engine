@@ -531,7 +531,11 @@ workflows:
                 echo "✅ Engine artifacts: contract sources are not included"
 
   # ----------------------------------------------------
-  # Publish automl-contracts to the SourceCraft PyPI registry
+  # Mirror automl-contracts to the SourceCraft PyPI registry
+  #
+  # Public PyPI is the canonical channel and is published by
+  # .github/workflows/publish-contracts.yaml. This workflow keeps the
+  # organization registry in sync for private consumers.
   #
   # Runs only for a contracts-v<version> tag. The workflow refuses to upload
   # when the tag and pyproject.toml disagree, when a quality gate fails, when

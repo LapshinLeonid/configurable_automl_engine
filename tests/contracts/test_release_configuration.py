@@ -639,6 +639,162 @@ def test_github_publication_rejects_a_literal_pat(
     assert "literal" in messages(guard.check_github_publish(text))
 
 
+def test_github_publication_requires_the_pypi_step(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    text = github_publish_text.replace(
+        """      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: automl-contracts/dist
+""",
+        "",
+        1,
+    )
+    assert text != github_publish_text
+    assert "Publish to PyPI" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_requires_trusted_publishing(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    text = github_publish_text.replace("      id-token: write\n", "", 1)
+    assert text != github_publish_text
+    assert "id-token" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_publishes_the_built_contract(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    text = github_publish_text.replace(
+        "packages-dir: automl-contracts/dist", "packages-dir: dist", 1
+    )
+    assert "automl-contracts/dist" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_verifies_the_published_package(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    text = github_publish_text.replace(
+        "automl-contracts==${VERSION}",
+        "automl-contracts",
+        1,
+    )
+    assert "automl-contracts==${VERSION}" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_runs_pypi_after_the_release_gates(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    document = load_document(github_publish_text)
+    steps = document["jobs"]["publish"]["steps"]  # type: ignore[index]
+    publish = next(step for step in steps if step.get("name") == "Publish to PyPI")
+    steps.remove(publish)
+    steps.insert(0, publish)
+    text = dump_document(document)
+    assert "in that order" in messages(guard.check_github_publish(text))
+
+
+@pytest.mark.parametrize("job_permissions", [{"contents": "read"}, "read-all"])
+def test_github_publication_rejects_a_job_permissions_override(
+    guard: ModuleType, github_publish_text: str, job_permissions: object
+) -> None:
+    document = load_document(github_publish_text)
+    document["permissions"] = {"contents": "read", "id-token": "write"}
+    document["jobs"]["publish"]["permissions"] = job_permissions  # type: ignore[index]
+    text = dump_document(document)
+    assert "id-token" in messages(guard.check_github_publish(text))
+
+
+@pytest.mark.parametrize("location", ["workflow", "job"])
+def test_github_publication_accepts_the_write_all_shorthand(
+    guard: ModuleType, github_publish_text: str, location: str
+) -> None:
+    document = load_document(github_publish_text)
+    if location == "workflow":
+        document["permissions"] = "write-all"
+        del document["jobs"]["publish"]["permissions"]  # type: ignore[index]
+    else:
+        document["jobs"]["publish"]["permissions"] = "write-all"  # type: ignore[index]
+    text = dump_document(document)
+    assert guard.check_github_publish(text) == []
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "skip-existing: true",
+        "repository-url: https://test.pypi.org/legacy/",
+        "password: literal-token",
+    ],
+)
+def test_github_publication_rejects_extra_publish_inputs(
+    guard: ModuleType, github_publish_text: str, option: str
+) -> None:
+    anchor = "          packages-dir: automl-contracts/dist\n"
+    text = github_publish_text.replace(anchor, anchor + f"          {option}\n", 1)
+    assert "unsupported inputs" in messages(guard.check_github_publish(text))
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "pypa/gh-action-pypi-publish-fake@main",
+        "pypa/gh-action-pypi-publish@main",
+    ],
+)
+def test_github_publication_pins_the_pypi_action(
+    guard: ModuleType, github_publish_text: str, action: str
+) -> None:
+    text = github_publish_text.replace(
+        "pypa/gh-action-pypi-publish@release/v1", action, 1
+    )
+    assert "pypa/gh-action-pypi-publish@release/v1" in messages(
+        guard.check_github_publish(text)
+    )
+
+
+def test_github_publication_verifies_in_isolation(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    document = load_document(github_publish_text)
+    steps = document["jobs"]["publish"]["steps"]  # type: ignore[index]
+    step = next(
+        step for step in steps if step.get("name") == "Verify installation from PyPI"
+    )
+    step["run"] = step["run"].replace("--isolated", "removed-isolation")
+    text = dump_document(document)
+    assert "--isolated" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_verifies_the_sdist(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    text = github_publish_text.replace(
+        "--no-binary automl-contracts", "--no-binary :none:", 1
+    )
+    assert "--no-binary automl-contracts" in messages(guard.check_github_publish(text))
+
+
+def test_github_publication_binds_isolation_to_the_resolving_install(
+    guard: ModuleType, github_publish_text: str
+) -> None:
+    document = load_document(github_publish_text)
+    steps = document["jobs"]["publish"]["steps"]  # type: ignore[index]
+    step = next(
+        step for step in steps if step.get("name") == "Verify installation from PyPI"
+    )
+    old_command = """pip install \\
+    --isolated \\
+    --index-url"""
+    new_command = """pip install \\
+    --index-url"""
+    assert old_command in step["run"]
+    step["run"] = step["run"].replace(old_command, new_command, 1)
+    text = dump_document(document)
+    assert "--isolated" in messages(guard.check_github_publish(text))
+
+
 def test_uploader_cannot_use_skip_existing_or_a_password(
     guard: ModuleType,
 ) -> None:

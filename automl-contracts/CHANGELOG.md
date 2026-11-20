@@ -7,6 +7,14 @@ The contract is versioned independently of `configurable-automl-engine`.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-19
+
+### Changed
+
+- The contract is published to public PyPI. Installation no longer requires a
+  private registry, a personal access token or the `--no-deps` workaround, and
+  the engine resolves the declared contract range automatically.
+
 ## [0.1.0] - 2026-11-15
 
 ### Added

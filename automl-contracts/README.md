@@ -90,141 +90,66 @@ The authoritative list of top-level names is `automl_contracts.__all__`.
 `automl_contracts.__version__` is read from the installed distribution
 metadata.
 
-## Installing from the SourceCraft PyPI registry
+## Installation
 
-`automl-contracts` is released to the PyPI registry created for the
-organization. An organization administrator provisions the registry and
-connects it to this repository; the first contract release is published by the
-release pipeline. Until that release exists, install the wheel built from this
-repository.
-
-The registry hosts the contract, not its runtime dependencies. The registry
-identifier is not a secret, but it is configuration: pass it through
-`SOURCECRAFT_PYPI_REGISTRY_ID` instead of hardcoding an identifier in scripts,
-images or documentation. The token is always a secret.
-
-| Variable | Kind | Purpose |
-|---|---|---|
-| `SOURCECRAFT_PYPI_REGISTRY_ID` | CI variable or environment variable | Registry identifier used in the SourceCraft endpoint |
-| `PYPI_REGISTRY_PAT` | Secret | Personal access token used as the `iam` password |
-
-The install endpoint is:
-
-```text
-https://pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/
-```
-
-Install the package in a shell where both variables are exported. In the local
-example the token is read from the terminal without echo; in CI it comes from
-the repository secret. Never paste a real token into a shell history, a
-repository file or a task description.
+`automl-contracts` is published on public PyPI, so the contract and its runtime
+dependencies install in one step:
 
 ```bash
-# SOURCECRAFT_PYPI_REGISTRY_ID is the registry id from the SourceCraft
-# registry page; in CI it is the repository variable of the same name.
-test -n "${SOURCECRAFT_PYPI_REGISTRY_ID:?set the registry id from the SourceCraft registry page}"
-read -rsp "SourceCraft PAT: " PYPI_REGISTRY_PAT
-export PYPI_REGISTRY_PAT
-
-# The private registry does not proxy PyPI. Install the two runtime
-# dependencies from the public index first.
-python -m pip install --index-url https://pypi.org/simple \
-  "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
-
-# Percent-encode the PAT before embedding it into the URL.
-ENCODED_PAT=$(python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PYPI_REGISTRY_PAT"], safe=""))')
-
-# Install the contract itself without resolving its dependencies against the
-# private registry.
-python -m pip install --no-deps \
-  --index-url "https://iam:${ENCODED_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
-  automl-contracts
+python -m pip install automl-contracts
 ```
 
-`--no-deps` is intentional: the registry serves the contract but not its
-runtime dependencies, so `pip install --index-url <private> automl-contracts`
-cannot resolve `pydantic` and `pydantic-core` and fails in a clean environment.
-After the two commands, `python -m pip check` must report no broken
-requirements. If your environment already has compatible `pydantic` and
-`pydantic-core`, skip the first command.
-
-For CI, store the identifier as a repository or organization variable and the
-token as a secret. Keep the interpolation in the shell step, where it is
-available to the process, and let the platform mask the secret:
-
-```yaml
-- name: Install automl-contracts
-  env:
-    SOURCECRAFT_PYPI_REGISTRY_ID: ${{ vars.SOURCECRAFT_PYPI_REGISTRY_ID }}
-    PYPI_REGISTRY_PAT: ${{ secrets.PYPI_REGISTRY_PAT }}
-  run: |
-    python -m pip install --index-url https://pypi.org/simple \
-      "pydantic>=2.12.5,<3" "pydantic-core>=2,<3"
-    ENCODED_PAT=$(python -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["PYPI_REGISTRY_PAT"], safe=""))')
-    python -m pip install --no-deps \
-      --index-url "https://iam:${ENCODED_PAT}@pkg.sourcecraft.tech/pypi/ooo-ainod/${SOURCECRAFT_PYPI_REGISTRY_ID}/simple/" \
-      automl-contracts
-```
-
-A dependent SourceCraft repository needs two things: the registry connected to
-that repository (an organization administrator connects it on the registry
-page) and the repository secret/variable above. All organization users can
-read packages from a connected registry; uploading requires the repository
-roles that the registry grants. The procedure is documented in
-[Connect a registry to a repository](https://sourcecraft.dev/portal/docs/ru/sourcecraft/operations/connect-registry.md)
-and [Configure PyPI](https://sourcecraft.dev/portal/docs/ru/sourcecraft/operations/configure-pypi.md).
+The engine declares `automl-contracts>=0.1.0,<0.2.0`, so
+`pip install configurable-automl-engine` installs a compatible contract
+automatically. The contract release is published before the engine release that
+depends on it. A clean environment needs no credentials, private index or
+`--no-deps` workaround. Run `python -m pip check` after installation to confirm
+that the requirements resolve.
 
 ### Index configuration and dependency-confusion risk
 
-- Prefer one trusted `--index-url`. Do not add arbitrary `--extra-index-url`
-  entries: pip does not give the private index priority, so a package with the
-  same name on a public index can win the resolution.
-- If you must combine indexes, pin the exact version and use hash-checked
-  requirements or a constraints file. Review every package that resolves from
-  an additional index.
-- Do not publish `automl-contracts` under the same name on a public index.
-  Reserve the name or verify that it is not already taken before adding a
-  public index.
-- Keep `pip.conf`, `.pypirc`, Docker layers and CI logs free of tokens. Print
-  no token-bearing URLs in diagnostics.
-- The registry identifier is not a secret, but it is not a version: changing
-  the registry or the organization slug requires updating every documented
-  command, CI workflow and installation example.
+The project publishes and owns the `automl-contracts` name on PyPI, so the
+documented installation resolves to the maintained distribution. Keep a single
+trusted index and do not add an `--extra-index-url` that can serve another
+distribution under the same name: pip gives an additional index no priority, so
+a same-named package can win the resolution.
+
+If an organization needs an internal mirror, mirror the PyPI wheel and sdist
+with their hashes, pin the exact version in requirements or constraints, and
+review every package that resolves from the additional index. Keep `pip.conf`,
+`.pypirc`, Docker layers and CI logs free of credentials.
 
 ### Publication pipeline
 
-A contract release is published by the `publish-contracts` workflow in
-`.sourcecraft/ci.yaml`. The GitHub workflow
-`.github/workflows/publish-contracts.yaml` verifies the same release tag and
-builds the same artifacts, but does not upload them. The publication workflow
-runs only for a `contracts-v<version>` tag and refuses to publish when:
+A contract release is published to public PyPI by
+`.github/workflows/publish-contracts.yaml`. The SourceCraft `sync-to-github`
+workflow pushes the `contracts-v<version>` tag to GitHub, which starts the
+release workflow. The workflow uses PyPI Trusted Publishing, so the repository
+stores no long-lived PyPI token. It runs only for a `contracts-v<version>` tag
+and refuses to publish when:
 
 - the tag does not match the `contracts-v<version>` mask;
-- the ref is not the full `refs/tags/contracts-v<version>` reference, or that tag
-  does not point at `HEAD`;
 - the tag version differs from the static version in `pyproject.toml`;
 - any release gate fails: contract boundaries, release configuration, Ruff,
   Mypy, import layers, contract tests, artifact metadata, the clean
   installation of the exact wheel or the consumer E2E on that wheel;
-- `SOURCECRAFT_PYPI_REGISTRY_ID` is not configured, or the `PYPI_REGISTRY_PAT`
-  secret is missing, expired or lacks upload rights.
+- the PyPI trusted publisher for the workflow is not configured or rejects the
+  OIDC token.
 
-The workflow uploads the same wheel and sdist that passed the gates with
-`twine` to the registry `legacy/` endpoint. Published versions are immutable:
-an attempt to upload the same version again fails instead of being skipped.
-The release tag must be present in the CI checkout; when no local tag points at
-`HEAD`, `preflight` reports that explicitly instead of publishing. After the
-upload the workflow installs `automl-contracts` back from the registry in a
-clean environment and validates a reference configuration through the public
-models, protocols and packaged JSON Schema, without the engine.
+The workflow checks out the tag, builds the wheel and sdist, and uploads exactly
+the artifacts that passed the gates with `pypa/gh-action-pypi-publish`.
+Published versions are immutable: an attempt to upload the same version again
+fails instead of being skipped. After the upload the workflow installs
+`automl-contracts==<version>` back from PyPI in two clean environments, once
+from the wheel and once by building the sdist, and validates a reference
+configuration through the public models, protocols and packaged JSON Schema,
+without the engine.
 
-Configure the registry identifier as a CI variable in the workflow and keep
-the PAT only in the repository secret. The workflow exposes the PAT only to the
-cubes that upload the distribution and install it back from the registry; cubes
-that install packages from the public index never receive it. Neither value
-belongs in a script, a committed file or a diagnostic message. The SourceCraft
-sync workflow pushes the `contracts-v*` tag to GitHub so the verification
-mirror is reachable.
+The SourceCraft `publish-contracts` workflow additionally mirrors the released
+artifacts to the organization registry for private consumers. It requires the
+full `refs/tags/contracts-v<version>` reference to point at `HEAD` before the
+private upload. Public PyPI is the canonical index documented here, and the
+engine resolves the contract from it.
 
 ## Using the public API
 
@@ -502,6 +427,5 @@ snapshot of that surface and do not read `CHANGELOG.md`. The review checklist
 is what catches a missing changelog entry or an undocumented compatibility
 change.
 
-The maintainer process is described above. Registry provisioning and the
-requirements for dependent repositories are documented in the
-[installation section](#installing-from-the-sourcecraft-pypi-registry).
+The maintainer process is described above. Installation and index guidance
+are documented in the [installation section](#installation).
