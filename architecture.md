@@ -30,6 +30,12 @@ alike — and there are no import cycles:
 | 1 — ML building blocks | `models`, `outliers_presets`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic`, `experiment` |
 | 0 — shared utilities | `common/` (and the generated `_version`) |
 
+`training_engine/config_runtime.py` belongs to layer 3 with the rest of
+`training_engine/`; `hpo/fold_eval.py`, `hpo/repeats.py` and
+`hpo/trial_stats.py` belong to layer 2 with the rest of `hpo/`. The external
+`automl_contracts` package is a dependency, not a layer of this package:
+importing it never creates a new layer or an upward import.
+
 The package `__init__` is the public façade on top; it loads
 `training_engine.component` (and with it Optuna) only on the first call of
 `train_best_model`. The rules are `import-linter` contracts in
@@ -82,6 +88,37 @@ its own method from its own `y_train` via `AutoTargetTransformer`
 never influence the transformation the folds are scored with (a leak the
 BBC-CV estimate would be especially exposed to).
 
+## Repeated (multi-split) validation
+
+`general.n_repeats` (default `1`) re-draws the resolved validation strategy R
+times, and `general.split_aggregation` (`median` by default, `mean` as the
+classic average) combines the per-repeat estimates into the single score that
+drives the HPO trial value, the finalist ranking and the ensemble selection.
+The Sanity Gate keeps its own fixed median aggregation of the per-repeat
+values. Repeat `r` uses the deterministic seed `random_state + r` (wrapped
+into the scikit-learn seed range; `None` stays non-deterministic), so two runs
+with the same `random_state` see identical repeated splits.
+
+Every split of a repeated run is a `RepeatedSplit` — the classic split tuple
+plus a `repeat_index` attribute — so the existing unpacking and the OOF
+channel keep working. Each repeat produces its own OOF vector and its own
+estimate: the trainer combines the per-repeat values by
+`split_aggregation`, and the HPO phase stacks the per-repeat OOF vectors as
+separate BBC-CV configurations instead of mixing rows from different splits.
+A non-finite repeat is penalized with `HPO_WORST_SCORE` (or excluded from the
+trainer aggregate) with a WARNING while the remaining repeats still carry the
+evidence; the trial fails only when every repeat failed.
+
+With `n_repeats = 1` the behavior is exactly the classic single split. The
+`loo` strategy has deterministic folds, so any `n_repeats > 1` is ignored with
+a WARNING — the same applies when `auto` resolves to `loo`. Every repeat
+multiplies the validation cost, so the contract `check_multi_split` rule
+(re-exported by `training_engine/config/general_rules.py`) rejects a
+prohibitive budget at config validation: it sums `n_trials` over the
+`all_algorithms`/`refine` phases and multiplies by `n_repeats` and by
+`n_folds` for the fold-based strategies (`k_fold`, `auto`), while a hold-out
+repeat counts as one split.
+
 # Project Structure
 
 ```
@@ -109,13 +146,16 @@ BBC-CV estimate would be especially exposed to).
 │       │   ├── complexity_rules.py         # The complexity guard rules (Rule, _rule_* functions, rule tables)
 │       │   ├── default_spaces.py           # Default search spaces, clipping, and constraints
 │       │   ├── evaluation.py               # Trial scoring (score_trial): hold-out, fold-wise with pruning reports, pooled OOF
+│       │   ├── fold_eval.py                # Shared per-fold fit/predict helpers and their failure WARNINGs
 │       │   ├── plans.py                    # Frozen plans returned by the pure setup steps (validation, preprocessing, ...)
 │       │   ├── pruning.py                  # Early stopping (pruning) plan
+│       │   ├── repeats.py                  # Repeat plan: deterministic repeat seeds, per-repeat OOF buffers, failure policy, median/mean aggregation
 │       │   ├── request.py                  # HpoRequest: the settings of one HPO run
 │       │   ├── runner.py                   # _OptimizeRunner: run loop, circuit breaker, best trial; plan_validation
 │       │   ├── search_space.py             # Search space plan, complexity guard, boundary warnings
 │       │   ├── target_domain.py            # Target-domain guard for GLMs (Poisson, Gamma, Tweedie)
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
+│       │   ├── trial_stats.py              # Aggregation of the trial states of the current HPO phase (TrialStats)
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
 │       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters, object facade
 │       │   ├── ensemble.py                 # Experimental top-K ensemble core: select_top_k, compute_weights, resolve_metric_direction (the shared public resolver), EnsembleModel (save/load, report section); EnsembleModelError is the module's base error
@@ -133,16 +173,17 @@ BBC-CV estimate would be especially exposed to).
 │       ├── training_engine                 # Layer 3: orchestration
 │       │   ├── artifact.py                 # Trainer assembly, final fit, artifact saving and the result report
 │       │   ├── component.py                # Main orchestrator: train_best_model, the phase loop; applies the step outcomes
-│       │   ├── config                      # Config schema (Pydantic), one module per section
-│       │   │   ├── algorithms.py          # algorithms / oversampling sections (AlgoCfg, OversamplingCfg)
-│       │   │   ├── complexity_guard.py    # general.complexity_guard (ComplexityGuardCfg)
-│       │   │   ├── ensemble.py            # general.ensemble (EnsembleCfg): the experimental top-K ensemble section
-│       │   │   ├── general.py             # general section (GeneralCfg, fields only)
-│       │   │   ├── general_rules.py       # Cross-field validation rules of the general section
-│       │   │   ├── phases.py              # Pipeline steps (HPOPhaseCfg) and pruning (PruningCfg)
-│       │   │   ├── root.py                # Root Config and read_config
-│       │   │   └── sanity_gate.py         # general.sanity_gate (SanityGateCfg)
+│       │   ├── config                      # Config schema: engine re-exports of the contract models, one module per section
+│       │   │   ├── algorithms.py          # Contract algorithms / oversampling sections (AlgoCfg, OversamplingCfg); engine keeps the runtime package mapping
+│       │   │   ├── complexity_guard.py    # Contract general.complexity_guard (ComplexityGuardCfg)
+│       │   │   ├── ensemble.py            # Contract general.ensemble (EnsembleCfg): the experimental top-K ensemble section
+│       │   │   ├── general.py             # Contract general section (GeneralCfg, fields only)
+│       │   │   ├── general_rules.py       # Contract cross-field rules; engine keeps the environment-dependent checks
+│       │   │   ├── phases.py              # Contract pipeline steps (HPOPhaseCfg) and pruning (PruningCfg)
+│       │   │   ├── root.py                # Contract Config plus the engine read_config (YAML load and runtime validation)
+│       │   │   └── sanity_gate.py         # Contract general.sanity_gate (SanityGateCfg)
 │       │   ├── config_parser.py            # Façade: re-exports the config schema (the public import path)
+│       │   ├── config_runtime.py           # Runtime validation of a structurally valid config: installed packages, estimator signatures, custom metrics, platform limits
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── ensemble_step.py            # The experimental top-K ensemble step: runs after the terminal select, never aborts the run; reuses experiment.ensemble.resolve_metric_direction (the single shared direction resolver)
 │       │   ├── finalists.py                # Winner selection, finalists pool, training of the finalists
