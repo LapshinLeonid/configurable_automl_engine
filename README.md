@@ -61,8 +61,11 @@ for the inclusion rules, versioning policy and contract-change process.
   plus an `auto` strategy that picks between them based on dataset size and
   dimensionality. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#modeltrainer).
 * **Multi-Split (Repeated) Validation** — validation is repeated on several
-  deterministic splits. See
-  [Validation options](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#general-section).
+  deterministic splits (`general.n_repeats`, `general.split_aggregation`). The
+  results report the spread of the winner's scores in `score_std` and
+  `oof_score_std`. See
+  [Validation options](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#general-section) and
+  [Training results](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#training-results).
 * **Custom Metrics and Scorers** — plug in your own metric function or
   sklearn scorer by import path (`general.custom_metrics`, e.g.
   `path: "my_project.metrics:mape"`) and use it as `comparison_metric` or in
@@ -70,7 +73,7 @@ for the inclusion rules, versioning policy and contract-change process.
   processes mode. See "Custom metrics" in `API_REFERENCE.md`.
 * **Dynamic Hyperparameter Optimization** — an Optuna wrapper with a built-in
   search space for every algorithm (`{}` is a valid algorithm config).
-  See [`optimize`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#optimizealgo_name-x-y).
+  See [`optimize`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#optimizealgo_name-x-y-).
 * **Extensible Model Factory** — 18 scikit-learn/XGBoost regressors (17 without
   the optional `xgboost` package); `glm` and `tweedieregressor` are two names
   for the same `TweedieRegressor`. See [Algorithms section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#algorithms-section).
@@ -87,7 +90,7 @@ for the inclusion rules, versioning policy and contract-change process.
   `spawn`) and import the main script again: **guard the script's top-level
   code with `if __name__ == "__main__":`**, or set
   `general.start_method: "fork"`. See
-  [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#run_parallelfunc-args_seq).
+  [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#run_parallelfunc-args_seq-).
 * **Seamless Serialization** — joblib or pickle formats for models, metadata
   and preprocessing artifacts. See [`ModelTrainer`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#modeltrainer).
 * **Dynamic Search Space Clipping** — hyperparameter boundaries are adjusted
@@ -103,7 +106,7 @@ for the inclusion rules, versioning policy and contract-change process.
 * **Phase/Task Timeouts (process mode only)** — a global timeout for a search
   step (`phase_timeout`) and a per-algorithm timeout (`task_timeout`); with
   `parallel_mode: "threads"` setting either of them is a configuration error.
-  See [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#run_parallelfunc-args_seq).
+  See [`run_parallel`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#run_parallelfunc-args_seq-).
 * **Signature-Aware Hyperparameter Names** — legacy parameter names are
   remapped (e.g. `n_iter` → `max_iter` for ARDRegression); unknown names are
   rejected so typos do not go unnoticed (except `xgboosting`, which accepts
