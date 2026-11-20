@@ -15,6 +15,26 @@ The contract is versioned independently of `configurable-automl-engine`.
   private registry, a personal access token or the `--no-deps` workaround, and
   the engine resolves the declared contract range automatically.
 
+## [0.1.3] - 2026-11-19
+
+### Changed
+
+- Version bump for publication; the public API is unchanged.
+
+## [0.1.2] - 2026-11-18
+
+### Changed
+
+- Version bump for publication; the public API is unchanged.
+
+## [0.1.1] - 2026-11-18
+
+### Note
+
+- The `contracts-v0.1.1` tag points to a commit where
+  `automl-contracts/pyproject.toml` declares version `0.1.0`. The tag does not
+  introduce a `0.1.1` package version, so no `0.1.1` changes are recorded.
+
 ## [0.1.0] - 2026-11-15
 
 ### Added
