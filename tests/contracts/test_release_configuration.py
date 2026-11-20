@@ -48,7 +48,7 @@ def github_ci_text() -> str:
 
 
 @pytest.fixture(scope="module")
-def engine_pyproject_text() -> str:
+def root_pyproject_text() -> str:
     return (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 
@@ -160,6 +160,141 @@ def split_publish_tasks(workflow: dict[str, object], *, needs: object = None) ->
 
 def test_repository_release_configuration_is_wired(guard: ModuleType) -> None:
     assert guard.run_checks(REPO_ROOT) == []
+
+
+def test_engine_version_tags_ignore_contract_release_tags(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    assert guard.check_engine_version_tags(root_pyproject_text) == []
+
+
+def test_engine_version_tags_reject_a_contract_tag_collision(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = root_pyproject_text.replace(
+        '[tool.setuptools_scm.tag]\nprefix = "v"',
+        '[tool.setuptools_scm.tag]\nprefix = ""',
+    )
+    assert "contracts-v0.1.3" in messages(guard.check_engine_version_tags(text))
+
+
+def test_engine_version_tags_require_an_engine_regex(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = root_pyproject_text.replace(
+        'regex = "^(?P<version>\\\\d+\\\\.\\\\d+\\\\.\\\\d+.*)$"',
+        'regex = "^(?P<version>contracts-.*)$"',
+    )
+    assert "v1.2.3" in messages(guard.check_engine_version_tags(text))
+
+
+def test_engine_version_tags_require_valid_toml(guard: ModuleType) -> None:
+    violations = guard.check_engine_version_tags("not [valid")
+    assert "not valid TOML" in messages(violations)
+
+
+def test_engine_version_tags_require_a_compatible_setuptools_scm(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = root_pyproject_text.replace(
+        '"setuptools-scm>=10.3.4"', '"setuptools-scm>=8"'
+    )
+    assert "setuptools-scm>=10.3.4" in messages(guard.check_engine_version_tags(text))
+
+
+def test_engine_version_tags_require_the_setuptools_scm_requirement(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = root_pyproject_text.replace('"setuptools-scm>=10.3.4", ', "")
+    assert "do not declare setuptools-scm" in messages(
+        guard.check_engine_version_tags(text)
+    )
+
+
+def pyproject_with_describe_command(text: str, value: str) -> str:
+    """Insert a custom ``scm.git.describe_command`` into the engine config."""
+    return text.replace(
+        "[tool.setuptools_scm.tag]",
+        f"[tool.setuptools_scm.scm.git]\ndescribe_command = {value}\n\n"
+        "[tool.setuptools_scm.tag]",
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git describe --tags --long --match v*", ["v*"]),
+        (["git", "describe", "--tags", "--long", "--match", "v*"], ["v*"]),
+        ("git describe --tags --long --match=v*", ["v*"]),
+        (
+            "git describe --tags --long --match v* --match *[0-9]*",
+            ["v*", "*[0-9]*"],
+        ),
+        (
+            ["git", "describe", "--match=v*", "--match", "release-*"],
+            ["v*", "release-*"],
+        ),
+        ("git describe --tags --long", []),
+        ("git describe --tags --long --match", None),
+        ("git describe --tags --long --match=", None),
+        ("git describe --tags --long --match 'v*", None),
+        (42, None),
+    ],
+)
+def test_describe_match_globs_parses_supported_forms(
+    guard: ModuleType, command: object, expected: list[str] | None
+) -> None:
+    assert guard._describe_match_globs(command) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"git describe --tags --long --match v* --match *[0-9]*"',
+        (
+            '["git", "describe", "--tags", "--long", "--match", "v*", '
+            '"--match", "*[0-9]*"]'
+        ),
+    ],
+)
+def test_engine_version_tags_reject_unsafe_describe_commands(
+    guard: ModuleType, root_pyproject_text: str, value: str
+) -> None:
+    text = pyproject_with_describe_command(root_pyproject_text, value)
+    assert "contracts-v0.1.3" in messages(guard.check_engine_version_tags(text))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"git describe --tags --long --match=v*"',
+        '["git", "describe", "--tags", "--long", "--match", "v*"]',
+    ],
+)
+def test_engine_version_tags_accept_safe_describe_commands(
+    guard: ModuleType, root_pyproject_text: str, value: str
+) -> None:
+    text = pyproject_with_describe_command(root_pyproject_text, value)
+    assert guard.check_engine_version_tags(text) == []
+
+
+def test_engine_version_tags_reject_a_describe_command_without_match(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = pyproject_with_describe_command(
+        root_pyproject_text, '"git describe --tags --long"'
+    )
+    assert "has no --match" in messages(guard.check_engine_version_tags(text))
+
+
+def test_engine_version_tags_reject_an_unparsable_describe_command(
+    guard: ModuleType, root_pyproject_text: str
+) -> None:
+    text = pyproject_with_describe_command(
+        root_pyproject_text, '"git describe --match \'v*"'
+    )
+    assert "cannot be parsed" in messages(guard.check_engine_version_tags(text))
 
 
 def test_check_scripts_rejects_a_modified_uploader(
@@ -865,64 +1000,6 @@ def test_github_ci_requires_engine_integration(
 ) -> None:
     text = github_ci_text.replace("scripts/smoke_engine_install.py", "removed")
     assert "smoke_engine_install.py" in messages(guard.check_github_ci(text))
-
-
-def test_engine_versioning_ignores_contracts_tags(
-    guard: ModuleType, engine_pyproject_text: str
-) -> None:
-    assert guard.check_engine_versioning(engine_pyproject_text) == []
-
-
-def test_engine_versioning_requires_a_version_tag_regex(
-    guard: ModuleType, engine_pyproject_text: str
-) -> None:
-    text = engine_pyproject_text.replace(
-        'tag_regex = "^v(?P<version>\\\\d+\\\\.\\\\d+\\\\.\\\\d+.*)$"',
-        'tag_regex = "^.*$"',
-        1,
-    )
-    assert "tag_regex" in messages(guard.check_engine_versioning(text))
-
-
-def test_engine_versioning_requires_the_tag_mask(
-    guard: ModuleType, engine_pyproject_text: str
-) -> None:
-    text = engine_pyproject_text.replace(
-        '"--match", "v[0-9]*"',
-        '"--match", "*[0-9]*"',
-        1,
-    )
-    assert "v[0-9]*" in messages(guard.check_engine_versioning(text))
-
-
-def test_engine_versioning_rejects_multiple_tag_masks(
-    guard: ModuleType, engine_pyproject_text: str
-) -> None:
-    text = engine_pyproject_text.replace(
-        '"--match", "v[0-9]*"]',
-        '"--match", "v[0-9]*", "--match", "*[0-9]*"]',
-        1,
-    )
-    assert "exactly one" in messages(guard.check_engine_versioning(text))
-
-
-def test_engine_versioning_accepts_a_string_describe_command(
-    guard: ModuleType, engine_pyproject_text: str
-) -> None:
-    text = engine_pyproject_text.replace(
-        'git_describe_command = ["git", "describe", "--dirty", "--tags", '
-        '"--long", "--abbrev=40", "--match", "v[0-9]*"]',
-        'git_describe_command = "git describe --dirty --tags --long '
-        "--match 'v[0-9]*'\"",
-        1,
-    )
-    assert guard.check_engine_versioning(text) == []
-
-
-def test_engine_versioning_requires_the_scm_section(guard: ModuleType) -> None:
-    assert "[tool.setuptools_scm]" in messages(
-        guard.check_engine_versioning("[tool.setuptools]\n")
-    )
 
 
 def test_missing_repository_files_are_reported(

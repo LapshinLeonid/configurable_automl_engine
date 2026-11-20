@@ -282,8 +282,9 @@ hand.
 `automl-contracts` uses its own SemVer version, independent of the engine
 version. The version is static in `automl-contracts/pyproject.toml`; contract
 releases are tagged `contracts-v<version>`, while engine releases are tagged
-`v<version>`. `setuptools-scm` is used by the engine only, so the two tag
-families do not interfere.
+`v<version>`. `setuptools-scm` is used by the engine only, and its tag filter
+accepts only the `v<version>` family. A `contracts-v<version>` tag at HEAD
+therefore neither supplies an engine version nor breaks an engine build.
 
 The current line is `0.1.x`. Until `1.0.0`:
 

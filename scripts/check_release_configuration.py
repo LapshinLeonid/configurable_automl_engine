@@ -11,6 +11,7 @@ configuration must ignore the ``contracts-v*`` tag family.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import re
 import shlex
 import sys
@@ -21,13 +22,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ROOT_PYPROJECT = REPO_ROOT / "pyproject.toml"
 SOURCECRAFT_CI = REPO_ROOT / ".sourcecraft" / "ci.yaml"
 GITHUB_CI = REPO_ROOT / ".github" / "workflows" / "CI.yaml"
 GITHUB_PUBLISH = REPO_ROOT / ".github" / "workflows" / "publish-contracts.yaml"
-ENGINE_PYPROJECT = REPO_ROOT / "pyproject.toml"
-ENGINE_TAG_MASK = "v[0-9]*"
+
+ENGINE_TAG = "v1.2.3"
+CONTRACT_TAG = "contracts-v0.1.3"
+SETUPTOOLS_SCM_MIN_VERSION = Version("10.3.4")
 
 SOURCE_CUBES = (
     "preflight",
@@ -1672,95 +1679,226 @@ def check_github_ci(text: str, path: Path = GITHUB_CI) -> list[Violation]:
     return violations
 
 
-def _git_describe_masks(command: object) -> list[str] | None:
-    """Return every ``git describe --match`` mask from a configured command.
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
-    Args:
-        command: Value of the ``git_describe_command`` setting.
 
-    Returns:
-        Masks that follow ``--match`` in order, or ``None`` when the command
-        has an unsupported shape.
+def _describe_match_globs(describe_command: Any) -> list[str] | None:
+    """Return every ``--match`` glob of a ``git describe`` command.
+
+    ``None`` means the command cannot be parsed safely, while an empty list
+    means that a custom command was configured without any ``--match``.
     """
-    if isinstance(command, str):
+    if isinstance(describe_command, str):
         try:
-            tokens = shlex.split(command)
+            parts = shlex.split(describe_command)
         except ValueError:
             return None
-    elif isinstance(command, list) and all(isinstance(token, str) for token in command):
-        tokens = command
+    elif isinstance(describe_command, list):
+        parts = [str(part) for part in describe_command]
     else:
         return None
-    return [
-        tokens[index + 1]
-        for index, token in enumerate(tokens[:-1])
-        if token == "--match"
+    globs: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if part == "--match":
+            if index + 1 >= len(parts):
+                return None
+            globs.append(parts[index + 1])
+            index += 2
+            continue
+        if part.startswith("--match="):
+            value = part.partition("=")[2]
+            if not value:
+                return None
+            globs.append(value)
+        index += 1
+    return globs
+
+
+def _tag_filter_violations(match_globs: list[str], path: Path) -> list[Violation]:
+    """Require the ``--match`` globs to select engine tags only."""
+    violations: list[Violation] = []
+    if not any(
+        fnmatch.fnmatchcase(ENGINE_TAG, match_glob) for match_glob in match_globs
+    ):
+        violations.append(
+            Violation(
+                path,
+                1,
+                f"engine tag filters {match_globs!r} do not accept {ENGINE_TAG!r}",
+            )
+        )
+    colliding = [
+        match_glob
+        for match_glob in match_globs
+        if fnmatch.fnmatchcase(CONTRACT_TAG, match_glob)
     ]
+    if colliding:
+        violations.append(
+            Violation(
+                path,
+                1,
+                f"engine tag filters {colliding!r} accept contract tag "
+                f"{CONTRACT_TAG!r}; a contract release tag would break the "
+                "engine build",
+            )
+        )
+    return violations
 
 
-def check_engine_versioning(
-    text: str, path: Path = ENGINE_PYPROJECT
+def _requirement_lower_bound(requirement: Requirement) -> Version | None:
+    """Return the lowest version allowed by a requirement's lower-bound specs."""
+    lower: Version | None = None
+    for specifier in requirement.specifier:
+        if specifier.operator not in (">=", ">", "==", "===", "~="):
+            continue
+        candidate = specifier.version.removesuffix(".*")
+        try:
+            bound = Version(candidate)
+        except InvalidVersion:
+            return None
+        if lower is None or bound < lower:
+            lower = bound
+    return lower
+
+
+def _scm_build_requirement_violations(
+    document: dict[str, Any], path: Path
 ) -> list[Violation]:
-    """Check that engine versions ignore the ``contracts-v*`` tag family.
+    """Check that the build requirements support the configured tag table."""
+    requires = _as_mapping(document.get("build-system")).get("requires")
+    if not isinstance(requires, list):
+        return [Violation(path, 1, "engine build-system.requires is missing")]
+    scm_requirement: Requirement | None = None
+    for raw in requires:
+        if not isinstance(raw, str):
+            continue
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as error:
+            return [
+                Violation(
+                    path,
+                    1,
+                    f"engine build requirement {raw!r} is invalid: {error}",
+                )
+            ]
+        if canonicalize_name(requirement.name) == "setuptools-scm":
+            scm_requirement = requirement
+            break
+    if scm_requirement is None:
+        return [
+            Violation(
+                path,
+                1,
+                "engine build requirements do not declare setuptools-scm",
+            )
+        ]
+    lower_bound = _requirement_lower_bound(scm_requirement)
+    if lower_bound is None or lower_bound < SETUPTOOLS_SCM_MIN_VERSION:
+        return [
+            Violation(
+                path,
+                1,
+                "engine build requirements must require "
+                f"setuptools-scm>={SETUPTOOLS_SCM_MIN_VERSION} so that the "
+                "[tool.setuptools_scm.tag] configuration is supported; found "
+                f"{scm_requirement!s}",
+            )
+        ]
+    return []
+
+
+def check_engine_version_tags(
+    text: str, path: Path = ROOT_PYPROJECT
+) -> list[Violation]:
+    """Check that engine version inference ignores contract release tags.
+
+    The engine and ``automl-contracts`` share one repository but have separate
+    tag families. ``setuptools-scm`` must consider only ``v<version>`` engine
+    tags: a ``contracts-v<version>`` tag at HEAD must neither be parsed as an
+    engine version nor make the build fail. The build requirements must also
+    declare a ``setuptools-scm`` version that supports the tag configuration.
 
     Args:
-        text: Content of the engine ``pyproject.toml``.
+        text: Content of the root ``pyproject.toml``.
         path: File path used in diagnostics.
 
     Returns:
-        Every violated engine versioning rule.
+        Every violated release rule.
     """
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
         return [Violation(path, 1, f"engine pyproject.toml is not valid TOML: {error}")]
-    tool = document.get("tool")
-    scm = tool.get("setuptools_scm") if isinstance(tool, dict) else None
-    if not isinstance(scm, dict):
-        return [
-            Violation(
-                path,
-                1,
-                "engine pyproject.toml has no [tool.setuptools_scm]",
-            )
-        ]
-    violations: list[Violation] = []
-    tag_regex = scm.get("tag_regex")
-    if not isinstance(tag_regex, str):
+    violations = _scm_build_requirement_violations(document, path)
+    scm = _as_mapping(_as_mapping(document.get("tool")).get("setuptools_scm"))
+    tag = _as_mapping(scm.get("tag"))
+    prefix = tag.get("prefix")
+    prefix = prefix if isinstance(prefix, str) else ""
+
+    regex_text = tag.get("regex")
+    if not isinstance(regex_text, str):
+        legacy_regex = scm.get("tag_regex")
+        regex_text = legacy_regex if isinstance(legacy_regex, str) else None
+    if regex_text is None:
         violations.append(
-            Violation(
-                path,
-                1,
-                "setuptools-scm has no tag_regex limiting versions to v<version>",
-            )
+            Violation(path, 1, "engine setuptools-scm config has no tag regex")
         )
     else:
         try:
-            pattern = re.compile(tag_regex)
+            tag_regex = re.compile(regex_text)
         except re.error as error:
             violations.append(
-                Violation(path, 1, f"setuptools-scm tag_regex is invalid: {error}")
+                Violation(path, 1, f"engine tag regex is invalid: {error}")
             )
         else:
-            if not pattern.fullmatch("v1.2.3") or pattern.fullmatch("contracts-v0.1.0"):
+            if tag_regex.match(ENGINE_TAG.removeprefix(prefix)) is None:
                 violations.append(
                     Violation(
                         path,
                         1,
-                        "setuptools-scm tag_regex must accept v<version> and "
-                        "reject contracts-v<version>",
+                        f"engine tag regex does not accept {ENGINE_TAG!r}",
                     )
                 )
-    masks = _git_describe_masks(scm.get("git_describe_command"))
-    if masks != [ENGINE_TAG_MASK]:
-        violations.append(
-            Violation(
-                path,
-                1,
-                "setuptools-scm must pass exactly one git describe "
-                f"--match {ENGINE_TAG_MASK}",
+            if tag_regex.match(CONTRACT_TAG.removeprefix(prefix)) is not None:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"engine tag regex accepts contract tag {CONTRACT_TAG!r}",
+                    )
+                )
+
+    git = _as_mapping(_as_mapping(scm.get("scm")).get("git"))
+    describe = git.get("describe_command")
+    if describe is None:
+        describe = scm.get("git_describe_command")
+    if describe is None:
+        violations.extend(_tag_filter_violations([f"{prefix}*[0-9]*"], path))
+    else:
+        match_globs = _describe_match_globs(describe)
+        if match_globs is None:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"engine git describe command {describe!r} cannot be parsed",
+                )
             )
-        )
+        elif not match_globs:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"engine git describe command {describe!r} has no --match; "
+                    "its tag filter cannot be proven safe",
+                )
+            )
+        else:
+            violations.extend(_tag_filter_violations(match_globs, path))
     return violations
 
 
@@ -1835,8 +1973,18 @@ def run_checks(root: Path = REPO_ROOT) -> list[Violation]:
     sourcecraft = root / ".sourcecraft" / "ci.yaml"
     github_ci = root / ".github" / "workflows" / "CI.yaml"
     github_publish = root / ".github" / "workflows" / "publish-contracts.yaml"
-    engine_pyproject = root / "pyproject.toml"
+    root_pyproject = root / "pyproject.toml"
     violations: list[Violation] = []
+    if not root_pyproject.is_file():
+        violations.append(
+            Violation(root_pyproject, 1, "engine pyproject.toml is missing")
+        )
+    else:
+        violations.extend(
+            check_engine_version_tags(
+                root_pyproject.read_text(encoding="utf-8"), root_pyproject
+            )
+        )
     if not sourcecraft.is_file():
         violations.append(Violation(sourcecraft, 1, "SourceCraft CI file is missing"))
     else:
@@ -1858,16 +2006,6 @@ def run_checks(root: Path = REPO_ROOT) -> list[Violation]:
     else:
         violations.extend(
             check_github_ci(github_ci.read_text(encoding="utf-8"), github_ci)
-        )
-    if not engine_pyproject.is_file():
-        violations.append(
-            Violation(engine_pyproject, 1, "engine pyproject.toml is missing")
-        )
-    else:
-        violations.extend(
-            check_engine_versioning(
-                engine_pyproject.read_text(encoding="utf-8"), engine_pyproject
-            )
         )
     violations.extend(check_scripts(root))
     return violations
