@@ -181,7 +181,11 @@ def bbc_cv_score(
     n_rows = y.shape[0]
     if n_rows < 2:
         raise ValueError(f"BBC-CV needs at least 2 usable rows; got {n_rows}.")
-    preds = np.unique(preds, axis=1)
+    # Collapse duplicate configurations but keep the original order of their
+    # first occurrences: the selection step breaks a tie in favour of the
+    # first configuration, and np.unique alone would sort the columns.
+    _, first_indices = np.unique(preds, axis=1, return_index=True)
+    preds = preds[:, np.sort(first_indices)]
 
     # R² and NRMSE normalize by a statistic of y (variance / range). On a
     # small out-of-bag subset that statistic is itself biased (R² is pulled

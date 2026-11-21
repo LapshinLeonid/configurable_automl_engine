@@ -170,6 +170,28 @@ def test_bbc_cv_score_normalized_metrics_use_full_sample_normalizer(
     assert value == pytest.approx(to_metric(err, y), rel=1e-12)
 
 
+def test_bbc_cv_score_tie_keeps_first_configuration_order():
+    """A tie in the in-bag score selects the first configuration as given.
+
+    Both configurations have in-bag MAE 1 on the bootstrap resample of seed
+    36, but their out-of-bag MAE is 0 and 20. Sorting the prediction columns
+    (as ``np.unique`` does by itself) would reorder them and score the second
+    configuration instead of the first.
+    """
+    y = np.zeros(4)
+    first = np.array([1.0, 1.0, 0.0, 0.0])
+    second = np.array([-1.0, -1.0, 20.0, 20.0])
+    scorer = get_scorer_object("mae")
+    as_given = bbc_cv_score(
+        scorer, y, np.vstack([first, second]), n_bootstrap=1, random_state=36
+    )
+    reversed_order = bbc_cv_score(
+        scorer, y, np.vstack([second, first]), n_bootstrap=1, random_state=36
+    )
+    assert as_given == pytest.approx(0.0)
+    assert reversed_order == pytest.approx(-20.0)
+
+
 def test_bbc_cv_score_duplicates_and_uncovered_rows_do_not_change_result():
     rng = np.random.default_rng(5)
     y = rng.normal(size=30)
