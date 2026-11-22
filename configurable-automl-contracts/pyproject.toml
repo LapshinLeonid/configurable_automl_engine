@@ -3,8 +3,8 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "automl-contracts"
-version = "0.1.4"
+name = "configurable-automl-contracts"
+version = "0.1.0"
 description = "Public data contracts of the Configurable AutoML Engine."
 readme = "README.md"
 license = "BSD-3-Clause"

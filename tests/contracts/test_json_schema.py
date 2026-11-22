@@ -17,14 +17,14 @@ from pydantic import BaseModel
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_SCHEMA = (
     REPO_ROOT
-    / "automl-contracts"
+    / "configurable-automl-contracts"
     / "src"
     / "automl_contracts"
     / "schemas"
     / "config.schema.json"
 )
 ROOT_MIRROR = REPO_ROOT / "config.schema.json"
-GENERATOR = REPO_ROOT / "automl-contracts" / "scripts" / "generate_schema.py"
+GENERATOR = REPO_ROOT / "configurable-automl-contracts" / "scripts" / "generate_schema.py"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
 HAS_DRAFT_2020_12 = hasattr(jsonschema, "Draft202012Validator")
@@ -35,7 +35,7 @@ requires_draft_2020_12 = pytest.mark.skipif(
 
 REGENERATE = (
     "The saved JSON Schema is out of sync with the contract models. "
-    "Regenerate it with `python automl-contracts/scripts/generate_schema.py`, "
+    "Regenerate it with `python configurable-automl-contracts/scripts/generate_schema.py`, "
     "copy the canonical file to the repository root `config.schema.json`, "
     "review the compatibility impact and update CHANGELOG.md/version."
 )

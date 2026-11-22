@@ -175,7 +175,7 @@ def test_engine_version_tags_reject_a_contract_tag_collision(
         '[tool.setuptools_scm.tag]\nprefix = "v"',
         '[tool.setuptools_scm.tag]\nprefix = ""',
     )
-    assert "contracts-v0.1.3" in messages(guard.check_engine_version_tags(text))
+    assert "contracts-v0.1.0" in messages(guard.check_engine_version_tags(text))
 
 
 def test_engine_version_tags_require_an_engine_regex(
@@ -262,7 +262,7 @@ def test_engine_version_tags_reject_unsafe_describe_commands(
     guard: ModuleType, root_pyproject_text: str, value: str
 ) -> None:
     text = pyproject_with_describe_command(root_pyproject_text, value)
-    assert "contracts-v0.1.3" in messages(guard.check_engine_version_tags(text))
+    assert "contracts-v0.1.0" in messages(guard.check_engine_version_tags(text))
 
 
 @pytest.mark.parametrize(
@@ -509,11 +509,11 @@ def test_sourcecraft_requires_the_publication_workflow(
         "scripts/contract_release.py check-tag",
         "scripts/check_contract_boundaries.py",
         "python3.11 scripts/check_release_configuration.py",
-        "python3.11 -m ruff check src/ automl-contracts/src/",
+        "python3.11 -m ruff check src/ configurable-automl-contracts/src/",
         "python3.11 -m mypy scripts/contract_release.py",
         "importlinter.cli",
         "pytest tests/contracts",
-        "python3.11 -m build automl-contracts",
+        "python3.11 -m build configurable-automl-contracts",
         "twine check",
         "scripts/verify_contract_distribution.py",
         "scripts/contract_release.py publish",
@@ -781,7 +781,7 @@ def test_github_publication_requires_the_pypi_step(
         """      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: automl-contracts/dist
+          packages-dir: configurable-automl-contracts/dist
 """,
         "",
         1,
@@ -802,20 +802,24 @@ def test_github_publication_publishes_the_built_contract(
     guard: ModuleType, github_publish_text: str
 ) -> None:
     text = github_publish_text.replace(
-        "packages-dir: automl-contracts/dist", "packages-dir: dist", 1
+        "packages-dir: configurable-automl-contracts/dist", "packages-dir: dist", 1
     )
-    assert "automl-contracts/dist" in messages(guard.check_github_publish(text))
+    assert "configurable-automl-contracts/dist" in messages(
+        guard.check_github_publish(text)
+    )
 
 
 def test_github_publication_verifies_the_published_package(
     guard: ModuleType, github_publish_text: str
 ) -> None:
     text = github_publish_text.replace(
-        "automl-contracts==${VERSION}",
-        "automl-contracts",
+        "configurable-automl-contracts==${VERSION}",
+        "configurable-automl-contracts",
         1,
     )
-    assert "automl-contracts==${VERSION}" in messages(guard.check_github_publish(text))
+    assert "configurable-automl-contracts==${VERSION}" in messages(
+        guard.check_github_publish(text)
+    )
 
 
 def test_github_publication_runs_pypi_after_the_release_gates(
@@ -866,7 +870,7 @@ def test_github_publication_accepts_the_write_all_shorthand(
 def test_github_publication_rejects_extra_publish_inputs(
     guard: ModuleType, github_publish_text: str, option: str
 ) -> None:
-    anchor = "          packages-dir: automl-contracts/dist\n"
+    anchor = "          packages-dir: configurable-automl-contracts/dist\n"
     text = github_publish_text.replace(anchor, anchor + f"          {option}\n", 1)
     assert "unsupported inputs" in messages(guard.check_github_publish(text))
 
@@ -906,9 +910,11 @@ def test_github_publication_verifies_the_sdist(
     guard: ModuleType, github_publish_text: str
 ) -> None:
     text = github_publish_text.replace(
-        "--no-binary automl-contracts", "--no-binary :none:", 1
+        "--no-binary configurable-automl-contracts", "--no-binary :none:", 1
     )
-    assert "--no-binary automl-contracts" in messages(guard.check_github_publish(text))
+    assert "--no-binary configurable-automl-contracts" in messages(
+        guard.check_github_publish(text)
+    )
 
 
 def test_github_publication_binds_isolation_to_the_resolving_install(
@@ -1373,7 +1379,7 @@ def test_sourcecraft_requires_a_failing_tag_check_before_publish(
         """                python3.11 scripts/contract_release.py check-tag \\
                   --ref "${SOURCECRAFT_COMMIT_REF}" \\
                   --tag "${SOURCECRAFT_COMMIT_REF_NAME}" \\
-                  --pyproject automl-contracts/pyproject.toml
+                  --pyproject configurable-automl-contracts/pyproject.toml
 """,
         """                if git tag --points-at HEAD | grep -q "^contracts-v"; then
                   echo "publishing"
@@ -1614,7 +1620,7 @@ def test_sourcecraft_inspects_a_string_task_reference(
                         "set -e",
                         (
                             "python3.11 scripts/contract_release.py publish "
-                            "--dist automl-contracts/dist "
+                            "--dist configurable-automl-contracts/dist "
                             "--expected-version 0.1.0"
                         ),
                     ],

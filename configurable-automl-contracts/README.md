@@ -1,6 +1,6 @@
-# automl-contracts
+# configurable-automl-contracts
 
-`automl-contracts` is the standalone public data contract of the
+`configurable-automl-contracts` is the standalone public data contract of the
 [Configurable AutoML Engine](https://github.com/LapshinLeonid/configurable_automl_engine).
 It describes the configuration format, the result DTOs, the enumerations and
 value sets, the public exceptions, the constants, the structural protocols and
@@ -25,8 +25,8 @@ The engine separates three levels of responsibility:
 
 | Level | What belongs there | Where it lives |
 |---|---|---|
-| Public library contract | Configuration models and value sets, result DTOs, statuses, public exceptions, stable error codes, public constants, `Protocol` interfaces and the JSON Schema | `automl-contracts` |
-| Configuration contract | The structure of a configuration, field types, defaults, required fields and structural cross-field rules | `automl-contracts` |
+| Public library contract | Configuration models and value sets, result DTOs, statuses, public exceptions, stable error codes, public constants, `Protocol` interfaces and the JSON Schema | `configurable-automl-contracts` |
+| Configuration contract | The structure of a configuration, field types, defaults, required fields and structural cross-field rules | `configurable-automl-contracts` |
 | Engine implementation | Training, preprocessing, HPO, winner selection, artifacts, reports, experiment storage, explainability, parallel execution, installed-package and environment checks | `configurable-automl-engine` |
 
 The rule for moving a definition into this package is deliberately narrow:
@@ -47,7 +47,7 @@ must be reflected in `CHANGELOG.md` and in the compatibility matrix.
 
 The inclusion rules, the compatibility matrix and the maintainer process are
 documented in this guide and in
-[the API reference](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#contracts-package-automl-contracts).
+[the API reference](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#contracts-package-configurable-automl-contracts).
 
 ## Package contents and stable import paths
 
@@ -92,23 +92,36 @@ metadata.
 
 ## Installation
 
-`automl-contracts` is published on public PyPI, so the contract and its runtime
+`configurable-automl-contracts` is published on public PyPI, so the contract and its runtime
 dependencies install in one step:
 
 ```bash
-python -m pip install automl-contracts
+python -m pip install configurable-automl-contracts
 ```
 
-The engine declares `automl-contracts>=0.1.0,<0.2.0`, so
+The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`, so
 `pip install configurable-automl-engine` installs a compatible contract
 automatically. The contract release is published before the engine release that
 depends on it. A clean environment needs no credentials, private index or
 `--no-deps` workaround. Run `python -m pip check` after installation to confirm
 that the requirements resolve.
 
+### Migrating from the old distribution name
+
+The distribution was previously published as `automl-contracts`. Replace that
+name in requirements files, constraints, lock files and CI configuration, then
+reinstall the contract:
+
+```bash
+python -m pip uninstall -y automl-contracts
+python -m pip install "configurable-automl-contracts>=0.1.0,<0.2.0"
+```
+
+The import package is unchanged: code continues to import `automl_contracts`.
+
 ### Index configuration and dependency-confusion risk
 
-The project publishes and owns the `automl-contracts` name on PyPI, so the
+The project publishes and owns the `configurable-automl-contracts` name on PyPI, so the
 documented installation resolves to the maintained distribution. Keep a single
 trusted index and do not add an `--extra-index-url` that can serve another
 distribution under the same name: pip gives an additional index no priority, so
@@ -140,7 +153,7 @@ The workflow checks out the tag, builds the wheel and sdist, and uploads exactly
 the artifacts that passed the gates with `pypa/gh-action-pypi-publish`.
 Published versions are immutable: an attempt to upload the same version again
 fails instead of being skipped. After the upload the workflow installs
-`automl-contracts==<version>` back from PyPI in two clean environments, once
+`configurable-automl-contracts==<version>` back from PyPI in two clean environments, once
 from the wheel and once by building the sdist, and validates a reference
 configuration through the public models, protocols and packaged JSON Schema,
 without the engine.
@@ -242,7 +255,7 @@ normalizes NumPy scalars at its boundary.
 ## JSON Schema without the engine
 
 The canonical schema ships as package data and is available after installing
-only `automl-contracts`:
+only `configurable-automl-contracts`:
 
 ```python
 import json
@@ -267,7 +280,7 @@ source of truth. In a repository checkout, regenerate the canonical file and
 the root compatibility mirror after changing any model:
 
 ```bash
-python automl-contracts/scripts/generate_schema.py
+python configurable-automl-contracts/scripts/generate_schema.py
 python schema_generator.py
 ```
 
@@ -279,8 +292,8 @@ hand.
 
 ## Versioning and compatibility
 
-`automl-contracts` uses its own SemVer version, independent of the engine
-version. The version is static in `automl-contracts/pyproject.toml`; contract
+`configurable-automl-contracts` uses its own SemVer version, independent of the engine
+version. The version is static in `configurable-automl-contracts/pyproject.toml`; contract
 releases are tagged `contracts-v<version>`, while engine releases are tagged
 `v<version>`. `setuptools-scm` is used by the engine only, and its tag filter
 accepts only the `v<version>` family. A `contracts-v<version>` tag at HEAD
@@ -293,7 +306,7 @@ The current line is `0.1.x`. Until `1.0.0`:
 - PATCH is reserved for strictly compatible fixes;
 - an incompatible change is never hidden in a PATCH release;
 - every public API or schema change is recorded in
-  [`automl-contracts/CHANGELOG.md`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/CHANGELOG.md).
+  [`configurable-automl-contracts/CHANGELOG.md`](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/configurable-automl-contracts/CHANGELOG.md).
 
 From `1.0.0`, the usual SemVer rules apply:
 
@@ -320,11 +333,11 @@ The engine declares the contract range in its own `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "automl-contracts>=0.1.0,<0.2.0",
+    "configurable-automl-contracts>=0.1.0,<0.2.0",
 ]
 ```
 
-| `automl-contracts` | `configurable-automl-engine` | Status |
+| `configurable-automl-contracts` | `configurable-automl-engine` | Status |
 |---|---|---|
 | `0.1.x` | Releases that declare `>=0.1.0,<0.2.0` | Supported; compatibility is part of the release gate |
 | `<0.1.0` | Any | Not supported |
@@ -405,9 +418,9 @@ request. The mandatory order is:
    write it down before editing the code.
 2. Update the contract models, enums, protocols or exceptions.
 3. Regenerate the canonical JSON Schema and the root compatibility mirror.
-4. Bump the static version in `automl-contracts/pyproject.toml` when the
+4. Bump the static version in `configurable-automl-contracts/pyproject.toml` when the
    public API or schema changes.
-5. Update `automl-contracts/CHANGELOG.md` with the change, its compatibility
+5. Update `configurable-automl-contracts/CHANGELOG.md` with the change, its compatibility
    class, the affected public API or schema and the migration instructions.
 6. Update the inclusion rules and the compatibility matrix in
    `API_REFERENCE.md` when a boundary, a decision or a public path changes.

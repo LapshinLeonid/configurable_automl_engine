@@ -1,4 +1,4 @@
-"""End-to-end consumer check for ``automl-contracts`` installed from a registry.
+"""End-to-end consumer check for ``configurable-automl-contracts`` installed from a registry.
 
 Run this script with the interpreter of a clean virtual environment, from a
 directory outside the repository. It proves that the published contract is
@@ -22,7 +22,7 @@ from typing import Any
 import automl_contracts
 import jsonschema  # type: ignore[import-untyped]
 
-DISTRIBUTION_NAME = "automl-contracts"
+DISTRIBUTION_NAME = "configurable-automl-contracts"
 PUBLIC_MODULES = (
     "config",
     "custom_metrics",

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_ROOT = REPO_ROOT / "automl-contracts"
+CONTRACT_ROOT = REPO_ROOT / "configurable-automl-contracts"
 CONTRACT_SRC = CONTRACT_ROOT / "src" / "automl_contracts"
 CONTRACT_PYPROJECT = CONTRACT_ROOT / "pyproject.toml"
 ENGINE_SRC = REPO_ROOT / "src" / "configurable_automl_engine"
@@ -9148,13 +9148,13 @@ def scan_engine_contract_usage(
     project = document.get("project", {})
     dependencies = _project_dependencies(project) if isinstance(project, dict) else []
     dependency_names = {_requirement_name(item) for item in dependencies}
-    if "automl-contracts" not in dependency_names:
+    if "configurable-automl-contracts" not in dependency_names:
         violations.append(
             Violation(
                 "engine-contract-dependency",
                 engine_pyproject,
                 1,
-                "the engine must declare automl-contracts as a runtime dependency",
+                "the engine must declare configurable-automl-contracts as a runtime dependency",
             )
         )
     imports_contract = False
@@ -9319,13 +9319,13 @@ def inspect_contract_wheel(
     sections = _metadata_sections(metadata)
     names_meta = sections.get("Name", [])
     versions = sections.get("Version", [])
-    if names_meta != ["automl-contracts"]:
+    if names_meta != ["configurable-automl-contracts"]:
         violations.append(
             Violation(
                 "artifact-metadata",
                 wheel,
                 1,
-                f"contract wheel name must be 'automl-contracts', found {names_meta!r}",
+                f"contract wheel name must be 'configurable-automl-contracts', found {names_meta!r}",
             )
         )
     if not versions or not SEMVER_RE.match(versions[0]):
@@ -9584,15 +9584,15 @@ def scan_ci_configuration(
                         "scripts/check_contract_boundaries.py": "static boundary check",
                         "scripts/verify_contract_distribution.py": "artifact verification",
                         "scripts/smoke_contract_install.py": "isolated smoke import",
-                        "python3.11 -m build automl-contracts": "contract build",
+                        "python3.11 -m build configurable-automl-contracts": "contract build",
                         "twine check": "twine metadata check",
                         "python3.11 -m venv": "isolated environment",
                         "pytest tests/contracts": "contract tests",
                         "mypy src": "contract mypy",
-                        "ruff check src/ automl-contracts/src/": "ruff for both packages",
+                        "ruff check src/ configurable-automl-contracts/src/": "ruff for both packages",
                         "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
                         "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
-                        "ruff format --check src/ automl-contracts/src/": (
+                        "ruff format --check src/ configurable-automl-contracts/src/": (
                             "ruff format check for both packages"
                         ),
                         "ruff format --check tools/contract_boundaries.py": (
@@ -9638,15 +9638,15 @@ def scan_ci_configuration(
                     "scripts/check_contract_boundaries.py": "static boundary check",
                     "scripts/verify_contract_distribution.py": "artifact verification",
                     "scripts/smoke_contract_install.py": "isolated smoke import",
-                    "python -m build automl-contracts": "contract build",
+                    "python -m build configurable-automl-contracts": "contract build",
                     "twine check": "twine metadata check",
                     "python -m venv": "isolated environment",
                     "python -m pytest tests/contracts": "contract tests",
                     "mypy src": "contract mypy",
-                    "ruff check src/ automl-contracts/src/": "ruff for both packages",
+                    "ruff check src/ configurable-automl-contracts/src/": "ruff for both packages",
                     "ruff check tools/contract_boundaries.py": "ruff for boundary tooling",
                     "mypy tools/contract_boundaries.py": "mypy for boundary tooling",
-                    "ruff format --check src/ automl-contracts/src/": (
+                    "ruff format --check src/ configurable-automl-contracts/src/": (
                         "ruff format check for both packages"
                     ),
                     "ruff format --check tools/contract_boundaries.py": (
@@ -9665,7 +9665,7 @@ def scan_ci_configuration(
 
 def run_static_checks(repo_root: Path = REPO_ROOT) -> list[Violation]:
     """Run every static guard against a repository checkout."""
-    contract_root = repo_root / "automl-contracts"
+    contract_root = repo_root / "configurable-automl-contracts"
     contract_src = contract_root / "src" / "automl_contracts"
     contract_pyproject = contract_root / "pyproject.toml"
     engine_src = repo_root / "src" / "configurable_automl_engine"

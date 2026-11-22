@@ -1,4 +1,4 @@
-"""Release helpers for the ``automl-contracts`` SourceCraft PyPI registry.
+"""Release helpers for the ``configurable-automl-contracts`` SourceCraft PyPI registry.
 
 The module keeps the release rules in one testable place: the ``contracts-v*``
 tag format, the version synchronization check, the registry endpoint and the
@@ -31,7 +31,7 @@ from urllib.parse import quote
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
 
-DISTRIBUTION_NAME = "automl-contracts"
+DISTRIBUTION_NAME = "configurable-automl-contracts"
 TAG_PREFIX = "contracts-v"
 TAG_REF_PREFIX = "refs/tags/"
 DEFAULT_ORGANIZATION = "ooo-ainod"
@@ -50,7 +50,8 @@ _SEMVER = re.compile(
 )
 _REGISTRY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ARTIFACT = re.compile(
-    r"^automl[_-]contracts-(?P<version>[^-]+)(?:-.+)?\.(?:whl|tar\.gz)$"
+    r"^configurable[_-]automl[_-]contracts-"
+    r"(?P<version>[^-]+)(?:-.+)?\.(?:whl|tar\.gz)$"
 )
 _AUTHENTICATED_URL = re.compile(r"(iam:)[^@\s]+@")
 
@@ -210,14 +211,14 @@ def verify_release_tag(tag: str, pyproject: Path) -> str:
 
     Args:
         tag: Tag name that triggered the publication.
-        pyproject: Path to ``automl-contracts/pyproject.toml``.
+        pyproject: Path to ``configurable-automl-contracts/pyproject.toml``.
 
     Returns:
         The distribution version that must be published.
 
     Raises:
         ReleaseError: The tag mask is wrong, the distribution is not
-            ``automl-contracts``, the static version is invalid, or the
+            ``configurable-automl-contracts``, the static version is invalid, or the
             versions differ.
     """
     name, version = read_distribution(pyproject)
@@ -300,7 +301,7 @@ def verify_release_ref(
     Args:
         ref: Full Git reference from the CI environment.
         tag: Short tag name reported by the CI environment.
-        pyproject: Path to ``automl-contracts/pyproject.toml``.
+        pyproject: Path to ``configurable-automl-contracts/pyproject.toml``.
         head_tags: Tags pointing at ``HEAD``; discovered with Git when omitted.
 
     Returns:
@@ -438,12 +439,12 @@ def artifact_version(path: Path) -> str:
         The version component of the file name.
 
     Raises:
-        ReleaseError: The file is not an ``automl-contracts`` artifact.
+        ReleaseError: The file is not an ``configurable-automl-contracts`` artifact.
     """
     match = _ARTIFACT.fullmatch(path.name)
     if match is None:
         raise ReleaseError(
-            f"{path.name} is not an automl-contracts wheel or source distribution"
+            f"{path.name} is not a configurable-automl-contracts wheel or source distribution"
         )
     return match.group("version")
 
@@ -873,7 +874,9 @@ def registry_has_version(
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         reason = getattr(error, "reason", error)
         raise ReleaseError(f"cannot reach the registry index: {reason}") from error
-    pattern = re.compile(rf"automl_contracts-{re.escape(version)}(?:[-.]|\.tar\.gz)")
+    pattern = re.compile(
+        rf"configurable_automl_contracts-{re.escape(version)}(?:[-.]|\.tar\.gz)"
+    )
     return pattern.search(body) is not None
 
 
@@ -1016,7 +1019,9 @@ def install_artifact_from_index(
         ) from error
     artifacts = parse_index_artifacts(body, project_url)
     artifact = select_artifact(artifacts, version)
-    with tempfile.TemporaryDirectory(prefix="automl-contracts-install-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="configurable-automl-contracts-install-"
+    ) as directory:
         path = download_artifact(
             settings,
             artifact,
@@ -1173,7 +1178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     check_tag.add_argument(
         "--pyproject",
         type=Path,
-        default=Path("automl-contracts/pyproject.toml"),
+        default=Path("configurable-automl-contracts/pyproject.toml"),
     )
 
     endpoints = subparsers.add_parser(

@@ -1,4 +1,4 @@
-"""Smoke-check the engine installed against a built ``automl-contracts`` wheel.
+"""Smoke-check the engine installed against a built ``configurable-automl-contracts`` wheel.
 
 Run this script from a directory outside the repository. It verifies that the
 engine resolves the contract as a distribution dependency and that every
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 DISTRIBUTION_NAME = "configurable-automl-engine"
-CONTRACT_DISTRIBUTION = "automl-contracts"
+CONTRACT_DISTRIBUTION = "configurable-automl-contracts"
 IDENTITY_NAMES = ("AlgorithmRun", "Config", "CustomMetricSpec", "ExperimentResult")
 IDENTITY_ERRORS = ("InvalidPredictionError", "TrainingError")
 

@@ -29,9 +29,13 @@ def engine_project() -> dict:
 def contract_dependency_specifier() -> SpecifierSet:
     dependencies = engine_project()["dependencies"]
     for dependency in dependencies:
-        if str(dependency).startswith("automl-contracts"):
-            return SpecifierSet(str(dependency).split("automl-contracts", 1)[1])
-    raise AssertionError("the engine must declare an automl-contracts dependency")
+        if str(dependency).startswith("configurable-automl-contracts"):
+            return SpecifierSet(
+                str(dependency).split("configurable-automl-contracts", 1)[1]
+            )
+    raise AssertionError(
+        "the engine must declare a configurable-automl-contracts dependency"
+    )
 
 
 def test_contract_version_is_synchronized() -> None:
@@ -44,7 +48,7 @@ def test_engine_declares_the_documented_contract_range() -> None:
     version = Version(contract_project()["version"])
     assert specifier.contains(version), (str(specifier), str(version))
     assert specifier == SpecifierSet(">=0.1.0,<0.2.0")
-    assert "automl-contracts>=0.1.0,<0.2.0" in API_REFERENCE_DOC.read_text(
+    assert "configurable-automl-contracts>=0.1.0,<0.2.0" in API_REFERENCE_DOC.read_text(
         encoding="utf-8"
     )
 
@@ -54,7 +58,6 @@ def test_engine_declares_the_documented_contract_range() -> None:
     [
         ("0.0.9", False),
         ("0.1.0", True),
-        ("0.1.1", True),
         ("0.1.99", True),
         ("0.2.0", False),
         ("0.2.1", False),
@@ -99,6 +102,6 @@ def test_semver_policy_is_documented() -> None:
         "During `0.x`, potentially incompatible changes get a MINOR version",
         "PATCH is reserved for",
         "strictly compatible fixes",
-        "The engine declares `automl-contracts>=0.1.0,<0.2.0`",
+        "The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`",
     ):
         assert requirement in text

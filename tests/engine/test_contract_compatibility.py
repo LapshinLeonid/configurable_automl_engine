@@ -25,7 +25,7 @@ from tests.contracts._contract_snapshot import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENGINE_SRC = REPO_ROOT / "src" / "configurable_automl_engine"
-CONTRACT_SRC = REPO_ROOT / "automl-contracts" / "src"
+CONTRACT_SRC = REPO_ROOT / "configurable-automl-contracts" / "src"
 IMPORT_MATRIX = Path(__file__).resolve().parent / "golden" / "import_matrix.json"
 
 
@@ -412,7 +412,7 @@ def test_schema_generator_writes_the_mirror_to_the_calling_directory(
     """The compatibility generator keeps the historical cwd-relative CLI."""
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO_ROOT / "automl-contracts" / "src"), env.get("PYTHONPATH", "")]
+        [str(REPO_ROOT / "configurable-automl-contracts" / "src"), env.get("PYTHONPATH", "")]
     )
     subprocess.run(
         [sys.executable, str(REPO_ROOT / "schema_generator.py")],
@@ -424,7 +424,7 @@ def test_schema_generator_writes_the_mirror_to_the_calling_directory(
     generated = (tmp_path / "config.schema.json").read_bytes()
     canonical = (
         REPO_ROOT
-        / "automl-contracts"
+        / "configurable-automl-contracts"
         / "src"
         / "automl_contracts"
         / "schemas"

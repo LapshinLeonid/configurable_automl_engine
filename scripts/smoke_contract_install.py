@@ -45,8 +45,8 @@ def main() -> int:
         if not package.joinpath(relative).is_file():
             raise SystemExit(f"installed contract is missing {relative}")
 
-    meta = metadata("automl-contracts")
-    requirements = requires("automl-contracts") or []
+    meta = metadata("configurable-automl-contracts")
+    requirements = requires("configurable-automl-contracts") or []
     allowed = {"pydantic", "pydantic-core"}
     for requirement in requirements:
         name = requirement.split(";", 1)[0]

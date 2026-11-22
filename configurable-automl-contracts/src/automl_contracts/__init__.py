@@ -11,7 +11,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("automl-contracts")
+    __version__ = version("configurable-automl-contracts")
 except PackageNotFoundError:  # pragma: no cover - source tree without install
     __version__ = "0.0.0"
 

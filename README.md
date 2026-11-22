@@ -24,19 +24,19 @@ The repository ships two independently versioned Python distributions:
 * **`configurable-automl-engine`** — the training engine described in this
   README: configuration-driven HPO, model selection, honest evaluation and
   artifact persistence.
-* **`automl-contracts`** — the public data contract: configuration models,
+* **`configurable-automl-contracts`** — the public data contract: configuration models,
   result DTOs, enumerations, stable error codes, `Protocol` interfaces and the
   JSON Schema. It installs without the engine and without the machine-learning
   stack.
 
 Both distributions are released to public PyPI. A contract release is
 published before the engine release that depends on it. The engine declares
-`automl-contracts>=0.1.0,<0.2.0`, so installing the engine also installs a
+`configurable-automl-contracts>=0.1.0,<0.2.0`, so installing the engine also installs a
 compatible contract. Existing imports from `configurable_automl_engine` keep
 working through re-exports, but new code should import contract symbols from
 `automl_contracts`. See the
-[contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/README.md),
-the [contracts package API section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#contracts-package-automl-contracts),
+[contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/configurable-automl-contracts/README.md),
+the [contracts package API section](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#contracts-package-configurable-automl-contracts),
 the [migration table](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#migration-from-engine-imports)
 and the [versioning policy](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/API_REFERENCE.md#versioning-and-compatibility)
 for the inclusion rules, versioning policy and contract-change process.
@@ -148,7 +148,7 @@ The required dependencies (installed automatically):
 * Pydantic (>=2.12.5)
 * PyYAML (>=6.0.3)
 * Joblib (>=1.5.3)
-* `automl-contracts` (>=0.1.0,<0.2.0) — the public data contract, installed
+* `configurable-automl-contracts` (>=0.1.0,<0.2.0) — the public data contract, installed
   automatically from PyPI
 
 ## Optional Dependencies
@@ -165,7 +165,7 @@ These distributions will not be installed automatically. You can install them us
 
 # Installation
 
-`configurable-automl-engine` and `automl-contracts` are published on public
+`configurable-automl-engine` and `configurable-automl-contracts` are published on public
 PyPI. The engine declares the compatible contract range, so one command
 installs both:
 
@@ -177,10 +177,10 @@ Run `python -m pip check` after the installation to confirm that all
 requirements resolve. To use the contract without the engine:
 
 ```bash
-python -m pip install automl-contracts
+python -m pip install configurable-automl-contracts
 ```
 
-See the [contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/automl-contracts/README.md)
+See the [contract package guide](https://github.com/LapshinLeonid/configurable_automl_engine/blob/main/configurable-automl-contracts/README.md)
 for the package contents, the JSON Schema and the public import paths.
 
 With the optional XGBoost algorithm:
@@ -247,19 +247,19 @@ If you are considering larger contributions to the source code, please contact t
 
 Set up an editable installation with the development dependencies (the `dev`
 extra combines `all` and `test`, including `import-linter`). The engine depends
-on the local `automl-contracts` distribution, so install the contract first:
+on the local `configurable-automl-contracts` distribution, so install the contract first:
 
-    python -m pip install -e ./automl-contracts
+    python -m pip install -e ./configurable-automl-contracts
     python -m pip install -e "configurable-automl-engine[dev]"
 
 Run the mandatory checks the same way CI does:
 
 ```bash
-ruff format src/ automl-contracts/src/
-ruff check src/ automl-contracts/src/
-ruff format --check src/ automl-contracts/src/
+ruff format src/ configurable-automl-contracts/src/
+ruff check src/ configurable-automl-contracts/src/
+ruff format --check src/ configurable-automl-contracts/src/
 mypy src
-(cd automl-contracts && mypy src && lint-imports)
+(cd configurable-automl-contracts && mypy src && lint-imports)
 lint-imports
 pytest --cov=src
 ```

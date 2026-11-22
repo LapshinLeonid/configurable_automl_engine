@@ -11,7 +11,7 @@ from pathlib import Path
 
 import automl_contracts
 
-CONTRACT_ROOT = Path(__file__).resolve().parents[2] / "automl-contracts"
+CONTRACT_ROOT = Path(__file__).resolve().parents[2] / "configurable-automl-contracts"
 CONTRACT_SRC = CONTRACT_ROOT / "src" / "automl_contracts"
 
 FORBIDDEN_TOP_LEVEL = {
@@ -114,9 +114,9 @@ def test_py_typed_and_schema_are_package_data() -> None:
 def test_distribution_metadata() -> None:
     from importlib.metadata import metadata, requires
 
-    meta = metadata("automl-contracts")
-    assert meta["Name"] == "automl-contracts"
-    requirements = "\n".join(requires("automl-contracts") or [])
+    meta = metadata("configurable-automl-contracts")
+    assert meta["Name"] == "configurable-automl-contracts"
+    requirements = "\n".join(requires("configurable-automl-contracts") or [])
     for forbidden in ("scikit-learn", "pandas", "numpy", "optuna"):
         assert forbidden not in requirements
     assert "pydantic" in requirements

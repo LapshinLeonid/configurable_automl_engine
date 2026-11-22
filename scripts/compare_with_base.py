@@ -824,7 +824,7 @@ def _run_version(
 ) -> None:
     env = dict(os.environ)
     search_path = [str(src)]
-    contract_src = src.parent / "automl-contracts" / "src"
+    contract_src = src.parent / "configurable-automl-contracts" / "src"
     if contract_src.is_dir():
         search_path.insert(0, str(contract_src))
     env["PYTHONPATH"] = os.pathsep.join([*search_path, env.get("PYTHONPATH", "")])
@@ -867,7 +867,7 @@ def _generate_schema(checkout: Path, src: Path, workdir: Path) -> bytes:
     workdir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     search_path = [str(src)]
-    contract_src = src.parent / "automl-contracts" / "src"
+    contract_src = src.parent / "configurable-automl-contracts" / "src"
     if contract_src.is_dir():
         search_path.insert(0, str(contract_src))
     env["PYTHONPATH"] = os.pathsep.join(search_path)

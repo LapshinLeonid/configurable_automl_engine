@@ -59,7 +59,7 @@ def engine_smoke() -> ModuleType:
 def write_pyproject(tmp_path: Path, version: str = "0.1.0") -> Path:
     path = tmp_path / "pyproject.toml"
     path.write_text(
-        f'[project]\nname = "automl-contracts"\nversion = "{version}"\n',
+        f'[project]\nname = "configurable-automl-contracts"\nversion = "{version}"\n',
         encoding="utf-8",
     )
     return path
@@ -67,7 +67,10 @@ def write_pyproject(tmp_path: Path, version: str = "0.1.0") -> Path:
 
 def test_pyproject_version_is_read(release: ModuleType, tmp_path: Path) -> None:
     pyproject = write_pyproject(tmp_path, "1.2.3")
-    assert release.read_distribution(pyproject) == ("automl-contracts", "1.2.3")
+    assert release.read_distribution(pyproject) == (
+        "configurable-automl-contracts",
+        "1.2.3",
+    )
     assert release.read_distribution_version(pyproject) == "1.2.3"
 
 
@@ -75,7 +78,9 @@ def test_pyproject_without_version_is_rejected(
     release: ModuleType, tmp_path: Path
 ) -> None:
     path = tmp_path / "pyproject.toml"
-    path.write_text('[project]\nname = "automl-contracts"\n', encoding="utf-8")
+    path.write_text(
+        '[project]\nname = "configurable-automl-contracts"\n', encoding="utf-8"
+    )
     with pytest.raises(release.ReleaseError, match="static project name and version"):
         release.read_distribution(path)
 
@@ -223,8 +228,8 @@ def test_redaction_removes_tokens_and_authenticated_urls(release: ModuleType) ->
 
 
 def make_artifacts(tmp_path: Path, version: str = "0.1.0") -> list[Path]:
-    wheel = tmp_path / f"automl_contracts-{version}-py3-none-any.whl"
-    sdist = tmp_path / f"automl_contracts-{version}.tar.gz"
+    wheel = tmp_path / f"configurable_automl_contracts-{version}-py3-none-any.whl"
+    sdist = tmp_path / f"configurable_automl_contracts-{version}.tar.gz"
     wheel.write_bytes(b"wheel")
     sdist.write_bytes(b"sdist")
     return [wheel, sdist]
@@ -239,16 +244,29 @@ def test_artifacts_must_match_the_release_version(
         release.validate_artifacts(artifacts, "0.2.0")
 
 
+def test_artifact_names_use_the_new_distribution(
+    release: ModuleType, tmp_path: Path
+) -> None:
+    artifacts = make_artifacts(tmp_path)
+    assert [release.artifact_version(path) for path in artifacts] == [
+        "0.1.0",
+        "0.1.0",
+    ]
+    old = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    with pytest.raises(release.ReleaseError, match="not a configurable"):
+        release.artifact_version(old)
+
+
 def test_publication_requires_a_wheel_and_an_sdist(
     release: ModuleType, tmp_path: Path
 ) -> None:
-    wheel = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     with pytest.raises(release.ReleaseError, match="both wheel and sdist"):
         release.validate_artifacts([wheel], "0.1.0")
     with pytest.raises(release.ReleaseError, match="does not exist"):
         release.validate_artifacts(
-            [wheel, tmp_path / "automl_contracts-0.1.0.tar.gz"], "0.1.0"
+            [wheel, tmp_path / "configurable_automl_contracts-0.1.0.tar.gz"], "0.1.0"
         )
 
 
@@ -258,11 +276,39 @@ def test_publication_rejects_unexpected_artifacts(
     artifacts = make_artifacts(tmp_path)
     foreign = tmp_path / "other-0.1.0.tar.gz"
     foreign.write_bytes(b"other")
-    with pytest.raises(release.ReleaseError, match="not an automl-contracts"):
+    with pytest.raises(
+        release.ReleaseError, match="not a configurable-automl-contracts"
+    ):
         release.validate_artifacts([artifacts[0], foreign], "0.1.0")
 
 
 def test_registry_has_version_reads_the_simple_index(
+    release: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = release.registry_settings(
+        {"SOURCECRAFT_PYPI_REGISTRY_ID": "registry123", "PYPI_REGISTRY_PAT": "s3cr3t"}
+    )
+
+    class Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'<a href="configurable_automl_contracts-0.1.0-py3-none-any.whl">'
+
+    monkeypatch.setattr(
+        release,
+        "_open_registry_url",
+        lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
+    )
+    assert release.registry_has_version(settings, "0.1.0") is True
+    assert release.registry_has_version(settings, "0.2.0") is False
+
+
+def test_registry_has_version_ignores_the_old_distribution(
     release: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = release.registry_settings(
@@ -284,8 +330,7 @@ def test_registry_has_version_reads_the_simple_index(
         "_open_registry_url",
         lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
     )
-    assert release.registry_has_version(settings, "0.1.0") is True
-    assert release.registry_has_version(settings, "0.2.0") is False
+    assert release.registry_has_version(settings, "0.1.0") is False
 
 
 def test_publish_rejects_a_version_before_upload(
@@ -403,7 +448,7 @@ def test_install_uses_the_authenticated_index_without_exposing_the_token(
     assert install_env is not None
     assert "s3cr3t-value" not in " ".join(install_command)
     assert "--no-deps" in install_command
-    assert "automl-contracts==0.1.0" in install_command
+    assert "configurable-automl-contracts==0.1.0" in install_command
     assert "iam:s3cr3t-value@" in install_env["PIP_INDEX_URL"]
     assert calls[2][0][-2:] == ["pip", "check"]
 
@@ -434,22 +479,20 @@ def test_install_reports_a_missing_version_without_the_token(
 
 
 SIMPLE_INDEX_PAGE = (
-    "<html><body><h1>Links for automl-contracts</h1>"
-    '<a href="./0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl#sha256=aa11" '
-    'data-core-metadata="sha256=bb22">automl_contracts-0.1.0-py3-none-any.whl</a><br>'
-    '<a href="./0.0.9/-/automl_contracts-0.0.9-py3-none-any.whl#sha256=cc33">'
-    "automl_contracts-0.0.9-py3-none-any.whl</a><br>"
-    '<a href="./0.1.0/-/automl_contracts-0.1.0.tar.gz#sha256=dd44">'
-    "automl_contracts-0.1.0.tar.gz</a><br></body></html>"
+    "<html><body><h1>Links for configurable-automl-contracts</h1>"
+    '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-py3-none-any.whl#sha256=aa11" '
+    'data-core-metadata="sha256=bb22">configurable_automl_contracts-0.1.0-py3-none-any.whl</a><br>'
+    '<a href="./0.0.9/-/configurable_automl_contracts-0.0.9-py3-none-any.whl#sha256=cc33">'
+    "configurable_automl_contracts-0.0.9-py3-none-any.whl</a><br>"
+    '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0.tar.gz#sha256=dd44">'
+    "configurable_automl_contracts-0.1.0.tar.gz</a><br></body></html>"
 )
-SIMPLE_INDEX_BASE = (
-    "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/automl-contracts/"
-)
+SIMPLE_INDEX_BASE = "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/configurable-automl-contracts/"
 MISSING_METADATA_OUTPUT = (
-    "Collecting automl-contracts==0.1.0\n"
+    "Collecting configurable-automl-contracts==0.1.0\n"
     "  ERROR: HTTP error 404 while getting "
     "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/"
-    "automl-contracts/0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl.metadata\n"
+    "configurable-automl-contracts/0.1.0/-/configurable_automl_contracts-0.1.0-py3-none-any.whl.metadata\n"
     "ERROR: 404 Client Error: Not Found"
 )
 
@@ -458,14 +501,14 @@ def test_parse_index_artifacts_extracts_links_and_hashes(release: ModuleType) ->
     artifacts = release.parse_index_artifacts(SIMPLE_INDEX_PAGE, SIMPLE_INDEX_BASE)
 
     assert [artifact.filename for artifact in artifacts] == [
-        "automl_contracts-0.1.0-py3-none-any.whl",
-        "automl_contracts-0.0.9-py3-none-any.whl",
-        "automl_contracts-0.1.0.tar.gz",
+        "configurable_automl_contracts-0.1.0-py3-none-any.whl",
+        "configurable_automl_contracts-0.0.9-py3-none-any.whl",
+        "configurable_automl_contracts-0.1.0.tar.gz",
     ]
     wheel = artifacts[0]
     assert wheel.url == (
         "https://pkg.sourcecraft.tech/pypi/ooo-ainod/registry123/simple/"
-        "automl-contracts/0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl"
+        "configurable-automl-contracts/0.1.0/-/configurable_automl_contracts-0.1.0-py3-none-any.whl"
     )
     assert wheel.sha256 == "aa11"
 
@@ -476,7 +519,7 @@ def test_select_artifact_prefers_the_wheel_of_the_requested_version(
     artifacts = release.parse_index_artifacts(SIMPLE_INDEX_PAGE, SIMPLE_INDEX_BASE)
 
     selected = release.select_artifact(artifacts, "0.1.0")
-    assert selected.filename == "automl_contracts-0.1.0-py3-none-any.whl"
+    assert selected.filename == "configurable_automl_contracts-0.1.0-py3-none-any.whl"
 
     sdist_only = tuple(
         artifact for artifact in artifacts if artifact.filename.endswith(".tar.gz")
@@ -490,7 +533,7 @@ def test_parse_index_artifacts_rejects_encoded_path_traversal(
     release: ModuleType,
 ) -> None:
     page = (
-        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-'
         '%2e%2e%2f%2e%2e%2f%2e%2e%2ftmp%2fpwned.whl#sha256=aa11">traversal</a>'
     )
     assert release.parse_index_artifacts(page, SIMPLE_INDEX_BASE) == ()
@@ -500,22 +543,22 @@ def test_select_artifact_prefers_a_universal_wheel_among_several(
     release: ModuleType,
 ) -> None:
     page = (
-        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-'
         'cp311-cp311-manylinux_2_17_x86_64.whl#sha256=aa11">platform</a>'
-        '<a href="./0.1.0/-/automl_contracts-0.1.0-py3-none-any.whl#sha256=bb22">'
+        '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-py3-none-any.whl#sha256=bb22">'
         "universal</a>"
     )
     artifacts = release.parse_index_artifacts(page, SIMPLE_INDEX_BASE)
 
     selected = release.select_artifact(artifacts, "0.1.0")
-    assert selected.filename == "automl_contracts-0.1.0-py3-none-any.whl"
+    assert selected.filename == "configurable_automl_contracts-0.1.0-py3-none-any.whl"
 
 
 def test_select_artifact_rejects_ambiguous_wheels(release: ModuleType) -> None:
     page = (
-        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-'
         'cp311-cp311-manylinux_2_17_x86_64.whl#sha256=aa11">cp311</a>'
-        '<a href="./0.1.0/-/automl_contracts-0.1.0-'
+        '<a href="./0.1.0/-/configurable_automl_contracts-0.1.0-'
         'cp312-cp312-manylinux_2_17_x86_64.whl#sha256=bb22">cp312</a>'
     )
     artifacts = release.parse_index_artifacts(page, SIMPLE_INDEX_BASE)
@@ -550,8 +593,8 @@ def test_download_artifact_verifies_the_advertised_hash(
         lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
     )
     matching = release.IndexArtifact(
-        filename="automl_contracts-0.1.0-py3-none-any.whl",
-        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        filename="configurable_automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/configurable_automl_contracts-0.1.0-py3-none-any.whl",
         sha256="239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5",
     )
     destination = release.download_artifact(
@@ -592,8 +635,8 @@ def test_download_artifact_wraps_network_errors(
 
     monkeypatch.setattr(release, "_open_registry_url", raise_timeout)
     artifact = release.IndexArtifact(
-        filename="automl_contracts-0.1.0-py3-none-any.whl",
-        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        filename="configurable_automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/configurable_automl_contracts-0.1.0-py3-none-any.whl",
     )
     with pytest.raises(
         release.ReleaseError, match="cannot reach the registry artifact"
@@ -633,8 +676,8 @@ def test_download_artifact_rejects_a_missing_hash(
         lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
     )
     artifact = release.IndexArtifact(
-        filename="automl_contracts-0.1.0-py3-none-any.whl",
-        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        filename="configurable_automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/configurable_automl_contracts-0.1.0-py3-none-any.whl",
         sha256=None,
     )
     destination = tmp_path / artifact.filename
@@ -677,8 +720,8 @@ def test_download_artifact_wraps_truncated_responses(
         lambda settings_arg, url, *, timeout, auth_origin=None: Response(),
     )
     artifact = release.IndexArtifact(
-        filename="automl_contracts-0.1.0-py3-none-any.whl",
-        url="https://pkg.example/automl_contracts-0.1.0-py3-none-any.whl",
+        filename="configurable_automl_contracts-0.1.0-py3-none-any.whl",
+        url="https://pkg.example/configurable_automl_contracts-0.1.0-py3-none-any.whl",
         sha256="0" * 64,
     )
     with pytest.raises(
@@ -698,7 +741,7 @@ def test_redirect_handler_does_not_forward_credentials_to_another_origin(
 ) -> None:
     handler = release._CredentialSafeRedirectHandler()
     request = release.urllib.request.Request(
-        "https://pkg.sourcecraft.tech/pypi/o/r/simple/automl_contracts-0.1.0.whl",
+        "https://pkg.sourcecraft.tech/pypi/o/r/simple/configurable_automl_contracts-0.1.0.whl",
         headers={"Authorization": "Basic s3cr3t-value"},
     )
 
@@ -708,7 +751,7 @@ def test_redirect_handler_does_not_forward_credentials_to_another_origin(
         307,
         "Temporary Redirect",
         None,
-        "https://storage.yandexcloud.net/artifact-registry/automl_contracts-0.1.0.whl",
+        "https://storage.yandexcloud.net/artifact-registry/configurable_automl_contracts-0.1.0.whl",
     )
     assert redirected is not None
     assert redirected.get_header("Authorization") is None
@@ -720,7 +763,7 @@ def test_redirect_handler_does_not_forward_credentials_to_another_origin(
         307,
         "Temporary Redirect",
         None,
-        "https://pkg.sourcecraft.tech/pypi/o/r/simple/automl_contracts-0.1.0.whl",
+        "https://pkg.sourcecraft.tech/pypi/o/r/simple/configurable_automl_contracts-0.1.0.whl",
     )
     assert same_origin is not None
     assert same_origin.get_header("Authorization") == "Basic s3cr3t-value"
@@ -750,9 +793,7 @@ def test_download_artifact_does_not_send_the_pat_to_a_redirect_host(
             return None
 
     target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
-    target_url = (
-        f"http://127.0.0.1:{target.server_port}/automl_contracts-0.1.0-py3-none-any.whl"
-    )
+    target_url = f"http://127.0.0.1:{target.server_port}/configurable_automl_contracts-0.1.0-py3-none-any.whl"
 
     class RedirectHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -766,7 +807,7 @@ def test_download_artifact_does_not_send_the_pat_to_a_redirect_host(
     redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
     redirect_url = (
         f"http://127.0.0.1:{redirect.server_port}/"
-        "automl_contracts-0.1.0-py3-none-any.whl"
+        "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     )
     servers = (redirect, target)
     threads = [
@@ -776,7 +817,7 @@ def test_download_artifact_does_not_send_the_pat_to_a_redirect_host(
         thread.start()
     try:
         artifact = release.IndexArtifact(
-            filename="automl_contracts-0.1.0-py3-none-any.whl",
+            filename="configurable_automl_contracts-0.1.0-py3-none-any.whl",
             url=redirect_url,
             sha256=hashlib.sha256(payload).hexdigest(),
         )
@@ -824,11 +865,11 @@ def test_artifact_index_install_does_not_authenticate_external_links(
     digest = hashlib.sha256(payload).hexdigest()
     artifact_url = (
         f"http://127.0.0.1:{artifact_server.server_port}/"
-        f"automl_contracts-0.1.0-py3-none-any.whl#sha256={digest}"
+        f"configurable_automl_contracts-0.1.0-py3-none-any.whl#sha256={digest}"
     )
     page = (
         "<html><body>"
-        f'<a href="{artifact_url}">automl_contracts-0.1.0-py3-none-any.whl</a>'
+        f'<a href="{artifact_url}">configurable_automl_contracts-0.1.0-py3-none-any.whl</a>'
         "</body></html>"
     ).encode()
 
@@ -874,7 +915,9 @@ def test_artifact_index_install_does_not_authenticate_external_links(
             thread.join()
 
     assert received["authorization"] is None
-    assert commands[0][-1].endswith("automl_contracts-0.1.0-py3-none-any.whl")
+    assert commands[0][-1].endswith(
+        "configurable_automl_contracts-0.1.0-py3-none-any.whl"
+    )
 
 
 def test_artifact_index_install_wraps_index_http_errors(
@@ -933,7 +976,7 @@ def test_install_falls_back_to_the_index_artifact_when_metadata_is_missing(
         command: list[str], *, env: dict[str, str] | None, timeout: int
     ) -> subprocess.CompletedProcess[str]:
         commands.append(command)
-        if "automl-contracts==0.1.0" in command:
+        if "configurable-automl-contracts==0.1.0" in command:
             return subprocess.CompletedProcess(command, 1, "", MISSING_METADATA_OUTPUT)
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
@@ -976,7 +1019,7 @@ def test_install_reports_both_failures_when_the_fallback_fails(
     def fake_run(
         command: list[str], *, env: dict[str, str] | None, timeout: int
     ) -> subprocess.CompletedProcess[str]:
-        if "automl-contracts==0.9.0" in command:
+        if "configurable-automl-contracts==0.9.0" in command:
             return subprocess.CompletedProcess(
                 command, 1, "", MISSING_METADATA_OUTPUT.replace("0.1.0", "0.9.0")
             )
@@ -995,7 +1038,7 @@ def test_install_reports_both_failures_when_the_fallback_fails(
         release.install_from_registry(settings, "0.9.0", python="python")
 
     message = str(error.value)
-    assert "automl-contracts==0.9.0" in message
+    assert "configurable-automl-contracts==0.9.0" in message
     assert "the registry did not serve the wheel" in message
     assert "s3cr3t-value" not in message
 
@@ -1013,7 +1056,7 @@ def test_install_wraps_os_errors_from_the_fallback(
     def fake_run(
         command: list[str], *, env: dict[str, str] | None, timeout: int
     ) -> subprocess.CompletedProcess[str]:
-        if "automl-contracts==0.1.0" in command:
+        if "configurable-automl-contracts==0.1.0" in command:
             return subprocess.CompletedProcess(command, 1, "", MISSING_METADATA_OUTPUT)
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
@@ -1047,7 +1090,7 @@ def test_install_does_not_fall_back_for_unrelated_failures(
     def fake_run(
         command: list[str], *, env: dict[str, str] | None, timeout: int
     ) -> subprocess.CompletedProcess[str]:
-        if "automl-contracts==0.1.0" in command:
+        if "configurable-automl-contracts==0.1.0" in command:
             return subprocess.CompletedProcess(command, 1, "", "504 Gateway Timeout")
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
@@ -1107,7 +1150,7 @@ def test_artifact_index_install_downloads_and_installs_the_wheel(
         "--no-deps",
         "--no-cache-dir",
     ]
-    assert command[-1].endswith("automl_contracts-0.1.0-py3-none-any.whl")
+    assert command[-1].endswith("configurable_automl_contracts-0.1.0-py3-none-any.whl")
     assert "s3cr3t-value" not in " ".join(command)
 
 
@@ -1172,7 +1215,7 @@ def test_consumer_requires_the_engine_to_be_absent(consumer: ModuleType) -> None
 def test_consumer_rejects_a_version_mismatch(consumer: ModuleType) -> None:
     current = consumer.automl_contracts.__version__
     report = consumer.check_metadata(current)
-    assert report["name"] == "automl-contracts"
+    assert report["name"] == "configurable-automl-contracts"
     assert report["version"] == current
     with pytest.raises(consumer.ConsumerError, match="does not match"):
         consumer.check_metadata("9.9.9")
@@ -1372,11 +1415,11 @@ def test_tags_pointing_at_head_reads_git(
     ) -> subprocess.CompletedProcess[str]:
         captured["command"] = command
         return subprocess.CompletedProcess(
-            command, 0, "contracts-v0.1.0\ncontracts-v0.1.1\n", ""
+            command, 0, "contracts-v0.1.0\ncontracts-v0.2.0\n", ""
         )
 
     monkeypatch.setattr(release, "_run", fake_run)
-    assert release.tags_pointing_at_head() == ["contracts-v0.1.0", "contracts-v0.1.1"]
+    assert release.tags_pointing_at_head() == ["contracts-v0.1.0", "contracts-v0.2.0"]
     assert captured["command"][:3] == ["git", "tag", "--points-at"]
 
 

@@ -16,7 +16,7 @@ setting has a sensible default.
    * [`general`](#general-section) · [Pipeline steps (`phases`)](#pipeline-steps-phases) · [Sanity Gate](#sanity-gate-robust-winner-selection) · [`algorithms`](#algorithms-section) · [`oversampling`](#oversampling-section)
    * Advanced: [early stopping](#early-stopping-pruning) · [additional metrics](#additional-metrics-additional_metrics) · [custom metrics](#custom-metrics-custom_metrics) · [feature selection](#feature-selection-feature_selection) · [complexity guard](#complexity-guard-configuration-complexity_guard) · [preprocessing presets](#adaptive-feature-preprocessing-preprocessing-presets) · [categorical encoding](#categorical-encoding)
 5. [Training results](#training-results) — what `train_best_model` returns.
-6. [Contracts package (`automl-contracts`)](#contracts-package-automl-contracts) — the standalone public contract, its install, JSON Schema and import migration.
+6. [Contracts package (`configurable-automl-contracts`)](#contracts-package-configurable-automl-contracts) — the standalone public contract, its install, JSON Schema and import migration.
 7. [Python API](#python-api) — functions and classes.
 8. [Migrating older configs](#migrating-older-configs).
 
@@ -1417,9 +1417,9 @@ replayed. Storing the predictions costs `n_trials × n_rows` values; when the
 planned total (sum of `n_trials` of the search steps × enabled algorithms ×
 rows) exceeds 4,000,000, the estimate is skipped with a WARNING.
 
-# Contracts package (`automl-contracts`)
+# Contracts package (`configurable-automl-contracts`)
 
-The public data contract is a separate distribution, `automl-contracts`, with
+The public data contract is a separate distribution, `configurable-automl-contracts`, with
 the importable module `automl_contracts`. It contains the configuration models,
 result DTOs, enumerations, value sets, stable error codes, public exceptions,
 constants, structural `Protocol` interfaces and the JSON Schema. It depends only
@@ -1430,7 +1430,7 @@ The engine keeps its public import paths as re-exports of the same objects, so
 existing code continues to work. New code should import contract symbols from
 `automl_contracts`; full consumer documentation, installation from public
 PyPI, versioning rules and the contract-change process are in the
-[contract package guide](automl-contracts/README.md).
+[contract package guide](configurable-automl-contracts/README.md).
 
 ## What belongs to the contract
 
@@ -1528,25 +1528,30 @@ are internal modules. `ScalingType` is a deprecated alias in
 
 ## Installing the contract
 
-`automl-contracts` is published on public PyPI. The contract and its runtime
+`configurable-automl-contracts` is published on public PyPI. The contract and its runtime
 dependencies install in one step:
 
 ```bash
-python -m pip install automl-contracts
+python -m pip install configurable-automl-contracts
 ```
 
-The engine declares `automl-contracts>=0.1.0,<0.2.0`, so
+The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`, so
 `pip install configurable-automl-engine` installs a compatible contract
 automatically. A clean environment needs no credentials, private index or
 `--no-deps` workaround. Run `python -m pip check` after installation to confirm
 that the requirements resolve.
 
-The project publishes and owns the `automl-contracts` name on PyPI. Prefer a
+The distribution was previously published as `automl-contracts`. Replace that
+requirement with `configurable-automl-contracts` in pins, constraints and lock
+files. The import package remains `automl_contracts`, so application imports do
+not change.
+
+The project publishes and owns the `configurable-automl-contracts` name on PyPI. Prefer a
 single trusted index. If an additional index is unavoidable, pip gives it no
 priority, so a same-named package can win the resolution: mirror the PyPI
 artifacts with their hashes and pin exact versions in requirements or
 constraints. See
-[Index configuration and dependency-confusion risk](automl-contracts/README.md#index-configuration-and-dependency-confusion-risk).
+[Index configuration and dependency-confusion risk](configurable-automl-contracts/README.md#index-configuration-and-dependency-confusion-risk).
 
 ## Validating a configuration without the engine
 
@@ -1633,7 +1638,7 @@ generated from the contract models and must not be edited by hand. After a
 model change, regenerate the canonical file and the root compatibility mirror:
 
 ```bash
-python automl-contracts/scripts/generate_schema.py
+python configurable-automl-contracts/scripts/generate_schema.py
 python schema_generator.py
 ```
 
@@ -1649,7 +1654,7 @@ All aliases are identical objects (`is`), not duplicate definitions. The
 complete migration matrix, including the `training_engine.config.*` shims and
 the engine-only symbols, is in the next section. The inclusion decisions and
 stability statuses are reflected in that matrix and in the
-[contract package guide](automl-contracts/README.md#package-contents-and-stable-import-paths).
+[contract package guide](configurable-automl-contracts/README.md#package-contents-and-stable-import-paths).
 
 ## Migration from engine imports
 
@@ -1712,9 +1717,9 @@ Re-export policy:
 
 ## Versioning and compatibility
 
-`automl-contracts` has its own SemVer version and its own `contracts-v*` tags,
+`configurable-automl-contracts` has its own SemVer version and its own `contracts-v*` tags,
 independent of the engine's `v*` tags. The version is static in
-`automl-contracts/pyproject.toml`; `automl_contracts.__version__` is read from
+`configurable-automl-contracts/pyproject.toml`; `automl_contracts.__version__` is read from
 the installed distribution metadata.
 
 During `0.x`, potentially incompatible changes get a MINOR version and a
@@ -1728,9 +1733,9 @@ with a safe default is MINOR; a new required field, a removed value or a
 changed type/semantics is MAJOR. Description-only or field-order-only schema
 changes are PATCH; schema changes that break producers or consumers are MAJOR.
 
-The engine declares `automl-contracts>=0.1.0,<0.2.0`:
+The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`:
 
-| `automl-contracts` | `configurable-automl-engine` | Status |
+| `configurable-automl-contracts` | `configurable-automl-engine` | Status |
 |---|---|---|
 | `0.1.x` | Releases declaring `>=0.1.0,<0.2.0` | Supported; compatibility is part of the release gate |
 | `<0.1.0` | Any | Not supported |
@@ -1744,7 +1749,7 @@ engine range is updated atomically and the schema is regenerated. The contract
 tests check the documented surface and the declared version range;
 `CHANGELOG.md` is release documentation maintained in review, not by a test.
 The full process is in the
-[contract package guide](automl-contracts/README.md#changing-the-contract); the
+[contract package guide](configurable-automl-contracts/README.md#changing-the-contract); the
 registry requirements are in its installation section.
 
 # Python API
@@ -1766,7 +1771,7 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 **Returns:** `dict[str, Any]` — the winner, its scores and diagnostic reports. See [Training results](#training-results) for every key.
 
-**Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for structural config errors; `ValueError` for runtime config checks that need the installed environment (algorithm dependencies, hyperparameter compatibility, custom-metric imports and signatures, process/thread limits) and for unusable data (for example a missing or non-numeric target column); custom-metric runtime checks may raise a `pydantic_core.PydanticCustomError`; `RuntimeError` if no algorithm succeeds. The contract models alone perform only the structural part — see [Contracts package](#contracts-package-automl-contracts).
+**Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for structural config errors; `ValueError` for runtime config checks that need the installed environment (algorithm dependencies, hyperparameter compatibility, custom-metric imports and signatures, process/thread limits) and for unusable data (for example a missing or non-numeric target column); custom-metric runtime checks may raise a `pydantic_core.PydanticCustomError`; `RuntimeError` if no algorithm succeeds. The contract models alone perform only the structural part — see [Contracts package](#contracts-package-configurable-automl-contracts).
 
 **Experiment result.** Alongside the dict, the full run history is assembled into the `ExperimentResult` model (per-algorithm / per-phase records with raw and user-semantic scores, trial statistics, phase and run timings, the resolved validation settings, the circuit-breaker map, and the report sections) and stored in `configurable_automl_engine.training_engine.component.last_experiment_result` after every call — including a failed run (`status: "failed"` with the error message and the records of the completed phases). The model is a pure serializable Pydantic model (`ExperimentResult.to_json()` / `ExperimentResult.from_json()`); the winner, its user-semantic score and the params are taken from the same sources as the dict keys `algorithm` / `score` / `params`, so the two cannot diverge.
 

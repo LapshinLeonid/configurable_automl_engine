@@ -80,7 +80,7 @@ def test_saved_schema_matches_the_models() -> None:
     _clean(schema)
     path = (
         Path(__file__).resolve().parents[2]
-        / "automl-contracts"
+        / "configurable-automl-contracts"
         / "src"
         / "automl_contracts"
         / "schemas"

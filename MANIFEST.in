@@ -10,5 +10,5 @@ prune tools
 prune skills
 prune docs
 prune benchmarks
-prune automl-contracts
+prune configurable-automl-contracts
 prune tests/contracts

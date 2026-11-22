@@ -33,7 +33,7 @@ GITHUB_CI = REPO_ROOT / ".github" / "workflows" / "CI.yaml"
 GITHUB_PUBLISH = REPO_ROOT / ".github" / "workflows" / "publish-contracts.yaml"
 
 ENGINE_TAG = "v1.2.3"
-CONTRACT_TAG = "contracts-v0.1.3"
+CONTRACT_TAG = "contracts-v0.1.0"
 SETUPTOOLS_SCM_MIN_VERSION = Version("10.3.4")
 
 SOURCE_CUBES = (
@@ -63,13 +63,13 @@ SOURCE_CUBE_MARKERS: dict[str, tuple[tuple[str, ...], ...]] = {
     "quality-gates": (
         ("scripts/check_contract_boundaries.py",),
         ("python3.11 scripts/check_release_configuration.py",),
-        ("python3.11 -m ruff check src/ automl-contracts/src/",),
+        ("python3.11 -m ruff check src/ configurable-automl-contracts/src/",),
         ("python3.11 -m mypy scripts/contract_release.py",),
         ("importlinter.cli",),
         ("pytest tests/contracts",),
     ),
     "build-and-verify": (
-        ("python3.11 -m build automl-contracts",),
+        ("python3.11 -m build configurable-automl-contracts",),
         ("twine check",),
         ("scripts/verify_contract_distribution.py",),
         ("scripts/smoke_contract_install.py",),
@@ -103,9 +103,9 @@ GITHUB_PYPI_PUBLISH_STEP = "Publish to PyPI"
 GITHUB_PYPI_VERIFY_STEP = "Verify installation from PyPI"
 GITHUB_PYPI_SDIST_VERIFY_STEP = "Verify sdist installation from PyPI"
 GITHUB_PYPI_ACTION = "pypa/gh-action-pypi-publish@release/v1"
-GITHUB_PYPI_PACKAGES_DIR = "automl-contracts/dist"
+GITHUB_PYPI_PACKAGES_DIR = "configurable-automl-contracts/dist"
 GITHUB_PYPI_PUBLISH_INPUTS = frozenset({"packages-dir"})
-GITHUB_PYPI_INSTALL_COMMAND = "automl-contracts==${VERSION}"
+GITHUB_PYPI_INSTALL_COMMAND = "configurable-automl-contracts==${VERSION}"
 GITHUB_PYPI_INSTALL_MARKERS = (
     "--isolated",
     "PIP_CONFIG_FILE=/dev/null",
@@ -117,7 +117,7 @@ GITHUB_PYPI_VERIFY_MARKERS = (
     '"$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py"',
 )
 GITHUB_PYPI_SDIST_INSTALL_MARKERS = (
-    "--no-binary automl-contracts",
+    "--no-binary configurable-automl-contracts",
     *GITHUB_PYPI_INSTALL_MARKERS,
 )
 GITHUB_STEP_MARKERS = {
@@ -125,13 +125,13 @@ GITHUB_STEP_MARKERS = {
     "Run release quality gates": (
         "scripts/check_contract_boundaries.py",
         "python scripts/check_release_configuration.py",
-        "ruff check src/ automl-contracts/src/",
+        "ruff check src/ configurable-automl-contracts/src/",
         "mypy scripts/contract_release.py",
         "lint-imports",
         "pytest tests/contracts",
     ),
     "Build and verify the distribution": (
-        "python -m build automl-contracts",
+        "python -m build configurable-automl-contracts",
         "twine check",
         "scripts/verify_contract_distribution.py",
     ),
@@ -1427,7 +1427,7 @@ def _verify_step_violations(
     """Require a post-upload verification step with all of its markers.
 
     The isolation and index markers must be on the command that resolves
-    ``automl-contracts==${VERSION}``, not merely somewhere in the step.
+    ``configurable-automl-contracts==${VERSION}``, not merely somewhere in the step.
     """
     if not isinstance(step, dict):
         return [Violation(path, 1, f"GitHub release job has no {name!r} step")]
@@ -1816,7 +1816,7 @@ def check_engine_version_tags(
 ) -> list[Violation]:
     """Check that engine version inference ignores contract release tags.
 
-    The engine and ``automl-contracts`` share one repository but have separate
+    The engine and ``configurable-automl-contracts`` share one repository but have separate
     tag families. ``setuptools-scm`` must consider only ``v<version>`` engine
     tags: a ``contracts-v<version>`` tag at HEAD must neither be parsed as an
     engine version nor make the build fail. The build requirements must also

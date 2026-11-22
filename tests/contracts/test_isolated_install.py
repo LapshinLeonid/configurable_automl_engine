@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_ROOT = REPO_ROOT / "automl-contracts"
+CONTRACT_ROOT = REPO_ROOT / "configurable-automl-contracts"
 CANONICAL_SCHEMA = (
     CONTRACT_ROOT / "src" / "automl_contracts" / "schemas" / "config.schema.json"
 )
@@ -46,7 +46,7 @@ def contract_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    wheels = sorted(output.glob("automl_contracts-*.whl"))
+    wheels = sorted(output.glob("configurable_automl_contracts-*.whl"))
     assert len(wheels) == 1, [wheel.name for wheel in wheels]
     return wheels[0]
 
@@ -66,7 +66,7 @@ def test_wheel_package_data_and_metadata(contract_wheel: Path) -> None:
             name for name in names if name.endswith(".dist-info/METADATA")
         )
         metadata = archive.read(metadata_name).decode("utf-8")
-    assert "Name: automl-contracts" in metadata
+    assert "Name: configurable-automl-contracts" in metadata
     assert "Requires-Dist: pydantic<3,>=2.12.5" in metadata
     requires = [
         line.lower()

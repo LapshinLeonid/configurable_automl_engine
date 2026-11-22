@@ -58,10 +58,10 @@ def _contract_wheel_members(version: str = "0.1.0") -> dict[str, str]:
         "automl_contracts/__init__.py": '"""Contract."""\n',
         "automl_contracts/py.typed": "",
         "automl_contracts/schemas/config.schema.json": "{}",
-        f"automl_contracts-{version}.dist-info/METADATA": textwrap.dedent(
+        f"configurable_automl_contracts-{version}.dist-info/METADATA": textwrap.dedent(
             f"""\
             Metadata-Version: 2.1
-            Name: automl-contracts
+            Name: configurable-automl-contracts
             Version: {version}
             Requires-Dist: pydantic>=2.12.5,<3
             Requires-Dist: pydantic-core>=2,<3
@@ -71,12 +71,12 @@ def _contract_wheel_members(version: str = "0.1.0") -> dict[str, str]:
 
 
 def _contract_sdist_members(version: str = "0.1.0") -> dict[str, str]:
-    prefix = f"automl-contracts-{version}"
+    prefix = f"configurable-automl-contracts-{version}"
     return {
         f"{prefix}/pyproject.toml": textwrap.dedent(
             f"""\
             [project]
-            name = "automl-contracts"
+            name = "configurable-automl-contracts"
             version = "{version}"
             """
         ),
@@ -2112,12 +2112,12 @@ def test_ci_trailing_comment_does_not_satisfy_contracts_task(
                         true  # scripts/check_contract_boundaries.py
                         true  # scripts/verify_contract_distribution.py
                         true  # scripts/smoke_contract_install.py
-                        true  # python3.11 -m build automl-contracts
+                        true  # python3.11 -m build configurable-automl-contracts
                         true  # twine check
                         true  # python3.11 -m venv
                         true  # pytest tests/contracts
                         true  # mypy src
-                        true  # ruff check src/ automl-contracts/src/
+                        true  # ruff check src/ configurable-automl-contracts/src/
                         true  # ruff check tools/contract_boundaries.py
                         true  # mypy tools/contract_boundaries.py
         """,
@@ -2167,12 +2167,12 @@ def test_ci_commented_commands_do_not_satisfy_contracts_task(
                         # scripts/check_contract_boundaries.py
                         scripts/verify_contract_distribution.py
                         scripts/smoke_contract_install.py
-                        python3.11 -m build automl-contracts
-                        twine check automl-contracts/dist/*
+                        python3.11 -m build configurable-automl-contracts
+                        twine check configurable-automl-contracts/dist/*
                         python3.11 -m venv /tmp/venv
                         pytest tests/contracts
                         mypy src
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
                         ruff check tools/contract_boundaries.py
                         mypy tools/contract_boundaries.py
         """,
@@ -2199,12 +2199,12 @@ def test_ci_requires_pip_check_and_artifact_verification(
                         scripts/check_contract_boundaries.py
                         scripts/verify_contract_distribution.py
                         scripts/smoke_contract_install.py
-                        python3.11 -m build automl-contracts
-                        twine check automl-contracts/dist/*
+                        python3.11 -m build configurable-automl-contracts
+                        twine check configurable-automl-contracts/dist/*
                         python3.11 -m venv /tmp/venv
                         pytest tests/contracts
                         mypy src
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
                         ruff check tools/contract_boundaries.py
                         mypy tools/contract_boundaries.py
                         ruff format --check src/
@@ -2231,12 +2231,12 @@ def test_ci_requires_a_dedicated_contracts_task(tmp_path: Path) -> None:
                   - name: legacy
                     script:
                       - |
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
                         mypy src
                         pytest tests/contracts
                         python3.11 -m venv /tmp/venv
-                        python3.11 -m build automl-contracts
-                        twine check automl-contracts/dist/*
+                        python3.11 -m build configurable-automl-contracts
+                        twine check configurable-automl-contracts/dist/*
                         python3.11 scripts/check_contract_boundaries.py
                         python3.11 scripts/verify_contract_distribution.py
                         python3.11 scripts/smoke_contract_install.py
@@ -2263,7 +2263,7 @@ def test_ci_checks_commands_inside_contracts_task(tmp_path: Path) -> None:
                   - name: static
                     script:
                       - |
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
         """,
     )
     violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
@@ -2393,7 +2393,7 @@ def test_forbidden_declarative_dependency_is_reported(tmp_path: Path) -> None:
         pyproject,
         """
         [project]
-        name = "automl-contracts"
+        name = "configurable-automl-contracts"
         version = "0.1.0"
         dependencies = ["pydantic>=2", "numpy>=2"]
 
@@ -2486,7 +2486,7 @@ def test_contract_names_include_public_submodule_symbols() -> None:
 
 
 def test_contract_wheel_with_engine_file_is_rejected(tmp_path: Path) -> None:
-    wheel = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     members = _contract_wheel_members()
     members["configurable_automl_engine/__init__.py"] = ""
     _wheel(wheel, members)
@@ -2495,13 +2495,13 @@ def test_contract_wheel_with_engine_file_is_rejected(tmp_path: Path) -> None:
 
 
 def test_valid_contract_wheel_passes(tmp_path: Path) -> None:
-    wheel = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     _wheel(wheel, _contract_wheel_members())
     assert inspect_contract_wheel(wheel, "0.1.0") == []
 
 
 def test_contract_wheel_version_mismatch_is_rejected(tmp_path: Path) -> None:
-    wheel = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     _wheel(wheel, _contract_wheel_members())
     violations = inspect_contract_wheel(wheel, "0.2.0")
     assert any(violation.rule == "artifact-metadata" for violation in violations)
@@ -2510,9 +2510,9 @@ def test_contract_wheel_version_mismatch_is_rejected(tmp_path: Path) -> None:
 def test_contract_wheel_with_forbidden_dependency_is_rejected(
     tmp_path: Path,
 ) -> None:
-    wheel = tmp_path / "automl_contracts-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "configurable_automl_contracts-0.1.0-py3-none-any.whl"
     members = _contract_wheel_members()
-    members["automl_contracts-0.1.0.dist-info/METADATA"] += (
+    members["configurable_automl_contracts-0.1.0.dist-info/METADATA"] += (
         "Requires-Dist: scikit-learn>=1.8\n"
     )
     _wheel(wheel, members)
@@ -2521,16 +2521,18 @@ def test_contract_wheel_with_forbidden_dependency_is_rejected(
 
 
 def test_contract_sdist_with_engine_file_is_rejected(tmp_path: Path) -> None:
-    sdist = tmp_path / "automl-contracts-0.1.0.tar.gz"
+    sdist = tmp_path / "configurable-automl-contracts-0.1.0.tar.gz"
     members = _contract_sdist_members()
-    members["automl-contracts-0.1.0/src/configurable_automl_engine/__init__.py"] = ""
+    members[
+        "configurable-automl-contracts-0.1.0/src/configurable_automl_engine/__init__.py"
+    ] = ""
     _sdist(sdist, members)
     violations = inspect_contract_sdist(sdist, "0.1.0")
     assert any(violation.rule == "artifact-content" for violation in violations)
 
 
 def test_valid_contract_sdist_passes(tmp_path: Path) -> None:
-    sdist = tmp_path / "automl-contracts-0.1.0.tar.gz"
+    sdist = tmp_path / "configurable-automl-contracts-0.1.0.tar.gz"
     _sdist(sdist, _contract_sdist_members())
     assert inspect_contract_sdist(sdist, "0.1.0") == []
 
@@ -3352,7 +3354,7 @@ def test_ci_echoed_commands_do_not_satisfy_contracts_task(
                   - name: static
                     script:
                       - |
-                        echo "python scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py python3.11 -m build automl-contracts twine check python3.11 -m venv pytest tests/contracts mypy src ruff check src/ automl-contracts/src/ ruff check tools/contract_boundaries.py mypy tools/contract_boundaries.py ruff format --check lint_imports pip check --engine-wheel --engine-sdist"
+                        echo "python scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py python3.11 -m build configurable-automl-contracts twine check python3.11 -m venv pytest tests/contracts mypy src ruff check src/ configurable-automl-contracts/src/ ruff check tools/contract_boundaries.py mypy tools/contract_boundaries.py ruff format --check lint_imports pip check --engine-wheel --engine-sdist"
         """,
     )
     violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
@@ -3429,7 +3431,7 @@ def test_ci_python_c_print_does_not_satisfy_contracts_task(
                   - name: static
                     script:
                       - |
-                        python3.11 -c "print('scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py python3.11 -m build automl-contracts twine check python3.11 -m venv pytest tests/contracts mypy src ruff check src/ automl-contracts/src/ ruff check tools/contract_boundaries.py mypy tools/contract_boundaries.py ruff format --check lint_imports pip check --engine-wheel --engine-sdist')"
+                        python3.11 -c "print('scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py python3.11 -m build configurable-automl-contracts twine check python3.11 -m venv pytest tests/contracts mypy src ruff check src/ configurable-automl-contracts/src/ ruff check tools/contract_boundaries.py mypy tools/contract_boundaries.py ruff format --check lint_imports pip check --engine-wheel --engine-sdist')"
         """,
     )
     violations = scan_ci_configuration(ci, tmp_path / "missing-github.yaml")
@@ -3665,12 +3667,12 @@ def test_ci_python_c_printed_lint_import_does_not_satisfy_task(
                         python3.11 scripts/check_contract_boundaries.py
                         python3.11 scripts/verify_contract_distribution.py
                         python3.11 scripts/smoke_contract_install.py
-                        python3.11 -m build automl-contracts
+                        python3.11 -m build configurable-automl-contracts
                         twine check
                         python3.11 -m venv
                         pytest tests/contracts
                         mypy src
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
                         ruff check tools/contract_boundaries.py
                         mypy tools/contract_boundaries.py
                         ruff format --check
@@ -3849,12 +3851,12 @@ def test_ci_python_c_import_only_does_not_satisfy_task(
                         python3.11 scripts/check_contract_boundaries.py
                         python3.11 scripts/verify_contract_distribution.py
                         python3.11 scripts/smoke_contract_install.py
-                        python3.11 -m build automl-contracts
+                        python3.11 -m build configurable-automl-contracts
                         twine check
                         python3.11 -m venv
                         pytest tests/contracts
                         mypy src
-                        ruff check src/ automl-contracts/src/
+                        ruff check src/ configurable-automl-contracts/src/
                         ruff check tools/contract_boundaries.py
                         mypy tools/contract_boundaries.py
                         ruff format --check
@@ -5932,7 +5934,7 @@ def test_ci_requires_source_scope_format_check(tmp_path: Path) -> None:
     kept = [
         line
         for line in lines
-        if "ruff format --check src/ automl-contracts/src/" not in line
+        if "ruff format --check src/ configurable-automl-contracts/src/" not in line
     ]
     assert len(kept) < len(lines)
     ci = tmp_path / "ci.yaml"

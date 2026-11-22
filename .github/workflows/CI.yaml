@@ -24,29 +24,29 @@ jobs:
           pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15
           # Install the project itself in "editable" mode so it is visible as a package
           # This works if there is a setup.py or pyproject.toml at the repository root
-          pip install -e automl-contracts
+          pip install -e configurable-automl-contracts
           if [ -f setup.py ] || [ -f pyproject.toml ]; then pip install -e ".[all,test]"; fi
 
       - name: Check contract architecture boundaries
         run: python scripts/check_contract_boundaries.py
 
       - name: Lint with Ruff
-        run: ruff check src/ automl-contracts/src/
+        run: ruff check src/ configurable-automl-contracts/src/
 
       - name: Check formatting with Ruff
-        run: ruff format --check src/ automl-contracts/src/
+        run: ruff format --check src/ configurable-automl-contracts/src/
 
       # Import layers: training_engine -> hpo/tuner/trainer -> building
       # blocks -> common (contracts in pyproject.toml, no allowlist).
       - name: Check import layers
         run: |
           lint-imports
-          (cd automl-contracts && lint-imports)
+          (cd configurable-automl-contracts && lint-imports)
 
       - name: Type check with Mypy
         run: |
           mypy src --install-types --non-interactive
-          (cd automl-contracts && mypy src)
+          (cd configurable-automl-contracts && mypy src)
 
       - name: Run tests
         env:
@@ -62,11 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install build
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
-          rm -rf automl-contracts/dist dist/engine
-          python -m build automl-contracts --outdir automl-contracts/dist
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('configurable-automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+          rm -rf configurable-automl-contracts/dist dist/engine
+          python -m build configurable-automl-contracts --outdir configurable-automl-contracts/dist
           python -m build . --outdir dist/engine
-          python -m pip install --force-reinstall --no-deps automl-contracts/dist/*.whl
+          python -m pip install --force-reinstall --no-deps configurable-automl-contracts/dist/*.whl
           python -m pip install --force-reinstall --no-deps dist/engine/*.whl
           cd /tmp
           python "$GITHUB_WORKSPACE/scripts/smoke_engine_install.py" \
@@ -123,7 +123,7 @@ jobs:
       - name: Install contract and verification tools
         run: |
           python -m pip install --upgrade pip
-          pip install -e automl-contracts pytest pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15 build twine "jsonschema>=4.18" packaging
+          pip install -e configurable-automl-contracts pytest pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15 build twine "jsonschema>=4.18" packaging
 
       - name: Run static boundary and release configuration guards
         run: |
@@ -132,33 +132,33 @@ jobs:
 
       - name: Run contract quality checks
         run: |
-          ruff check src/ automl-contracts/src/
-          ruff format --check src/ automl-contracts/src/
+          ruff check src/ configurable-automl-contracts/src/
+          ruff format --check src/ configurable-automl-contracts/src/
           ruff check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
           ruff format --check tools/contract_boundaries.py tools/__init__.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py tests/contracts/test_architecture_guarantees.py tests/contracts/test_release_pipeline.py tests/contracts/test_release_configuration.py
           mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
-          (cd automl-contracts && mypy src)
-          (cd automl-contracts && lint-imports)
+          (cd configurable-automl-contracts && mypy src)
+          (cd configurable-automl-contracts && lint-imports)
           python -m pytest tests/contracts
 
       - name: Build and verify contract artifacts
         run: |
-          rm -rf automl-contracts/dist
-          python -m build automl-contracts --outdir automl-contracts/dist
-          twine check automl-contracts/dist/*
+          rm -rf configurable-automl-contracts/dist
+          python -m build configurable-automl-contracts --outdir configurable-automl-contracts/dist
+          twine check configurable-automl-contracts/dist/*
           python scripts/verify_contract_distribution.py \
-            --contract-wheel automl-contracts/dist/*.whl \
-            --contract-sdist automl-contracts/dist/*.tar.gz
+            --contract-wheel configurable-automl-contracts/dist/*.whl \
+            --contract-sdist configurable-automl-contracts/dist/*.tar.gz
 
       - name: Install contract in a clean environment
         run: |
           rm -rf /tmp/contracts-venv
           python -m venv /tmp/contracts-venv
           /tmp/contracts-venv/bin/pip install --upgrade pip
-          /tmp/contracts-venv/bin/pip install automl-contracts/dist/*.whl
+          /tmp/contracts-venv/bin/pip install configurable-automl-contracts/dist/*.whl
           /tmp/contracts-venv/bin/python scripts/smoke_contract_install.py
           /tmp/contracts-venv/bin/pip check
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('configurable-automl-contracts/pyproject.toml', 'rb'))['project']['version'])")
           /tmp/contracts-venv/bin/pip install --index-url https://pypi.org/simple "jsonschema>=4.18" packaging
           cd /tmp
           /tmp/contracts-venv/bin/python "$GITHUB_WORKSPACE/scripts/e2e_contract_consumer.py" \
@@ -197,7 +197,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e automl-contracts
+          pip install -e configurable-automl-contracts
           pip install -e ".[all,test]"
 
       - name: Run the parallel and safety-net tests

@@ -19,10 +19,10 @@ import pytest
 from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_SRC = REPO_ROOT / "automl-contracts" / "src"
+CONTRACT_SRC = REPO_ROOT / "configurable-automl-contracts" / "src"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SCHEMA = CONTRACT_SRC / "automl_contracts" / "schemas" / "config.schema.json"
-GENERATOR = REPO_ROOT / "automl-contracts" / "scripts" / "generate_schema.py"
+GENERATOR = REPO_ROOT / "configurable-automl-contracts" / "scripts" / "generate_schema.py"
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AUTOML_RUN_NETWORK_TESTS") != "1",

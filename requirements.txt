@@ -1,2 +1,2 @@
--e ./automl-contracts
+-e ./configurable-automl-contracts
 -e .[all,test]

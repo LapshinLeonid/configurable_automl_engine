@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_ROOT = REPO_ROOT / "automl-contracts"
+CONTRACT_ROOT = REPO_ROOT / "configurable-automl-contracts"
 CONTRACT_PYPROJECT = CONTRACT_ROOT / "pyproject.toml"
 API_REFERENCE_DOC = REPO_ROOT / "API_REFERENCE.md"
 

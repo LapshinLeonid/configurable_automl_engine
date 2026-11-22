@@ -1,7 +1,7 @@
 """Shared fixtures of the engine test suite.
 
 The contract tests are collected from the same repository and must run in an
-environment that has only ``automl-contracts`` installed. Engine imports are
+environment that has only ``configurable-automl-contracts`` installed. Engine imports are
 therefore performed inside the fixtures; an environment without the engine
 simply never uses them.
 """
