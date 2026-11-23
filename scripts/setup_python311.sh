@@ -5,7 +5,8 @@
 # The deadsnakes PPA serves the packages from launchpad.net, which sometimes
 # answers with HTTP 503 while apt fetches the archives. The whole installation
 # sequence is therefore retried, and every attempt starts with a fresh
-# ``apt-get update`` so that a stale mirror index is not reused.
+# ``apt-get update`` so that a stale mirror index is not reused. A retry also
+# repairs the package state left by a download that failed halfway through.
 #
 # The worker switches ``/usr/bin/python3`` to 3.11 for the build cubes, but
 # APT itself keeps using the system Python: the ``command-not-found``
@@ -141,6 +142,9 @@ install_python() {
     CURRENT_STEP="apt-get update after adding the deadsnakes PPA"
     apt_get update -qq "${APT_OPTIONS[@]}" || return 1
   fi
+
+  CURRENT_STEP="repair the package state after a failed download"
+  apt_get --fix-broken install -y -qq "${APT_OPTIONS[@]}" || return 1
 
   CURRENT_STEP="install Python 3.11 packages"
   apt_get install -y -qq "${APT_OPTIONS[@]}" --fix-missing "${PACKAGES[@]}" ||

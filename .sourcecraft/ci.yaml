@@ -356,10 +356,11 @@ workflows:
     tasks:
       - name: run-quality-checks
         cubes:
-          # Native cubes share the worker environment within a task, so the
+          # Native cubes share the worker environment within a task, so every
           # test cube reuses the dependencies installed by the first cube.
           # They also run as separate cubes: the platform limits a single
-          # cube to 1200 seconds, so lint and tests get independent budgets.
+          # cube to 1200 seconds, so lint and test groups get independent
+          # budgets and the slow test files are split across cubes.
           - name: lint-and-typecheck
             script:
               # The native worker ships Python 3.10, while the project
@@ -407,12 +408,28 @@ workflows:
           - name: run-tests
             script:
               - |
+                set -e
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  4. RUN TESTS AND COVERAGE (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
-                export AUTOML_RUN_NETWORK_TESTS=1
-                python3.11 -m pytest --cov=src
+                # Contract tests, including the network-dependent isolated
+                # installs, run in the contracts-guarantees task instead.
+                # The slow refactor safety net runs in its own cube below so
+                # both test cubes stay under the 1200 second limit.
+                python3.11 -m pytest --cov=src --ignore=tests/contracts \
+                  --ignore=tests/test_refactor_safety_net.py
+
+          - name: run-refactor-safety-net
+            script:
+              - |
+                set -e
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  5. REFACTOR SAFETY NET (Pytest)"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 -m pytest --cov=src --cov-append \
+                  tests/test_refactor_safety_net.py
 
           # The engine must work with the contract installed from the built
           # wheel, not only with the editable source checkout.
@@ -476,6 +493,7 @@ workflows:
                 python3.11 -m mypy tools/contract_boundaries.py scripts/check_contract_boundaries.py scripts/verify_contract_distribution.py scripts/smoke_contract_install.py scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
                 (cd configurable-automl-contracts && python3.11 -m mypy src)
                 (cd configurable-automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
+                export AUTOML_RUN_NETWORK_TESTS=1
                 python3.11 -m pytest tests/contracts
                 echo "✅ Contract quality checks: no issues found"
 
@@ -595,8 +613,11 @@ workflows:
                 python3.11 -m ruff check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
                 python3.11 -m ruff format --check scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
                 python3.11 -m mypy scripts/contract_release.py scripts/check_release_configuration.py scripts/e2e_contract_consumer.py scripts/smoke_engine_install.py
-                (cd configurable-automl-contracts && python3.11 -m mypy src)
-                (cd configurable-automl-contracts && python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())")
+                (
+                  cd configurable-automl-contracts
+                  python3.11 -m mypy src
+                  python3.11 -c "import sys; from importlinter.cli import lint_imports; sys.exit(lint_imports())"
+                )
                 python3.11 -m pytest tests/contracts
                 echo "✅ All release gates passed"
 

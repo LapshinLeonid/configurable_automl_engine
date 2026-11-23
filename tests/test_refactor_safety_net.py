@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import importlib
 import json
+import multiprocessing
 import pkgutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +72,9 @@ def _mixed_dataset() -> pd.DataFrame:
     x1 = rng.normal(size=n)
     x2 = rng.uniform(0.0, 5.0, size=n)
     city = rng.choice(["north", "south", "east", "west"], size=n)
-    effect = pd.Series(city).map({"north": 3.0, "south": -1.0, "east": 0.5, "west": 1.5})
+    effect = pd.Series(city).map(
+        {"north": 3.0, "south": -1.0, "east": 0.5, "west": 1.5}
+    )
     ts = pd.Timestamp("2021-01-01") + pd.to_timedelta(
         rng.integers(0, 720, size=n), unit="D"
     )
@@ -460,6 +464,7 @@ def _run_python(code: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
 
 
@@ -485,8 +490,51 @@ def _package_modules() -> list[str]:
     return sorted(names)
 
 
-@pytest.mark.parametrize("module", _package_modules())
-def test_module_imports_on_its_own(module: str) -> None:
-    """Every module of the package imports first in a fresh interpreter."""
-    proc = _run_python(f"import {module}")
-    assert proc.returncode == 0, f"import {module} failed:\n{proc.stderr}"
+def _import_with_clean_package(module: str) -> str | None:
+    """Import one module after dropping the package from ``sys.modules``."""
+    for name in [
+        loaded
+        for loaded in sys.modules
+        if loaded == PACKAGE or loaded.startswith(f"{PACKAGE}.")
+    ]:
+        del sys.modules[name]
+    try:
+        importlib.import_module(module)
+    except Exception:  # noqa: BLE001 - any import-time error fails the check
+        return traceback.format_exc()
+    return None
+
+
+def _import_fresh(module: str) -> tuple[str, subprocess.CompletedProcess[str]]:
+    """Import one module in its own interpreter and keep the outcome."""
+    return module, _run_python(f"import {module}")
+
+
+def _module_import_failures(modules: list[str]) -> list[str]:
+    """Return failures for modules that cannot be imported in isolation."""
+    if "fork" not in multiprocessing.get_all_start_methods():
+        results = [_import_fresh(module) for module in modules]
+        return [
+            f"import {module} failed:\n{proc.stderr}"
+            for module, proc in results
+            if proc.returncode != 0
+        ]
+    context = multiprocessing.get_context("fork")
+    with context.Pool(processes=min(4, len(modules)), maxtasksperchild=1) as pool:
+        try:
+            outcomes = pool.map_async(_import_with_clean_package, modules).get(
+                timeout=300
+            )
+        except multiprocessing.TimeoutError as error:
+            raise AssertionError("module import check timed out") from error
+    return [
+        f"import {module} failed:\n{outcome}"
+        for module, outcome in zip(modules, outcomes, strict=True)
+        if outcome is not None
+    ]
+
+
+def test_module_imports_on_its_own() -> None:
+    """Every module of the package imports with a clean package namespace."""
+    failures = _module_import_failures(_package_modules())
+    assert not failures, "\n\n".join(failures)

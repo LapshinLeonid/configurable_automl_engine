@@ -11,6 +11,7 @@ configuration must ignore the ``contracts-v*`` tag family.
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import re
 import shlex
@@ -45,7 +46,7 @@ SOURCE_CUBES = (
 )
 RELEASE_WORKFLOWS = ("publish-contracts", "sync-to-github")
 PAT_NAME = "PYPI_REGISTRY_PAT"
-PAT_SECRET = "${{ secrets.PYPI_REGISTRY_PAT }}"
+PAT_SECRET_EXPRESSION = re.compile(r"\$\{\{\s*secrets\.PYPI_REGISTRY_PAT\s*\}\}")
 REGISTRY_ID_NAME = "SOURCECRAFT_PYPI_REGISTRY_ID"
 PAT_SCOPED_CUBES = ("publish", "verify-from-registry")
 PYTHON_SETUP_SCRIPT = "scripts/setup_python311.sh"
@@ -396,35 +397,139 @@ def _script(cube: dict[str, Any]) -> str:
 _HEREDOC = re.compile(
     r"<<-?\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)"
 )
-_SHELL_BLOCK_OPEN = re.compile(r"^(?:if|while|until|for|case)\b")
-_SHELL_BLOCK_END = re.compile(r"^(?:fi|done|esac)\b")
-_SHELL_BLOCK_BRANCH = re.compile(r"^(?:elif|else)\b")
-_SHELL_CONDITION_LINE = re.compile(r"^(?:if|elif|while|until)\b")
-_BRACE_OPEN = re.compile(r"(?:^|\s)\{\s*$")
-_BRACE_CLOSE = re.compile(r"^\}")
 _FALSE_CONDITION = re.compile(
     r"^(?:if|elif|while|until)\s+(?P<condition>.*?)(?:;\s*(?:then|do)\b|$)"
 )
+_FUNCTION_NAME = r"[^\s(){;]+"
 _FUNCTION_DECLARATION = re.compile(
-    r"^(?:function\s+[A-Za-z_][A-Za-z0-9_-]*\s*(?:\(\s*\))?"
-    r"|[A-Za-z_][A-Za-z0-9_-]*\s*\(\s*\))\s*[{\(]"
+    rf"^(?:function\s+{_FUNCTION_NAME}(?:\s*\(\s*\))?"
+    rf"|{_FUNCTION_NAME}\s*\(\s*\))\s*[{{(]"
+)
+_SHELL_EVENT = re.compile(
+    r"(?:^|(?<=[;|&({}`]))\s*"
+    r"(?:(?:time\s+(?:-p\s+)?)?(?:!\s+)?|(?:then|do)\s+)?"
+    r"(?:"
+    rf"(?P<function>(?:function\s+{_FUNCTION_NAME}(?:\s*\(\s*\))?"
+    rf"|{_FUNCTION_NAME}\s*\(\s*\)))"
+    r"(?P<body>\s*[{(])?"
+    r"|(?P<open>if|while|until|for|select|case)\b"
+    r"|(?P<close>fi|done|esac)\b"
+    r"|(?P<branch>elif|else)\b"
+    r"|(?P<brace>[{}])"
+    r"|(?P<paren>[()])"
+    r")"
 )
 _ERREXIT = re.compile(r"^set\s+(?:-[A-Za-z]*e[A-Za-z]*\b|-o\s+errexit\b)")
 _DISABLE_ERREXIT = re.compile(r"^set\s+(?:\+[A-Za-z]*e[A-Za-z]*\b|\+o\s+errexit\b)")
 _ASSIGNMENT = re.compile(r"^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\+)?=")
 
 
+_ESCAPING_QUOTES = frozenset({'"', "$'"})
+
+
+def _starts_comment(line: str, index: int) -> bool:
+    """Return whether ``#`` at ``index`` begins a shell comment."""
+    if index == 0:
+        return True
+    previous = line[index - 1]
+    if previous.isspace() or previous in ";|&()<>}":
+        return True
+    if previous == "{":
+        return not (index >= 2 and line[index - 2] == "$")
+    return False
+
+
 def _strip_shell_comment(line: str) -> str:
     quote: str | None = None
-    for index, character in enumerate(line):
+    index = 0
+    while index < len(line):
+        character = line[index]
         if quote is not None:
-            if character == quote:
+            if quote in _ESCAPING_QUOTES and character == "\\":
+                index += 2
+                continue
+            if character == quote[-1]:
                 quote = None
+        elif line.startswith("$'", index):
+            quote = "$'"
+            index += 2
+            continue
         elif character in "\"'":
             quote = character
-        elif character == "#" and (index == 0 or line[index - 1].isspace()):
+        elif character == "#" and _starts_comment(line, index):
             return line[:index]
+        index += 1
     return line
+
+
+def _heredoc_delimiter(line: str) -> str | None:
+    """Return a heredoc delimiter outside quotes and arithmetic."""
+    index = 0
+    quote: str | None = None
+    arithmetic = 0
+    while index < len(line):
+        character = line[index]
+        if quote is not None:
+            if quote in _ESCAPING_QUOTES and character == "\\":
+                index += 2
+                continue
+            if character == quote[-1]:
+                quote = None
+            index += 1
+            continue
+        if line.startswith("$'", index):
+            quote = "$'"
+            index += 2
+            continue
+        if character in "\"'":
+            quote = character
+            index += 1
+            continue
+        if line.startswith("$((", index):
+            arithmetic += 1
+            index += 3
+            continue
+        if line.startswith("((", index):
+            arithmetic += 1
+            index += 2
+            continue
+        if arithmetic:
+            if character == "(":
+                arithmetic += 1
+            elif character == ")":
+                arithmetic -= 1
+            index += 1
+            continue
+        if line.startswith("<<", index):
+            match = _HEREDOC.match(line, index)
+            if match is not None:
+                return match.group("delimiter")
+            index += 2
+            continue
+        index += 1
+    return None
+
+
+def _unclosed_quote(line: str) -> str | None:
+    """Return the quote character left open at the end of a line."""
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if quote is not None:
+            if quote in _ESCAPING_QUOTES and character == "\\":
+                index += 2
+                continue
+            if character == quote[-1]:
+                quote = None
+        elif line.startswith("$'", index):
+            quote = "$'"
+            index += 2
+            continue
+        elif character in "\"'":
+            quote = character
+        index += 1
+    return quote
 
 
 def _condition_is_false(line: str) -> bool:
@@ -435,62 +540,233 @@ def _condition_is_false(line: str) -> bool:
     return bool(re.fullmatch(r"(?:false|0|!\s*true|\[\s*false\s*\])", condition))
 
 
-def _frames_dead(frames: list[tuple[bool, bool]]) -> bool:
+_Frame = tuple[bool, bool, str]
+
+
+def _frames_dead(frames: list[_Frame]) -> bool:
     if not frames:
         return False
-    parent_dead, branch_dead = frames[-1]
+    parent_dead, branch_dead, _kind = frames[-1]
     return parent_dead or branch_dead
 
 
-def _shell_line_dead(line: str, frames: list[tuple[bool, bool]]) -> bool:
-    """Update the block stack for ``line`` and report whether it may be skipped."""
-    if (_SHELL_BLOCK_END.match(line) or _BRACE_CLOSE.match(line)) and frames:
-        frames.pop()
-    if _SHELL_BLOCK_BRANCH.match(line) and frames:
-        parent_dead, _ = frames[-1]
-        branch_dead = parent_dead
-        if line.startswith("elif"):
-            branch_dead = parent_dead or _condition_is_false(line)
-        frames[-1] = (parent_dead, branch_dead)
-    dead = _frames_dead(frames) or bool(_SHELL_CONDITION_LINE.match(line))
-    if _SHELL_BLOCK_OPEN.match(line) and not re.search(r"\b(?:fi|done|esac)\b", line):
-        parent_dead = _frames_dead(frames)
-        frames.append((parent_dead, parent_dead or _condition_is_false(line)))
-    elif _BRACE_OPEN.search(line):
-        parent_dead = _frames_dead(frames)
-        frames.append((parent_dead, True))
-    return dead
+def _unquoted_shell(line: str) -> str:
+    """Blank out quoted text, keeping shell command separators."""
+    characters: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if quote is not None:
+            characters.append(" ")
+            if (
+                quote in _ESCAPING_QUOTES
+                and character == "\\"
+                and index + 1 < len(line)
+            ):
+                characters.append(" ")
+                index += 2
+                continue
+            if character == quote[-1]:
+                quote = None
+        elif line.startswith("$'", index):
+            quote = "$'"
+            characters.extend((" ", " "))
+            index += 2
+            continue
+        elif character in "\"'":
+            quote = character
+            characters.append(" ")
+        else:
+            characters.append(character)
+        index += 1
+    return "".join(characters)
 
 
-def _logical_commands(script: str) -> list[tuple[str, bool]]:
-    """Return executable shell lines and whether they may be skipped."""
+def _shell_block_events(line: str) -> list[tuple[str, str, str]]:
+    """Return block events in command order for one logical shell line."""
+    events: list[tuple[str, str, str]] = []
+    for match in _SHELL_EVENT.finditer(_unquoted_shell(line)):
+        tail = line[match.start() :].lstrip()
+        tail = re.sub(
+            r"^(?:time\s+(?:-p\s+)?)?(?:!\s+)?(?:then\s+|do\s+)?",
+            "",
+            tail,
+        )
+        body = (match.group("body") or "").strip()
+        if match.group("function"):
+            if body == "{":
+                events.append(("open", "brace", tail))
+            elif body == "(":
+                events.append(("open", "paren", tail))
+            else:
+                events.append(("pending", "function", tail))
+        elif match.group("open"):
+            events.append(("open", "block", tail))
+        elif match.group("close"):
+            events.append(("close", "block", tail))
+        elif match.group("branch"):
+            events.append(("branch", "block", tail))
+        elif match.group("brace") == "{":
+            events.append(("open", "brace", tail))
+        elif match.group("brace") == "}":
+            events.append(("close", "brace", tail))
+        elif match.group("paren") == "(":
+            prefix = _unquoted_shell(line[: match.start()]).rstrip()
+            connector = ""
+            if prefix.endswith(("&&", "||")):
+                connector = prefix[-2:]
+            elif prefix.endswith(("|", "&")):
+                connector = prefix[-1]
+            events.append(("open_paren", "paren", connector))
+        elif match.group("paren") == ")":
+            events.append(("close", "paren", tail))
+    return events
+
+
+def _unclosed_command_substitutions(line: str) -> int:
+    """Return the number of ``$()`` or arithmetic groups left open."""
+    sanitized = _unquoted_shell(line)
+    depth = 0
+    index = 0
+    while index < len(sanitized):
+        if sanitized.startswith("$((", index):
+            depth += 1
+            index += 3
+            continue
+        if sanitized.startswith("$(", index):
+            depth += 1
+            index += 2
+            continue
+        if sanitized.startswith("((", index):
+            depth += 1
+            index += 2
+            continue
+        if depth:
+            if sanitized[index] == "(":
+                depth += 1
+            elif sanitized[index] == ")":
+                depth -= 1
+        index += 1
+    return depth
+
+
+def _shell_line_state(
+    line: str,
+    frames: list[_Frame],
+    function_body: bool = False,
+) -> tuple[bool, bool, bool]:
+    """Update the block stack for ``line``.
+
+    Args:
+        line: One shell line with comments and continuations already removed.
+        frames: Mutable stack of ``(parent_dead, branch_dead, kind)`` frames.
+        function_body: Whether ``line`` opens a function body after ``foo()``.
+
+    Returns:
+        ``(dead, conditional, pending_function)``: whether the line may be
+        skipped, whether it belongs to a non-linear block, and whether a
+        function body is expected on a following line.
+    """
+    events = _shell_block_events(line)
+    conditional = bool(frames) or bool(events)
+    pending_function = False
+    for action, kind, text in events:
+        if action == "pending":
+            pending_function = True
+        elif action == "open":
+            parent_dead = _frames_dead(frames)
+            branch_dead = (
+                True
+                if kind in {"brace", "paren"}
+                else parent_dead or _condition_is_false(text)
+            )
+            frames.append((parent_dead, branch_dead, kind))
+        elif action == "open_paren":
+            if function_body or any(kind == "paren" for _, _, kind in frames):
+                parent_dead = _frames_dead(frames)
+                frames.append((parent_dead, True, "paren"))
+            elif text:
+                parent_dead = _frames_dead(frames)
+                frames.append((parent_dead, True, "subshell"))
+        elif action == "close":
+            closable = {"cmdsub", "subshell"} if kind == "paren" else {kind}
+            if frames and frames[-1][2] in closable:
+                frames.pop()
+        elif action == "branch" and frames:
+            parent_dead, _, top_kind = frames[-1]
+            branch_dead = parent_dead
+            if text.startswith("elif"):
+                branch_dead = parent_dead or _condition_is_false(text)
+            frames[-1] = (parent_dead, branch_dead, top_kind)
+    opens = _unclosed_command_substitutions(line)
+    if opens:
+        parent_dead = _frames_dead(frames)
+        frames.extend((parent_dead, True, "cmdsub") for _ in range(opens))
+    return _frames_dead(frames), conditional, pending_function
+
+
+def _logical_commands(script: str) -> list[tuple[str, bool, bool]]:
+    """Return executable shell lines, skip state and block membership."""
     raw_lines = script.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-    commands: list[tuple[str, bool]] = []
+    commands: list[tuple[str, bool, bool]] = []
     heredoc: str | None = None
     buffer = ""
-    frames: list[tuple[bool, bool]] = []
+    frames: list[_Frame] = []
+    pending_function = False
+    multiline_quote: str | None = None
     for raw_line in raw_lines:
         if heredoc is not None:
             if raw_line.strip() == heredoc:
                 heredoc = None
             continue
-        match = _HEREDOC.search(raw_line)
-        if match is not None:
-            heredoc = match.group("delimiter")
-        line = _strip_shell_comment(raw_line).rstrip()
-        if line.endswith("\\"):
-            buffer += line[:-1] + " "
-            continue
-        if line.endswith(("||", "&&", "|")):
-            buffer += line + " "
-            continue
-        line = (buffer + line).strip()
-        buffer = ""
-        if not line:
-            continue
-        commands.append((line, _shell_line_dead(line, frames)))
+        if multiline_quote is not None:
+            if buffer.endswith("\\"):
+                buffer = buffer[:-1]
+            else:
+                buffer += " "
+            buffer += raw_line
+            multiline_quote = _unclosed_quote(buffer)
+            if multiline_quote is not None:
+                continue
+            line = _strip_shell_comment(buffer).rstrip()
+            buffer = ""
+        else:
+            line = _strip_shell_comment(raw_line).rstrip()
+            delimiter = _heredoc_delimiter(line)
+            if delimiter is not None:
+                heredoc = delimiter
+            if not line and not buffer.rstrip().endswith(("||", "&&", "|")):
+                line = buffer.strip()
+                buffer = ""
+            if not line:
+                continue
+            if line.endswith("\\"):
+                buffer += line[:-1]
+                continue
+            if line.endswith(("||", "&&", "|")):
+                buffer += line + " "
+                continue
+            line = (buffer + line).strip()
+            buffer = ""
+            multiline_quote = _unclosed_quote(line)
+            if multiline_quote is not None:
+                buffer = line
+                continue
+        dead, conditional, pending_function = _shell_line_state(
+            line, frames, pending_function
+        )
+        commands.append((line, dead, conditional))
     if buffer.strip():
-        commands.append((buffer.strip(), _frames_dead(frames)))
+        text = buffer.strip()
+        dead, conditional, _pending = _shell_line_state(text, frames, pending_function)
+        commands.append((text, dead, conditional))
+    unsafe = _unsafe_paren_commands(commands)
+    if unsafe:
+        commands = [
+            (line, dead, conditional or index in unsafe)
+            for index, (line, dead, conditional) in enumerate(commands)
+        ]
     return commands
 
 
@@ -505,9 +781,22 @@ def _segments(command: str) -> list[tuple[str, str | None]]:
         character = command[index]
         if quote is not None:
             buffer.append(character)
-            if character == quote:
+            if (
+                quote in _ESCAPING_QUOTES
+                and character == "\\"
+                and index + 1 < len(command)
+            ):
+                buffer.append(command[index + 1])
+                index += 2
+                continue
+            if character == quote[-1]:
                 quote = None
             index += 1
+            continue
+        if command.startswith("$'", index):
+            quote = "$'"
+            buffer.extend(("$", "'"))
+            index += 2
             continue
         if character in "\"'":
             quote = character
@@ -532,6 +821,305 @@ def _segments(command: str) -> list[tuple[str, str | None]]:
     return segments
 
 
+def _unsafe_paren_commands(
+    commands: list[tuple[str, bool, bool]],
+) -> set[int]:
+    """Return commands inside a subshell that is chained after its closing paren."""
+    unsafe: set[int] = set()
+    stack: list[int] = []
+    for index, (line, _dead, _conditional) in enumerate(commands):
+        sanitized = _unquoted_shell(line)
+        for position, character in enumerate(sanitized):
+            if character == "(":
+                stack.append(index)
+            elif character == ")" and stack:
+                opened = stack.pop()
+                if re.search(r"[&|]", sanitized[position + 1 :]):
+                    unsafe.update(range(opened, index + 1))
+    return unsafe
+
+
+def _substitution_end(text: str, start: int) -> int | None:
+    """Return the index of the closing paren of a ``$(...)`` body."""
+    cursor = start
+    depth = 1
+    quote: str | None = None
+    while cursor < len(text):
+        current = text[cursor]
+        if quote is not None:
+            if quote in _ESCAPING_QUOTES and current == "\\":
+                cursor += 2
+                continue
+            if current == quote[-1]:
+                quote = None
+            cursor += 1
+            continue
+        if text.startswith("$'", cursor):
+            quote = "$'"
+            cursor += 2
+            continue
+        if current in "\"'":
+            quote = current
+            cursor += 1
+            continue
+        if text.startswith("$(", cursor):
+            depth += 1
+            cursor += 1
+            continue
+        if current == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor
+        cursor += 1
+    return None
+
+
+def _command_substitutions(text: str) -> list[str]:
+    """Return top-level ``$(...)`` bodies outside quoted shell text."""
+    bodies: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(text):
+        character = text[index]
+        if quote is not None:
+            if quote in _ESCAPING_QUOTES and character == "\\":
+                index += 2
+                continue
+            if character == quote[-1]:
+                quote = None
+            index += 1
+            continue
+        if text.startswith("$'", index):
+            quote = "$'"
+            index += 2
+            continue
+        if character in "\"'":
+            quote = character
+            index += 1
+            continue
+        if not text.startswith("$(", index):
+            index += 1
+            continue
+        end = _substitution_end(text, index + 2)
+        if end is None:
+            break
+        bodies.append(text[index + 2 : end])
+        index = end + 1
+    return bodies
+
+
+_WRAPPER_HEADS = frozenset(
+    {
+        "builtin",
+        "command",
+        "doas",
+        "env",
+        "nice",
+        "nohup",
+        "setsid",
+        "stdbuf",
+        "sudo",
+        "time",
+        "timeout",
+    }
+)
+
+
+def _shell_tokens(text: str) -> list[str]:
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _skip_options(
+    tokens: list[str], index: int, options_with_value: frozenset[str]
+) -> int:
+    """Skip leading option tokens, including options that take an argument."""
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] in options_with_value and index + 1 < len(tokens):
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+def _is_detaching_option(token: str) -> bool:
+    if token.startswith("--"):
+        name = token.split("=", 1)[0]
+        return "--fork".startswith(name) or "--background".startswith(name)
+    return False
+
+
+def _wrapper_has_detaching_option(tokens: list[str], index: int, token: str) -> bool:
+    while index < len(tokens) and tokens[index].startswith("-"):
+        option = tokens[index]
+        if _is_detaching_option(option):
+            return True
+        if not option.startswith("--"):
+            if token == "setsid" and "f" in option[1:]:
+                return True
+            if token == "sudo" and "b" in option[1:]:
+                return True
+        index += 1
+    return False
+
+
+def _skip_wrapper_options(
+    tokens: list[str], index: int, options_with_value: frozenset[str]
+) -> int | None:
+    """Skip wrapper options, rejecting options that terminate the wrapper."""
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] in _TERMINAL_WRAPPER_OPTIONS:
+            return None
+        if tokens[index] in _DETACHING_WRAPPER_OPTIONS:
+            return None
+        if tokens[index] in options_with_value and index + 1 < len(tokens):
+            index += 2
+        else:
+            index += 1
+    return index
+
+
+_WRAPPER_OPTIONS_WITH_VALUE: dict[str, frozenset[str]] = {
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n"}),
+    "sudo": frozenset(
+        {
+            "-u",
+            "--user",
+            "-g",
+            "--group",
+            "-p",
+            "--prompt",
+            "-r",
+            "--role",
+            "-t",
+            "--type",
+        }
+    ),
+    "doas": frozenset({"-u"}),
+    "time": frozenset({"-f", "--format", "-o"}),
+}
+_WRAPPER_EXTRA_ARGS = {"timeout": 1}
+
+
+def _env_option_is_split(token: str) -> bool:
+    if token.startswith("--"):
+        name = token.split("=", 1)[0]
+        return len(name) > 2 and "--split-string".startswith(name)
+    return token.startswith("-") and not token.startswith("--") and "S" in token[1:]
+
+
+def _skip_env_options(tokens: list[str], index: int) -> int | None:
+    while index < len(tokens):
+        current = tokens[index]
+        if current in _TERMINAL_WRAPPER_OPTIONS or _env_option_is_split(current):
+            return None
+        if current.startswith(("PATH=", "PYTHONPATH=")):
+            return None
+        if current in {"-u", "--unset"}:
+            index += 2
+        elif current.startswith("-") or "=" in current:
+            index += 1
+        else:
+            break
+    return index
+
+
+def _command_lookup_option(tokens: list[str], index: int) -> bool:
+    """Return whether command options request a path lookup instead of a run."""
+    while index < len(tokens) and tokens[index].startswith("-"):
+        option = tokens[index]
+        if option in _TERMINAL_OPTIONS:
+            return True
+        if option in {"-v", "-V"}:
+            return True
+        if not option.startswith("--") and ("v" in option[1:] or "V" in option[1:]):
+            return True
+        index += 1
+    return False
+
+
+def _skip_wrapper(tokens: list[str], index: int, token: str) -> int | None:
+    """Skip a command wrapper and its options, returning the next index."""
+    if _wrapper_has_detaching_option(tokens, index, token):
+        return None
+    if token == "command":
+        if _command_lookup_option(tokens, index):
+            return None
+        return _skip_wrapper_options(tokens, index, frozenset())
+    if token == "builtin":
+        return index
+    if token == "env":
+        return _skip_env_options(tokens, index)
+    next_index = _skip_wrapper_options(
+        tokens, index, _WRAPPER_OPTIONS_WITH_VALUE.get(token, frozenset())
+    )
+    if next_index is None:
+        return None
+    extra = _WRAPPER_EXTRA_ARGS.get(token, 0)
+    return next_index + extra if next_index + extra <= len(tokens) else next_index
+
+
+def _effective_command(text: str) -> tuple[str | None, list[str]]:
+    """Return the first token and arguments after unwrapping prefixes."""
+    tokens = _shell_tokens(text)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token not in _WRAPPER_HEADS:
+            return token, tokens[index:]
+        next_index = _skip_wrapper(tokens, index + 1, token)
+        if next_index is None:
+            return None, []
+        index = next_index
+    return None, []
+
+
+def _effective_first_token(text: str) -> str | None:
+    """Return the first token of the command after unwrapping prefixes."""
+    return _effective_command(text)[0]
+
+
+_NON_EXECUTING_FIRST_TOKENS = frozenset(
+    {
+        "[",
+        "alias",
+        "break",
+        "case",
+        "continue",
+        "declare",
+        "echo",
+        "elif",
+        "exit",
+        "export",
+        "false",
+        "for",
+        "function",
+        "grep",
+        "hash",
+        "if",
+        "local",
+        "printf",
+        "readonly",
+        "return",
+        "set",
+        "shift",
+        "test",
+        "trap",
+        "true",
+        "typeset",
+        "unalias",
+        "unset",
+        "until",
+        "while",
+        "!",
+        ":",
+    }
+)
+
+
 def _segment_can_run(
     text: str,
     connector: str | None,
@@ -539,55 +1127,719 @@ def _segment_can_run(
     dead: bool,
     blocked: bool,
 ) -> bool:
-    if not text or dead or blocked or connector in {"||", "|", "&"}:
+    if not text or dead or blocked or connector in {"||", "&&", "|", "&"}:
         return False
     if next_connector in {"||", "&&", "|", "&"}:
         return False
-    first = text.split(None, 1)[0]
-    if first in {
-        "echo",
-        "printf",
-        "if",
-        "elif",
-        "while",
-        "until",
-        "!",
-        "false",
-        "true",
-        ":",
-        "exit",
-        "return",
-    }:
+    first = _effective_first_token(text)
+    if first is None or first in _NON_EXECUTING_FIRST_TOKENS:
         return False
     if text.startswith("!") or _FUNCTION_DECLARATION.match(text):
         return False
     return not (_ASSIGNMENT.match(text) and "$(" not in text)
 
 
+def _dynamic_token(token: str) -> bool:
+    """Return whether a token is produced by shell expansion."""
+    return "$" in token or "`" in token
+
+
+def _dynamic_command_word(text: str) -> bool:
+    """Return whether the command name is produced by shell expansion."""
+    tokens = _shell_tokens(text)
+    index = 0
+    while index < len(tokens) and _ASSIGNMENT.match(tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return False
+    if tokens[index] in _WRAPPER_HEADS:
+        effective = _effective_first_token(" ".join(tokens[index:]))
+        return effective is not None and _dynamic_token(effective)
+    return _dynamic_token(tokens[index])
+
+
+_SHELL_INTERPRETERS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+_SCRIPT_INTERPRETERS = frozenset({"node", "perl", "php", "ruby"})
+_TERMINAL_OPTIONS = frozenset({"--version", "--help", "-h", "-V", "-v"})
+_TERMINAL_WRAPPER_OPTIONS = frozenset({"--version", "--help", "-V", "-h"})
+_DETACHING_WRAPPER_OPTIONS = frozenset({"-f", "--fork", "-b", "--background"})
+_SCRIPT_OPTION_VALUES: dict[str, frozenset[str]] = {
+    "scripts/contract_release.py": frozenset(
+        {
+            "--ref",
+            "--tag",
+            "--pyproject",
+            "--dist",
+            "--expected-version",
+            "--python",
+            "--version",
+            "--with-jsonschema",
+        }
+    ),
+    "scripts/verify_contract_distribution.py": frozenset(
+        {
+            "--contract-wheel",
+            "--contract-sdist",
+            "--engine-wheel",
+            "--engine-sdist",
+            "--expected-version",
+        }
+    ),
+    "scripts/e2e_contract_consumer.py": frozenset(
+        {
+            "--expected-version",
+            "--reference-config",
+            "--forbid-source-root",
+        }
+    ),
+    "scripts/smoke_engine_install.py": frozenset(
+        {
+            "--expected-contract-version",
+            "--import-matrix",
+            "--forbid-source-root",
+        }
+    ),
+}
+_SCRIPT_FLAG_OPTIONS = frozenset({"--with-jsonschema"})
+_SCRIPT_POSITIONALS: dict[str, frozenset[str]] = {
+    "scripts/contract_release.py": frozenset(
+        {"check-tag", "install", "publish", "show-endpoints"}
+    ),
+}
+
+
+def _normalized_shell_text(text: str) -> str:
+    return text.replace('"', "").replace("'", "")
+
+
+def _terminal_option_before(tail: list[str], stop: int) -> bool:
+    return any(token in _TERMINAL_OPTIONS for token in tail[1:stop])
+
+
+def _is_python_interpreter(name: str) -> bool:
+    return name.startswith("python")
+
+
+def _linter_result_argument(
+    argument: ast.expr, imported_names: set[str], marker: str
+) -> bool:
+    """Return whether an exit argument is the linter call itself."""
+    if not isinstance(argument, ast.Call):
+        return False
+    function = argument.func
+    if isinstance(function, ast.Name) and function.id in imported_names:
+        return True
+    if isinstance(function, ast.Attribute):
+        text = ast.unparse(function)
+        return text.startswith(f"{marker}.") and text.rsplit(".", 1)[-1] in {
+            "lint_imports",
+            *imported_names,
+        }
+    return False
+
+
+def _python_exit_argument(tree: ast.Module) -> ast.expr | None:
+    """Return the argument of a final top-level ``exit`` or ``SystemExit``."""
+    if not tree.body:
+        return None
+    last = tree.body[-1]
+    if isinstance(last, ast.Expr) and isinstance(last.value, ast.Call):
+        call = last.value
+        if ast.unparse(call.func) in {"exit", "sys.exit"} and call.args:
+            return call.args[0]
+    if isinstance(last, ast.Raise) and isinstance(last.exc, ast.Call):
+        raise_call = last.exc
+        if ast.unparse(raise_call.func) == "SystemExit" and raise_call.args:
+            return raise_call.args[0]
+    return None
+
+
+def _python_rebinds_linter(
+    tree: ast.Module, imported_names: set[str], marker: str
+) -> bool:
+    """Return whether Python code rebinds the exit or linter entry points."""
+    names = {"sys", "exit", "SystemExit"} | imported_names
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in names:
+                return True
+            if isinstance(target, ast.Attribute):
+                text = ast.unparse(target)
+                if text.startswith(("sys.", f"{marker}.")):
+                    return True
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in names
+        ):
+            return True
+    return False
+
+
+def _python_exits_with_linter(
+    tree: ast.Module, imported_names: set[str], marker: str
+) -> bool:
+    """Return whether Python code propagates a linter result to the exit status."""
+    if _python_rebinds_linter(tree, imported_names, marker):
+        return False
+    argument = _python_exit_argument(tree)
+    return argument is not None and _linter_result_argument(
+        argument, imported_names, marker
+    )
+
+
+def _python_code_executes_marker(code: str, marker: str) -> bool:
+    """Return whether Python code imports or calls the marker."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    imported_names: set[str] = set()
+    calls: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if marker in alias.name:
+                    imported_names.add(alias.name.split(".")[-1])
+        elif isinstance(node, ast.ImportFrom):
+            if marker in (node.module or ""):
+                imported_names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Call):
+            for child in ast.walk(node):
+                if isinstance(child, ast.Name):
+                    calls.append(child.id)
+                elif isinstance(child, ast.Attribute):
+                    calls.append(ast.unparse(child))
+    if marker == "importlinter.cli":
+        return _python_exits_with_linter(tree, imported_names, marker)
+    if any(marker in call for call in calls):
+        return True
+    return any(name in call for name in imported_names for call in calls)
+
+
+def _module_marker_matches(marker: str, module: str) -> bool:
+    return (
+        marker == module or marker.startswith(module + " ") or f"-m {module}" in marker
+    )
+
+
+def _script_arguments_allowed(script: str, arguments: list[str]) -> bool:
+    allowed: frozenset[str] = frozenset()
+    positionals: frozenset[str] = frozenset()
+    for suffix, options in _SCRIPT_OPTION_VALUES.items():
+        if script.endswith(suffix):
+            allowed = options
+            break
+    for suffix, values in _SCRIPT_POSITIONALS.items():
+        if script.endswith(suffix):
+            positionals = values
+            break
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if not token.startswith("-"):
+            if token not in positionals:
+                return False
+            index += 1
+            continue
+        if token not in allowed:
+            return False
+        if token in _SCRIPT_FLAG_OPTIONS:
+            index += 1
+            continue
+        if index + 1 >= len(arguments) or arguments[index + 1] in _TERMINAL_OPTIONS:
+            return False
+        index += 2
+    return True
+
+
+def _interpreter_script_matches(
+    tail: list[str],
+    normalized_markers: list[str],
+    options_with_value: frozenset[str],
+) -> bool:
+    index = _skip_options(tail, 1, options_with_value)
+    if index >= len(tail):
+        return False
+    script = _normalized_shell_text(tail[index])
+    interpreter = _normalized_shell_text(tail[0])
+    command_text = _normalized_shell_text(" ".join(tail))
+    if not _script_arguments_allowed(script, tail[index + 1 :]):
+        return False
+    return all(marker in command_text for marker in normalized_markers) and any(
+        marker.startswith(script)
+        or (marker.startswith(interpreter + " ") and script in marker)
+        for marker in normalized_markers
+    )
+
+
+def _python_executes_markers(tail: list[str], normalized_markers: list[str]) -> bool:
+    if "-c" in tail:
+        index = tail.index("-c")
+        if _terminal_option_before(tail, index) or index + 1 >= len(tail):
+            return False
+        code = tail[index + 1]
+        return all(
+            _python_code_executes_marker(code, marker) for marker in normalized_markers
+        )
+    if "-m" in tail:
+        index = tail.index("-m")
+        if _terminal_option_before(tail, index) or index + 1 >= len(tail):
+            return False
+        if any(token in _TERMINAL_OPTIONS for token in tail[index + 2 :]):
+            return False
+        module = tail[index + 1]
+        actual = tail[index + 1 :]
+        expected_commands: list[list[str]] = []
+        for marker in normalized_markers:
+            if f"-m {module}" in marker:
+                suffix = marker.split(f"-m {module}", 1)[1].strip()
+                expected = module + (f" {suffix}" if suffix else "")
+                expected_commands.append(expected.split())
+            elif marker.split()[0] == module:
+                expected_commands.append(marker.split())
+        if module == "pytest":
+            return actual in expected_commands
+        if module == "importlinter.cli":
+            return False
+        if module in {"mypy", "ruff"}:
+            return any(
+                actual[: len(expected)] == expected
+                and all(
+                    not token.startswith(("-", "@"))
+                    for token in actual[len(expected) :]
+                )
+                for expected in expected_commands
+            )
+        if module in {"build", "twine"}:
+            return any(
+                actual[: len(expected)] == expected for expected in expected_commands
+            ) and all(
+                _module_marker_matches(marker, module) for marker in normalized_markers
+            )
+        return all(
+            _module_marker_matches(marker, module) for marker in normalized_markers
+        )
+    options_with_value = frozenset({"-W", "-X", "-Q"})
+    script_index = _skip_options(tail, 1, options_with_value)
+    if _terminal_option_before(tail, script_index):
+        return False
+    return _interpreter_script_matches(tail, normalized_markers, options_with_value)
+
+
+def _script_interpreter_executes(
+    tail: list[str], normalized_markers: list[str]
+) -> bool:
+    if any(option in tail for option in ("-e", "-E", "--eval")):
+        return False
+    script_index = _skip_options(tail, 1, frozenset())
+    if _terminal_option_before(tail, script_index):
+        return False
+    return _interpreter_script_matches(tail, normalized_markers, frozenset())
+
+
+def _marker_is_executed(text: str, markers: tuple[str, ...]) -> bool:
+    """Return whether the marker appears where a command would execute it."""
+    tokens = _shell_tokens(text)
+    first, tail = _effective_command(text)
+    if first is None:
+        return False
+    if _ASSIGNMENT.match(text) and "$(" in text:
+        return _assignment_runs_markers(text, markers)
+    name = Path(first).name
+    if name == "eval":
+        return _requirement_executed(_logical_commands(" ".join(tokens[1:])), markers)
+    if name in _SHELL_INTERPRETERS:
+        if "-c" not in tail:
+            return False
+        index = tail.index("-c")
+        if _terminal_option_before(tail, index) or index + 1 >= len(tail):
+            return False
+        return _requirement_executed(_logical_commands(tail[index + 1]), markers)
+    normalized_markers = [_normalized_shell_text(marker) for marker in markers]
+    if _is_python_interpreter(name):
+        return _python_executes_markers(tail, normalized_markers)
+    if name in _SCRIPT_INTERPRETERS:
+        return _script_interpreter_executes(tail, normalized_markers)
+    if any(token in _TERMINAL_OPTIONS for token in tail[1:]):
+        return False
+    command_text = _normalized_shell_text(" ".join(tail))
+    if not all(marker in command_text for marker in normalized_markers):
+        return False
+    normalized_tail = [_normalized_shell_text(token) for token in tail]
+    for marker in normalized_markers:
+        expected = marker.split()
+        if not expected or normalized_tail[: len(expected)] != expected:
+            continue
+        if all(
+            not token.startswith(("-", "@"))
+            for token in normalized_tail[len(expected) :]
+        ):
+            return True
+    return False
+
+
+def _assignment_runs_markers(text: str, markers: tuple[str, ...]) -> bool:
+    """Return whether an assignment runs the marker in a command substitution."""
+    return any(
+        all(marker in body for marker in markers)
+        and _segment_can_run(body.strip(), None, None, False, False)
+        and _marker_is_executed(body.strip(), markers)
+        for body in _command_substitutions(text)
+    )
+
+
+def _standalone_segment(segments: list[tuple[str, str | None]], index: int) -> bool:
+    """Return whether a segment is not chained to another command."""
+    if segments[index][1] is not None:
+        return False
+    return all(
+        not text and connector == ";" for text, connector in segments[index + 1 :]
+    )
+
+
 def _requirement_executed(
-    commands: list[tuple[str, bool]], markers: tuple[str, ...]
+    commands: list[tuple[str, bool, bool]], markers: tuple[str, ...]
 ) -> bool:
     blocked = False
-    for command, dead in commands:
+    for command, dead, conditional in commands:
         segments = _segments(command)
         for index, (text, connector) in enumerate(segments):
             if not text:
                 continue
-            first = text.split(None, 1)[0]
+            first = _effective_first_token(text)
             if (
                 not dead
                 and connector not in {"||", "&&", "|", "&"}
                 and first in {"false", "exit", "return"}
             ):
                 blocked = True
-            if not all(marker in text for marker in markers):
+            if conditional or not all(marker in text for marker in markers):
                 continue
             next_connector = (
                 segments[index + 1][1] if index + 1 < len(segments) else None
             )
-            if _segment_can_run(text, connector, next_connector, dead, blocked):
+            if not _standalone_segment(segments, index):
+                continue
+            if not _segment_can_run(text, connector, next_connector, dead, blocked):
+                continue
+            if _marker_is_executed(text, markers):
                 return True
     return False
+
+
+def _errexit_effective_command(text: str) -> tuple[str | None, list[str]]:
+    """Unwrap only prefixes that can run a builtin in the current shell."""
+    tokens = _shell_tokens(text)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "command":
+            if _command_lookup_option(tokens, index + 1):
+                return None, []
+            index = _skip_options(tokens, index + 1, frozenset())
+            continue
+        if token == "builtin":
+            index += 1
+            continue
+        if token == "time":
+            index += 2 if index + 1 < len(tokens) and tokens[index + 1] == "-p" else 1
+            continue
+        return token, tokens[index:]
+    return None, []
+
+
+def _errexit_matches(
+    text: str,
+    pattern: re.Pattern[str],
+    *,
+    recurse_shell: bool = True,
+) -> bool:
+    """Match an errexit change after unwrapping current-shell prefixes."""
+    first, tail = _errexit_effective_command(text)
+    if first is None:
+        return False
+    name = Path(first).name
+    if name == "eval":
+        body = " ".join(tail[1:])
+        for command, _dead, _conditional in _logical_commands(body):
+            segments = _segments(command)
+            for segment, connector in segments:
+                if pattern is _ERREXIT and connector not in {None, ";"}:
+                    continue
+                if _errexit_matches(segment, pattern, recurse_shell=recurse_shell):
+                    return True
+        return False
+    if name in _SHELL_INTERPRETERS and "-c" in tail:
+        if not recurse_shell:
+            return False
+        index = tail.index("-c")
+        if _terminal_option_before(tail, index):
+            return False
+        return index + 1 < len(tail) and _errexit_matches(tail[index + 1], pattern)
+    return bool(pattern.match(" ".join(tail)))
+
+
+def _function_token_name(token: str) -> str | None:
+    match = re.match(r"([^\s(){;]+)\s*\(\s*\)", token)
+    return match.group(1) if match is not None else None
+
+
+def _function_declaration_name(tokens: list[str], index: int) -> str | None:
+    name = _function_token_name(tokens[index])
+    if name is not None:
+        return name
+    if index + 1 < len(tokens) and tokens[index + 1] == "()":
+        return tokens[index]
+    if (
+        index + 2 < len(tokens)
+        and tokens[index + 1] == "("
+        and tokens[index + 2] == ")"
+    ):
+        return tokens[index]
+    return None
+
+
+def _shadowing_names(commands: list[tuple[str, bool, bool]]) -> set[str]:
+    """Find functions, aliases and hash overrides that can shadow commands."""
+    names: set[str] = set()
+    for command, _dead, _conditional in commands:
+        tokens = _shell_tokens(command)
+        for index, token in enumerate(tokens):
+            name = _function_declaration_name(tokens, index)
+            if name is not None:
+                names.add(name)
+            if token == "function" and index + 1 < len(tokens):
+                match = re.match(r"([^\s(){;]+)", tokens[index + 1])
+                if match is not None:
+                    names.add(match.group(1))
+            if token == "alias":
+                cursor = index + 1
+                while cursor < len(tokens) and tokens[cursor].startswith("-"):
+                    cursor += 1
+                if cursor < len(tokens) and "=" in tokens[cursor]:
+                    names.add(tokens[cursor].split("=", 1)[0])
+            if token == "hash" and index + 1 < len(tokens):
+                option = tokens[index + 1]
+                if option == "-p":
+                    cursor = index + 3
+                    if cursor < len(tokens) and tokens[cursor] == "--":
+                        cursor += 1
+                    if cursor < len(tokens):
+                        names.add(tokens[cursor])
+                elif option.startswith("-p") and len(option) > 2:
+                    names.add(tokens[index + 2])
+            if token == "eval" and index + 1 < len(tokens):
+                body = " ".join(tokens[index + 1 :])
+                names.update(_shadowing_names(_logical_commands(body)))
+    return names
+
+
+_GATE_ENV_KEYS = (
+    "PATH",
+    "PYTHONPATH",
+    "BASH_ENV",
+    "PYTEST_ADDOPTS",
+    "PYTEST_PLUGINS",
+)
+
+
+_COMMAND_PREFIX_KEYWORDS = frozenset(
+    {
+        "then",
+        "do",
+        "else",
+        "elif",
+        "if",
+        "while",
+        "until",
+        "for",
+        "select",
+        "case",
+        "{",
+        "(",
+        "!",
+    }
+)
+
+
+def _command_word(part: str) -> str | None:
+    """Return the command word after assignment, keyword and wrapper prefixes."""
+    tokens = _shell_tokens(part)
+    index = 0
+    while index < len(tokens) and (
+        _ASSIGNMENT.match(tokens[index]) or tokens[index] in _COMMAND_PREFIX_KEYWORDS
+    ):
+        index += 1
+    if index >= len(tokens):
+        return None
+    return _effective_first_token(" ".join(tokens[index:]))
+
+
+def _forbidden_constructs(command: str) -> set[str]:
+    issues: set[str] = set()
+    for part, _connector in _segments(command):
+        if _dynamic_command_word(part):
+            issues.add("dynamic_command")
+        if _command_word(part) in {"source", "."}:
+            issues.add("source")
+        tokens = _shell_tokens(part)
+        for index, token in enumerate(tokens):
+            following = tokens[index + 1 :]
+            if token == "set" and (
+                following[:1] == ["+e"]
+                or following[:2] == ["+o", "errexit"]
+                or (following and any(_dynamic_token(arg) for arg in following))
+            ):
+                issues.add("errexit")
+            if token == "trap":
+                issues.add("trap")
+            if token == "shopt" and _shopt_disables_errexit(following):
+                issues.add("errexit")
+            if token == "enable" and following[:1] == ["-n"]:
+                issues.add("enable")
+            if token == "eval" and following:
+                body = " ".join(following)
+                if _command_substitutions(body) or "`" in body:
+                    issues.add("dynamic_eval")
+                for inner, _dead, _conditional in _logical_commands(body):
+                    issues.update(_forbidden_constructs(inner))
+    return issues
+
+
+def _shopt_disables_errexit(following: list[str]) -> bool:
+    """Return whether ``shopt`` options disable the ``errexit`` shell option."""
+    options = [
+        option for option in following if option.startswith("-") and option != "-o"
+    ]
+    disabling = any(
+        not option.startswith("--") and "u" in option[1:] for option in options
+    )
+    if not disabling or "-o" not in following:
+        return False
+    target = following[following.index("-o") + 1 :]
+    return bool(target) and (target[0] == "errexit" or _dynamic_token(target[0]))
+
+
+_REDIRECTION_TOKEN = re.compile(r"^(?:\d+|\{[^}]+\})?(?:[<>]|&>)")
+_REDIRECTION_OPERATORS = frozenset(
+    {">", ">>", "<", "<<", "<<<", "&>", "&>>", "<>", ">|"}
+)
+
+
+def _exec_has_command(arguments: list[str]) -> bool:
+    """Return whether ``exec`` arguments contain a command, not redirects."""
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in _REDIRECTION_OPERATORS:
+            index += 2
+            continue
+        if _REDIRECTION_TOKEN.match(token):
+            index += 1
+            continue
+        return True
+    return False
+
+
+def _has_early_termination(command: str) -> bool:
+    for part, _connector in _segments(command):
+        tokens = _shell_tokens(part)
+        for index, token in enumerate(tokens):
+            following = tokens[index + 1 :]
+            if token in {"exit", "return"} and following:
+                return True
+            if token == "exec" and _exec_has_command(following):
+                return True
+            if token == "eval" and following:
+                body = " ".join(following)
+                if any(
+                    _has_early_termination(inner)
+                    for inner, _dead, _conditional in _logical_commands(body)
+                ):
+                    return True
+    return False
+
+
+def _has_gate_env_override(command: str) -> bool:
+    tokens = _shell_tokens(command)
+    if any(token == key for token in tokens for key in _GATE_ENV_KEYS) and any(
+        token
+        in {"export", "declare", "typeset", "readonly", "read", "mapfile", "readarray"}
+        for token in tokens
+    ):
+        return True
+    for token in tokens:
+        assignment_key, separator, _value = token.partition("=")
+        if separator and ("$" in assignment_key or "`" in assignment_key):
+            return True
+        if any(token.startswith((f"{key}=", f"{key}+=")) for key in _GATE_ENV_KEYS):
+            return True
+    if any(
+        token
+        in {"export", "declare", "typeset", "readonly", "read", "mapfile", "readarray"}
+        for token in tokens
+    ) and any(("$" in token or "`" in token) and "=" not in token for token in tokens):
+        return True
+    if re.search(
+        r"(?:^|[\s;|&(])(?:" + "|".join(_GATE_ENV_KEYS) + r")(?:\+)?=",
+        command,
+    ):
+        return True
+    for index, token in enumerate(tokens):
+        if token == "printf" and index + 2 < len(tokens) and tokens[index + 1] == "-v":
+            target = tokens[index + 2]
+            if target in _GATE_ENV_KEYS or "$" in target or "`" in target:
+                return True
+        if token == "eval" and index + 1 < len(tokens):
+            body = " ".join(tokens[index + 1 :])
+            if any(
+                _has_gate_env_override(inner)
+                for inner, _dead, _conditional in _logical_commands(body)
+            ):
+                return True
+    return False
+
+
+_FORBIDDEN_CONSTRUCT_MESSAGES = {
+    "errexit": "disables error handling with 'set +e' or 'set +o errexit'",
+    "trap": "uses a trap that can mask gate failures",
+    "source": "sources another script, which can shadow required commands",
+    "enable": "disables a shell builtin",
+    "dynamic_eval": "evaluates a command substitution with 'eval'",
+    "dynamic_command": ("runs a command name produced by a variable or substitution"),
+}
+
+
+def _shadowing_violations(
+    path: Path, cube_name: str, commands: list[tuple[str, bool, bool]]
+) -> list[Violation]:
+    """Return violations for every declaration that can shadow a command."""
+    return [
+        Violation(
+            path,
+            1,
+            f"cube {cube_name!r} declares a function, alias or hash that "
+            f"shadows required command or guard builtin {name!r}",
+        )
+        for name in sorted(_shadowing_names(commands))
+    ]
+
+
+def _last_marker_index(
+    commands: list[tuple[str, bool, bool]],
+    markers: tuple[tuple[str, ...], ...],
+) -> int:
+    """Return the index of the last command that runs a required marker."""
+    index = -1
+    for command_index, (command, _dead, _conditional) in enumerate(commands):
+        if any(all(marker in command for marker in group) for group in markers):
+            index = command_index
+    return index
 
 
 def _shell_violations(
@@ -597,19 +1849,52 @@ def _shell_violations(
     markers: tuple[tuple[str, ...], ...],
 ) -> list[Violation]:
     commands = _logical_commands(script)
-    violations: list[Violation] = []
-    first_command: tuple[str, bool] | None = None
-    for command, dead in commands:
-        for text, _ in _segments(command):
+    violations = _shadowing_violations(path, cube_name, commands)
+    last_marker_index = _last_marker_index(commands, markers)
+    first_command: tuple[str, bool, bool] | None = None
+    reported_constructs: set[str] = set()
+    path_override = False
+    for command_index, (command, dead, _conditional) in enumerate(commands):
+        constructs = _forbidden_constructs(command)
+        for construct, message in _FORBIDDEN_CONSTRUCT_MESSAGES.items():
+            if construct in constructs and construct not in reported_constructs:
+                reported_constructs.add(construct)
+                violations.append(Violation(path, 1, f"cube {cube_name!r} {message}"))
+        if not path_override and _has_gate_env_override(command):
+            path_override = True
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"cube {cube_name!r} overrides PATH or PYTHONPATH",
+                )
+            )
+        if command_index < last_marker_index and _has_early_termination(command):
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"cube {cube_name!r} can exit before required gates run",
+                )
+            )
+        segments = _segments(command)
+        for index, (text, _connector) in enumerate(segments):
             if text and first_command is None:
-                first_command = (text, dead)
-            if _DISABLE_ERREXIT.match(text):
+                first_command = (
+                    text,
+                    dead,
+                    _standalone_segment(segments, index),
+                )
+            if "errexit" not in reported_constructs and _errexit_matches(
+                text, _DISABLE_ERREXIT
+            ):
+                reported_constructs.add("errexit")
                 violations.append(
                     Violation(
                         path,
                         1,
-                        f"cube {cube_name!r} disables error handling with "
-                        "'set +e' or 'set +o errexit'",
+                        f"cube {cube_name!r} "
+                        f"{_FORBIDDEN_CONSTRUCT_MESSAGES['errexit']}",
                     )
                 )
         if re.search(r"(?:\|\||;|&&)\s*(?:true|:)\s*(?:$|[;&|])", command):
@@ -620,7 +1905,10 @@ def _shell_violations(
                     f"cube {cube_name!r} swallows a failure with a 'true' fallback",
                 )
             )
-        if re.match(r"^!\s+\S", command):
+        if re.search(
+            r"(?:^|[;|&({}])\s*(?:time\s+(?:-p\s+)?)?!\s+\S",
+            command,
+        ):
             violations.append(
                 Violation(
                     path,
@@ -631,7 +1919,8 @@ def _shell_violations(
     if (
         first_command is None
         or first_command[1]
-        or not _ERREXIT.match(first_command[0])
+        or not first_command[2]
+        or not _errexit_matches(first_command[0], _ERREXIT, recurse_shell=False)
     ):
         violations.append(
             Violation(
@@ -1101,9 +2390,65 @@ def _trigger_violations(
     return violations
 
 
+def _env_entries(container: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Return ``env`` entries in mapping, list and string forms."""
+    raw = container.get("env")
+    if isinstance(raw, dict):
+        return [(str(key), value) for key, value in raw.items()]
+    entries: list[tuple[str, Any]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and "=" in item:
+                key, _, value = item.partition("=")
+                entries.append((key.strip(), value.strip()))
+            elif isinstance(item, dict):
+                entries.extend((str(key), value) for key, value in item.items())
+    elif isinstance(raw, str) and "=" in raw:
+        key, _, value = raw.partition("=")
+        entries.append((key.strip(), value.strip()))
+    return entries
+
+
 def _env(container: dict[str, Any]) -> dict[str, Any]:
-    value = container.get("env")
-    return value if isinstance(value, dict) else {}
+    return dict(_env_entries(container))
+
+
+def _env_shape_violations(
+    path: Path, container: dict[str, Any], label: str
+) -> list[Violation]:
+    """Reject an ``env`` that is not a mapping, as documented by SourceCraft."""
+    if "env" not in container:
+        return []
+    raw = container.get("env")
+    if raw is None or isinstance(raw, dict):
+        return []
+    return [
+        Violation(
+            path,
+            1,
+            f"{label} env must be a mapping, not {type(raw).__name__}",
+        )
+    ]
+
+
+def _gate_env_key_violations(
+    path: Path, container: dict[str, Any], label: str
+) -> list[Violation]:
+    violations: list[Violation] = []
+    for key, _value in _env_entries(container):
+        if key in _GATE_ENV_KEYS:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"{label} env must not set {key}",
+                )
+            )
+    return violations
+
+
+def _references_pat_secret(value: Any) -> bool:
+    return isinstance(value, str) and PAT_SECRET_EXPRESSION.search(value) is not None
 
 
 def _pat_cube_violations(
@@ -1113,24 +2458,39 @@ def _pat_cube_violations(
     if not isinstance(name, str):
         return []
     allowed = workflow_name == "publish-contracts" and name in PAT_SCOPED_CUBES
-    violations: list[Violation] = []
-    if PAT_NAME in _env(cube):
-        if not allowed:
+    label = f"cube {name!r} in workflow {workflow_name!r}"
+    violations = _env_shape_violations(path, cube, label)
+    violations.extend(_gate_env_key_violations(path, cube, label))
+    for key, value in _env_entries(cube):
+        references_pat = _references_pat_secret(value)
+        if allowed:
+            if key == PAT_NAME:
+                if not references_pat:
+                    violations.append(
+                        Violation(
+                            path,
+                            1,
+                            f"cube {name!r} does not read {PAT_NAME} from the "
+                            "repository secret",
+                        )
+                    )
+            elif references_pat:
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"cube {name!r} must not receive {PAT_NAME} under "
+                        f"environment key {key!r}; use only {PAT_NAME}",
+                    )
+                )
+        elif key == PAT_NAME or references_pat:
             violations.append(
                 Violation(
                     path,
                     1,
                     f"cube {name!r} in workflow {workflow_name!r} must not "
-                    f"receive {PAT_NAME}; it is not a publishing cube",
-                )
-            )
-        elif _env(cube).get(PAT_NAME) != PAT_SECRET:
-            violations.append(
-                Violation(
-                    path,
-                    1,
-                    f"cube {name!r} does not read {PAT_NAME} from the "
-                    "repository secret",
+                    f"receive {PAT_NAME} under environment key {key!r}; it is "
+                    "not a publishing cube",
                 )
             )
     if PAT_NAME in _uncommented(_script(cube)) and not allowed:
@@ -1150,26 +2510,36 @@ def _pat_workflow_violations(
     workflow: dict[str, Any],
     document: dict[str, Any],
 ) -> list[Violation]:
-    violations: list[Violation] = []
-    if PAT_NAME in _env(workflow):
-        violations.append(
-            Violation(
-                path,
-                1,
-                f"{PAT_NAME} must not be defined at workflow level "
-                f"({workflow_name!r}); scope it to the publishing cubes",
-            )
-        )
-    for index, task in enumerate(_tasks(workflow, document)):
-        if PAT_NAME in _env(task):
+    workflow_label = f"workflow {workflow_name!r}"
+    violations = _env_shape_violations(path, workflow, workflow_label)
+    violations.extend(_gate_env_key_violations(path, workflow, workflow_label))
+    for key, value in _env_entries(workflow):
+        if key == PAT_NAME or _references_pat_secret(value):
             violations.append(
                 Violation(
                     path,
                     1,
-                    f"task {_task_name(task, index)!r} must not receive "
-                    f"{PAT_NAME}; scope it to the publishing cubes",
+                    f"{PAT_NAME} must not be defined at workflow level "
+                    f"({workflow_name!r}) under environment key {key!r}; scope "
+                    "it to the publishing cubes",
                 )
             )
+    for index, task in enumerate(_tasks(workflow, document)):
+        task_name = _task_name(task, index)
+        task_label = f"task {task_name!r}"
+        violations.extend(_env_shape_violations(path, task, task_label))
+        violations.extend(_gate_env_key_violations(path, task, task_label))
+        for key, value in _env_entries(task):
+            if key == PAT_NAME or _references_pat_secret(value):
+                violations.append(
+                    Violation(
+                        path,
+                        1,
+                        f"task {task_name!r} must not receive {PAT_NAME} under "
+                        f"environment key {key!r}; scope it to the publishing "
+                        "cubes",
+                    )
+                )
         raw_cubes = task.get("cubes")
         if not isinstance(raw_cubes, list):
             continue
@@ -1183,16 +2553,19 @@ def _pat_scope_violations(
     path: Path, document: dict[str, Any], publish_cubes: dict[str, dict[str, Any]]
 ) -> list[Violation]:
     """Keep the registry PAT on the cubes that publish or install."""
-    violations: list[Violation] = []
-    if PAT_NAME in _env(document):
-        violations.append(
-            Violation(
-                path,
-                1,
-                f"{PAT_NAME} must not be defined at document level; scope it "
-                "to the publish and verify-from-registry cubes",
+    violations = _env_shape_violations(path, document, "document")
+    violations.extend(_gate_env_key_violations(path, document, "document"))
+    for key, value in _env_entries(document):
+        if key == PAT_NAME or _references_pat_secret(value):
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"{PAT_NAME} must not be defined at document level under "
+                    f"environment key {key!r}; scope it to the publish and "
+                    "verify-from-registry cubes",
+                )
             )
-        )
     workflows = document.get("workflows")
     if isinstance(workflows, dict):
         for workflow_name, workflow in workflows.items():
@@ -1295,12 +2668,23 @@ def _quality_violations(
     if not isinstance(quality, dict):
         return [Violation(path, 1, "CI configuration has no quality-checks workflow")]
     cubes = _cubes(quality, document)
-    all_scripts = _uncommented("\n".join(_script(cube) for cube in cubes.values()))
-    return [
-        Violation(path, 1, f"quality-checks workflow has no {marker!r}")
+    commands: list[tuple[str, bool, bool]] = []
+    violations: list[Violation] = []
+    markers = tuple((marker,) for marker in REGULAR_CHECK_MARKERS)
+    for cube_name, cube in cubes.items():
+        script = _script(cube)
+        commands.extend(_logical_commands(script))
+        violations.extend(_shell_violations(path, cube_name, script, markers))
+    violations.extend(
+        Violation(
+            path,
+            1,
+            f"quality-checks workflow has no executable {marker!r}",
+        )
         for marker in REGULAR_CHECK_MARKERS
-        if marker not in all_scripts
-    ]
+        if not _requirement_executed(commands, (marker,))
+    )
+    return violations
 
 
 def _python_setup_violations(

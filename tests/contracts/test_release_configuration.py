@@ -146,6 +146,15 @@ def mutate_publish_workflow(text: str, function: object) -> str:
     return dump_document(document)
 
 
+def replace_gate_script(sourcecraft_text: str, cube_name: str, script: str) -> str:
+    """Replace the whole script of a publish-contracts cube."""
+
+    def apply(workflow: dict[str, object]) -> None:
+        find_cube(workflow, cube_name)["script"] = [script]
+
+    return mutate_publish_workflow(sourcecraft_text, apply)
+
+
 def split_publish_tasks(workflow: dict[str, object], *, needs: object = None) -> None:
     cubes = workflow["tasks"][0]["cubes"]  # type: ignore[index]
     boundary = next(
@@ -1356,6 +1365,210 @@ def test_sourcecraft_guard_accepts_the_pat_only_on_publishing_cubes(
         assert cube["env"] == {"PYPI_REGISTRY_PAT": PAT_SECRET}
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        PAT_SECRET,
+        "${{secrets.PYPI_REGISTRY_PAT}}",
+        "${{   secrets.PYPI_REGISTRY_PAT   }}",
+    ],
+)
+def test_sourcecraft_rejects_an_alternate_pat_key_at_document_level(
+    guard: ModuleType, sourcecraft_text: str, secret: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    document["env"] = {"REGISTRY_TOKEN": secret}
+    text = dump_document(document)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "document level" in violations
+    assert "REGISTRY_TOKEN" in violations
+    assert secret not in violations
+
+
+def test_sourcecraft_rejects_an_alternate_pat_key_at_workflow_level(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = append_to_publish_registry_env(
+        sourcecraft_text, f"REGISTRY_TOKEN: {PAT_SECRET}"
+    )
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "workflow level" in violations
+    assert "REGISTRY_TOKEN" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_rejects_an_alternate_pat_key_at_task_level(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        workflow["tasks"][0]["env"] = {"LEAKED_TOKEN": PAT_SECRET}  # type: ignore[index]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "task" in violations
+    assert "LEAKED_TOKEN" in violations
+    assert PAT_SECRET not in violations
+
+
+@pytest.mark.parametrize(
+    "cube_name", ["setup", "quality-gates", "build-and-verify", "preflight"]
+)
+@pytest.mark.parametrize(
+    "key",
+    ["REGISTRY_TOKEN", "LEAKED_TOKEN", "PYPI_REGISTRY_PAT_BACKUP"],
+)
+def test_sourcecraft_rejects_an_alternate_pat_key_in_non_publishing_cubes(
+    guard: ModuleType, sourcecraft_text: str, cube_name: str, key: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, cube_name)
+        cube["env"] = {key: PAT_SECRET}
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert cube_name in violations
+    assert key in violations
+    assert PAT_SECRET not in violations
+
+
+@pytest.mark.parametrize("cube_name", ["publish", "verify-from-registry"])
+@pytest.mark.parametrize(
+    "key",
+    ["REGISTRY_TOKEN", "PYPI_REGISTRY_PAT_BACKUP", " PYPI_REGISTRY_PAT "],
+)
+def test_sourcecraft_rejects_an_alternate_pat_key_in_publishing_cubes(
+    guard: ModuleType, sourcecraft_text: str, cube_name: str, key: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, cube_name)
+        cube["env"] = {"PYPI_REGISTRY_PAT": PAT_SECRET, key: PAT_SECRET}
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert cube_name in violations
+    assert key in violations
+    assert PAT_SECRET not in violations
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "${{secrets.PYPI_REGISTRY_PAT}}",
+        "${{   secrets.PYPI_REGISTRY_PAT   }}",
+    ],
+)
+def test_sourcecraft_accepts_pat_expressions_with_flexible_spacing(
+    guard: ModuleType, sourcecraft_text: str, secret: str
+) -> None:
+    def replace(workflow: dict[str, object]) -> None:
+        for cube_name in ("publish", "verify-from-registry"):
+            find_cube(workflow, cube_name)["env"] = {"PYPI_REGISTRY_PAT": secret}
+
+    text = mutate_publish_workflow(sourcecraft_text, replace)
+    assert guard.check_sourcecraft_ci(text) == []
+
+
+def test_sourcecraft_rejects_an_alternate_pat_key_in_list_env(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["env"] = [f"REGISTRY_TOKEN={PAT_SECRET}"]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "quality-gates" in violations
+    assert "REGISTRY_TOKEN" in violations
+    assert "must be a mapping" in violations
+    assert PAT_SECRET not in violations
+
+
+@pytest.mark.parametrize("cube_name", ["publish", "verify-from-registry"])
+def test_sourcecraft_rejects_a_non_mapping_publish_env(
+    guard: ModuleType, sourcecraft_text: str, cube_name: str
+) -> None:
+    def add_pat(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, cube_name)
+        cube["env"] = [f"PYPI_REGISTRY_PAT={PAT_SECRET}"]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_pat)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert cube_name in violations
+    assert "must be a mapping" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_rejects_a_non_mapping_document_env(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    document["env"] = [f"PYPI_REGISTRY_PAT={PAT_SECRET}"]
+    violations = messages(guard.check_sourcecraft_ci(dump_document(document)))
+    assert "document env must be a mapping" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_rejects_an_alternate_pat_key_in_another_workflow(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    quality_workflow = document["workflows"]["quality-checks"]  # type: ignore[index]
+    find_cube(quality_workflow, "lint-and-typecheck")["env"] = {
+        "LEAKED_TOKEN": PAT_SECRET
+    }
+    text = dump_document(document)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "lint-and-typecheck" in violations
+    assert "LEAKED_TOKEN" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_resolves_a_merged_pat_env(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    text = sourcecraft_text.replace(
+        "\nworkflows:\n",
+        (
+            "\nx-shared-env: &shared-env\n"
+            f"  REGISTRY_TOKEN: {PAT_SECRET}\n"
+            "\nworkflows:\n"
+        ),
+        1,
+    )
+    text = text.replace(
+        "          - name: quality-gates\n",
+        "          - name: quality-gates\n"
+        "            env:\n"
+        "              <<: *shared-env\n",
+        1,
+    )
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert "quality-gates" in violations
+    assert "REGISTRY_TOKEN" in violations
+    assert PAT_SECRET not in violations
+
+
+def test_sourcecraft_accepts_a_null_document_env(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    document["env"] = None
+    assert guard.check_sourcecraft_ci(dump_document(document)) == []
+
+
+def test_sourcecraft_reports_each_pat_leak_without_the_secret(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    document["env"] = {"REGISTRY_TOKEN": PAT_SECRET}
+    find_cube(publish_workflow(document), "setup")["env"] = {"LEAKED_TOKEN": PAT_SECRET}
+    text = dump_document(document)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert violations.count("document level") == 1
+    assert "setup" in violations
+    assert PAT_SECRET not in violations
+
+
 def test_sourcecraft_requires_the_full_tag_ref_in_preflight(
     guard: ModuleType, sourcecraft_text: str
 ) -> None:
@@ -1499,8 +1712,9 @@ def test_sourcecraft_accepts_elif_in_a_gate_script(
         'if [ -z "$X" ]; then\n'
         "                  echo empty\n"
         '                elif [ "$X" = 1 ]; then\n'
-        "                  python3.11 scripts/check_contract_boundaries.py\n"
-        "                fi"
+        "                  echo configured\n"
+        "                fi\n"
+        "                python3.11 scripts/check_contract_boundaries.py"
     )
     text = inside(
         sourcecraft_text,
@@ -1570,9 +1784,1129 @@ def test_sourcecraft_rejects_a_backgrounded_gate(
 @pytest.mark.parametrize(
     "script",
     [
+        (
+            "set -e\ntest -f /nonexistent && "
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\nfalse && python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ntrue && python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsome_command && python3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\ntest -f /nonexistent &&\n  "
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\ntrue &&\n  python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ncd /tmp; python3.11 scripts/check_contract_boundaries.py",
+        "set -e\n: && python3.11 scripts/check_contract_boundaries.py",
+        "set -e\n(echo start && python3.11 scripts/check_contract_boundaries.py)",
+        (
+            "set -e\ntest -f /nonexistent &&\n\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ntest -f /nonexistent &&\n# comment\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ntest -f /nonexistent ||\n\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ntest -f /nonexistent ||\n# comment\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ntest -f /nonexistent |\n# comment\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_a_gate_chained_before_and(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\n:\npython3.11 scripts/check_contract_boundaries.py",
+        "set -eo pipefail\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\npython3.11 scripts/check_contract_boundaries.py;",
+        "set -e\nCHECK=$(python3.11 scripts/check_contract_boundaries.py)",
+        "set -e\nnohup python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nenv python3.11 scripts/check_contract_boundaries.py",
+        "set -e\n(\n  python3.11 scripts/check_contract_boundaries.py\n)",
+        'set -e\neval "python3.11 scripts/check_contract_boundaries.py"',
+        'set -e\nbash -c "python3.11 scripts/check_contract_boundaries.py"',
+    ],
+)
+def test_sourcecraft_accepts_a_standalone_gate(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" not in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\nCHECK=$(echo python3.11 scripts/check_contract_boundaries.py)",
+        "set -e\nCHECK=$(printf '%s' python3.11 scripts/check_contract_boundaries.py)",
+        "set -e\nCHECK=$(true python3.11 scripts/check_contract_boundaries.py)",
+        "set -e\nCHECK=$(alias python3.11 scripts/check_contract_boundaries.py)",
+        "set -e\nexport CHECK=$(echo python3.11 scripts/check_contract_boundaries.py)",
+    ],
+)
+def test_sourcecraft_rejects_a_gate_only_stored_in_a_variable(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            "set -e\ncommand declare CHECK='python3.11 "
+            "scripts/check_contract_boundaries.py'"
+        ),
+        (
+            "set -e\nbuiltin export CHECK='python3.11 "
+            "scripts/check_contract_boundaries.py'"
+        ),
+        "set -e\nenv CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nenv -i CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nnohup echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ntime echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ntimeout 5 echo python3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\ntimeout -s TERM 5 echo python3.11 "
+            "scripts/check_contract_boundaries.py"
+        ),
+        "set -e\ntime -p echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nnice -n 5 echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo -u root echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nstdbuf -oL echo python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ncommand -v python3.11 scripts/check_contract_boundaries.py",
+    ],
+)
+def test_sourcecraft_rejects_a_gate_behind_a_command_prefix(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\ntest -f scripts/check_contract_boundaries.py",
+        "set -e\ngrep -q import scripts/check_contract_boundaries.py",
+        "set -e\nhash python3.11 scripts/check_contract_boundaries.py",
+        'set -e\neval "echo python3.11 scripts/check_contract_boundaries.py"',
+        'set -e\nbash -c "echo python3.11 scripts/check_contract_boundaries.py"',
+        (
+            "set -e\npython3.11 -c \"print('python3.11 "
+            "scripts/check_contract_boundaries.py')\""
+        ),
+        (
+            "set -e\nenv CHECK='python3.11 "
+            'scripts/check_contract_boundaries.py\' python3.11 -c "print(1)"'
+        ),
+        "set -e\nls scripts/check_contract_boundaries.py",
+        "set -e\npython3.11 -m py_compile scripts/check_contract_boundaries.py",
+        "set -e\nruby -e 'puts \"scripts/check_contract_boundaries.py\"'",
+        "set -e\nnode -e 'console.log(\"scripts/check_contract_boundaries.py\")'",
+        ("set -e\nX='echo hi\npython3.11 scripts/check_contract_boundaries.py'"),
+        ('set -e\nX="echo hi\npython3.11 scripts/check_contract_boundaries.py"'),
+        "set -e\npython3.11 --version scripts/check_contract_boundaries.py",
+        "set -e\nnode --version scripts/check_contract_boundaries.py",
+        "set -e\npython3.11 scripts/check_contract_boundaries.py --help",
+        "set -e\nenv --version python3.11 scripts/check_contract_boundaries.py",
+        "set -e\npython3.11 scripts/check_release_configuration.py --help",
+        "set -e\npython3.11 -m pytest tests/contracts --version",
+        "set -e\npython3.11 -m pytest tests/contracts --collect-only",
+        (
+            "set -e\npython3.11 scripts/check_contract_boundaries.py "
+            "--repo-root /tmp/other-tree"
+        ),
+        "set -e\nnice -n 5 --version python3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\ntimeout --foreground --version 5 python3.11 "
+            "scripts/check_contract_boundaries.py"
+        ),
+        "set -e\nstdbuf -o0 --version python3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nenv -S 'scripts/check_contract_boundaries.py "
+            "--repo-root /tmp/other-tree'"
+        ),
+        (
+            "set -e\nenv --split-string='scripts/check_contract_boundaries.py "
+            "--repo-root /tmp/other-tree'"
+        ),
+        ("set -e\nenv -vS 'python3.11 scripts/check_release_configuration.py --help'"),
+        ("set -e\nenv -iS 'python3.11 -m pytest tests/contracts --collect-only'"),
+        (
+            "set -e\nenv --split 'python3.11 -m ruff check src/ "
+            "configurable-automl-contracts/src/ --help'"
+        ),
+        (
+            "set -e\nenv --split-str 'python3.11 "
+            "scripts/check_release_configuration.py --help'"
+        ),
+        ("set -e\nX=$'a\\'$(python3.11 scripts/check_contract_boundaries.py)'"),
+        "set -e\ncommand -pv python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ncommand -p -v python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsetsid -f python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsetsid --fork python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo -b python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo --background python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsetsid --for python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsetsid --f python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo --backg python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo --back python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo -bn python3.11 scripts/check_contract_boundaries.py",
+        "set -e\nsudo -nb python3.11 scripts/check_contract_boundaries.py",
+    ],
+)
+def test_sourcecraft_rejects_a_gate_only_in_an_argument(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        'set -e\npython3.11 -c "import importlinter.cli"',
+        'set -e\npython3.11 -c "import importlinter.cli; print(1)"',
+        (
+            'set -e\npython3.11 -c "from importlinter.cli import lint_imports; '
+            'lint_imports()"'
+        ),
+        'set -e\npython3.11 -c "import importlinter.cli; print(importlinter.cli)"',
+        (
+            'set -e\npython3.11 -c "from importlinter.cli import lint_imports; '
+            'print(lint_imports)"'
+        ),
+        (
+            'set -e\npython3.11 -c "import sys; '
+            "from importlinter.cli import lint_imports; "
+            'sys.exit(0 * lint_imports())"'
+        ),
+        (
+            'set -e\npython3.11 -c "from importlinter.cli import lint_imports; '
+            'SystemExit(lint_imports())"'
+        ),
+        (
+            'set -e\npython3.11 -c "import sys; import importlinter.cli; '
+            'sys.exit(importlinter.cli.other())"'
+        ),
+        "set -e\npython3.11 -m importlinter.cli",
+        "set -e\npython3.11 -m importlinter.cli ignored",
+        (
+            'set -e\npython3.11 -c "import sys; '
+            "from importlinter.cli import lint_imports; "
+            'sys.exit(lint_imports()) if False else None"'
+        ),
+        (
+            'set -e\npython3.11 -c "import sys; '
+            "from importlinter.cli import lint_imports; "
+            'f = lambda: sys.exit(lint_imports())"'
+        ),
+        (
+            'set -e\npython3.11 -c "import sys; '
+            "from importlinter.cli import lint_imports; "
+            'sys.exit = print; sys.exit(lint_imports())"'
+        ),
+        (
+            'set -e\npython3.11 -c "import sys; '
+            "from importlinter.cli import lint_imports; "
+            'lint_imports = lambda: 0; sys.exit(lint_imports())"'
+        ),
+    ],
+)
+def test_sourcecraft_rejects_an_import_only_linter_marker(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "importlinter.cli" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    ("script", "marker"),
+    [
+        (
+            (
+                "set -e\npython3.11 -m ruff check src/ "
+                "configurable-automl-contracts/src/ @/tmp/ruffopts"
+            ),
+            "python3.11 -m ruff check src/ configurable-automl-contracts/src/",
+        ),
+        (
+            "set -e\npython3.11 -m mypy scripts/contract_release.py @/tmp/mypyopts",
+            "python3.11 -m mypy scripts/contract_release.py",
+        ),
+    ],
+)
+def test_sourcecraft_rejects_tool_response_files(
+    guard: ModuleType, sourcecraft_text: str, script: str, marker: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert f"has no executable '{marker}'" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "set $'\\x2be'",
+        'set "$(echo +e)"',
+        "FLAG=+e; set $FLAG",
+        'O=errexit; set +o "$O"',
+    ],
+)
+def test_sourcecraft_rejects_non_literal_errexit_options(
+    guard: ModuleType, sourcecraft_text: str, line: str
+) -> None:
+    script = f"set -e\n{line}\npython3.11 scripts/check_contract_boundaries.py"
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "disables error handling" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    ("tail", "expected"),
+    [
+        ("set '+e'", "disables error handling"),
+        ("exit 0", "can exit before required gates"),
+        ("source /tmp/stub.sh", "sources another script"),
+        ("echo(){ exit 0; }", "shadows required command"),
+    ],
+)
+def test_sourcecraft_rejects_backslash_continuation_inside_quotes(
+    guard: ModuleType, sourcecraft_text: str, tail: str, expected: str
+) -> None:
+    script = (
+        'set -e\necho "unterminated \\\n'
+        f'" ; {tail}\n'
+        "python3.11 scripts/check_contract_boundaries.py"
+    )
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert expected in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize("connector", ["||", "&&", "|", "&"])
+def test_sourcecraft_rejects_a_gate_in_a_short_circuited_subshell(
+    guard: ModuleType, sourcecraft_text: str, connector: str
+) -> None:
+    script = (
+        "set -e\n"
+        f"true {connector} (\n"
+        "python3.11 scripts/check_contract_boundaries.py\n"
+        ")"
+    )
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize("option", ["--collect-only", "--co"])
+def test_sourcecraft_rejects_pytest_collection_only_in_quality_checks(
+    guard: ModuleType, sourcecraft_text: str, option: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    for task in document["workflows"]["quality-checks"]["tasks"]:
+        for cube in task["cubes"]:
+            if cube["name"] == "contracts-static-checks":
+                cube["script"] = [
+                    cube_script(cube).replace(
+                        "python3.11 -m pytest tests/contracts",
+                        f"pytest tests/contracts {option}",
+                    )
+                ]
+    text = dump_document(document)
+    assert "no executable 'pytest tests/contracts'" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "if false; then\n  echo hi ;# ; fi",
+        "while false; do\n  echo hi ;# ; done",
+        "case x in\n  x) echo hi ;# ;; esac",
+        "true || (\n  echo hi ;# ; )",
+    ],
+)
+def test_sourcecraft_rejects_a_comment_after_an_operator(
+    guard: ModuleType, sourcecraft_text: str, line: str
+) -> None:
+    script = f"set -e\n{line}\npython3.11 scripts/check_contract_boundaries.py"
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "has no executable 'scripts/check_contract_boundaries.py'" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# note <<EOF\nexit 0\nEOF",
+        "echo $(( 1 << y ))\nexit 0\ny",
+    ],
+)
+def test_sourcecraft_rejects_fake_heredocs(
+    guard: ModuleType, sourcecraft_text: str, line: str
+) -> None:
+    script = f"set -e\n{line}\npython3.11 scripts/check_contract_boundaries.py"
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "can exit before required gates" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "shopt -u -o errexit",
+        "builtin shopt -u -o errexit",
+        "command shopt -u -o errexit",
+        "shopt -su -o errexit",
+        'O=errexit; shopt -u -o "$O"',
+    ],
+)
+def test_sourcecraft_rejects_shopt_disabling_errexit(
+    guard: ModuleType, sourcecraft_text: str, line: str
+) -> None:
+    script = f"set -e\n{line}\npython3.11 scripts/check_contract_boundaries.py"
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "disables error handling" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_a_cmdsub_close_popping_a_skipped_subshell(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    script = (
+        "set -e\ntrue || (\nx=$(\n)\npython3.11 scripts/check_contract_boundaries.py\n)"
+    )
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "has no executable 'scripts/check_contract_boundaries.py'" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+def test_sourcecraft_requires_set_e_in_quality_checks_cubes(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    for task in document["workflows"]["quality-checks"]["tasks"]:
+        for cube in task["cubes"]:
+            if cube["name"] == "contracts-static-checks":
+                cube["script"] = [
+                    cube_script(cube)
+                    .replace("set -e\n", "", 1)
+                    .replace(
+                        "python3.11 -m pytest tests/contracts",
+                        "python3.11 -m pytest tests/contracts\ntrue",
+                        1,
+                    )
+                ]
+    text = dump_document(document)
+    assert "must enable 'set -e'" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_allows_exec_redirect_and_build_dot(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    def add_commands(workflow: dict[str, object]) -> None:
+        cube = find_cube(workflow, "quality-gates")
+        cube["script"] = [
+            cube_script(cube).replace(
+                "set -e\n",
+                "set -e\nexec 3>&1\nshopt -s -o errexit\n"
+                "python3.11 -m build . --outdir dist/engine\n",
+                1,
+            )
+        ]
+
+    text = mutate_publish_workflow(sourcecraft_text, add_commands)
+    assert guard.check_sourcecraft_ci(text) == []
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\npython3.11 -m twine check --help",
+        "set -e\ntwine check --help",
+    ],
+)
+def test_sourcecraft_rejects_twine_help(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "build-and-verify", script)
+    assert "twine check" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\npython3.11() { :; }\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\nalias python3.11=:\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nhash -p /bin/true python3.11\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\npytest() { :; }\npython3.11 -m pytest tests/contracts",
+        (
+            'set -e\nhash -p /bin/true "python3.11"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nshopt -s expand_aliases\nalias "python3.11"=:\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nif true; then python3.11() { return 0; }; fi\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\npython3.11 () { return 0; }\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\npython3.11 ( ) { return 0; }\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\neval 'python3.11() { return 0; }'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nalias -- python3.11=:\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nhash -p/bin/true python3.11\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        ("set -e\npython3.11(){ :; }\npython3.11 scripts/check_contract_boundaries.py"),
+        (
+            "set -e\nhash -p /bin/true -- python3.11\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\neval 'set(){ :; }; set -e'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\necho(){ exit 0; }\necho banner\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_command_shadowing(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "shadows required command" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\nsource stub.sh\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\n. stub.sh\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nsource <(echo 'python3.11() { :; }')\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        ('set -e\nsource "stub.sh"\npython3.11 scripts/check_contract_boundaries.py'),
+        ("set -e\n. 'stub.sh'\npython3.11 scripts/check_contract_boundaries.py"),
+        (
+            "set -e\neval 'source stub.sh'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ncommand source stub.sh\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        ("set -e\nX=1 source stub.sh\npython3.11 scripts/check_contract_boundaries.py"),
+        ("set -e\nsour\\\nce stub.sh\npython3.11 scripts/check_contract_boundaries.py"),
+        (
+            "set -e\n{ source stub.sh; }\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nif true; then source stub.sh; fi\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_sourced_scripts(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "sources another script" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            "set -e\nexport PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\nPATH=/tmp/stub:$PATH\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nexport PYTHONPATH=/tmp/stub\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\nenv PATH=/tmp/stub python3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\ndeclare -x PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\ntypeset -x PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nreadonly PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nbuiltin export PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nprintf -v PATH '%s' /tmp/stub\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\neval 'export PATH=/tmp/stub:$PATH'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nexport "PATH=/tmp/stub:$PATH"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nexpor\\\nt PATH=/tmp/stub:$PATH\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nexport PYTEST_ADDOPTS=--collect-only\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nexport BASH_ENV=/tmp/stub\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nexport PYTEST_ADDOPTS+=--collect-only\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nexport PYTHONPATH+=/tmp/fake\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nexport PATH\nread -r PATH <<< "/tmp/fake:$PATH"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nK=PATH; export "$K=/tmp/stub"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nK=PATH; read -r "$K" <<< "/tmp/fake:$PATH"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\nK=PYTHONPATH; printf -v "$K" "%s" /tmp/fake\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_path_overrides(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "overrides PATH" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    ("scope", "key"),
+    [
+        ("document", "PATH"),
+        ("workflow", "PYTHONPATH"),
+        ("task", "BASH_ENV"),
+        ("cube", "PYTEST_ADDOPTS"),
+        ("cube", "PYTEST_PLUGINS"),
+    ],
+)
+def test_sourcecraft_rejects_gate_env_keys(
+    guard: ModuleType, sourcecraft_text: str, scope: str, key: str
+) -> None:
+    document = load_document(sourcecraft_text)
+    if scope == "document":
+        document["env"] = {key: "/tmp/stub"}
+        text = dump_document(document)
+    else:
+
+        def add_env(workflow: dict[str, object]) -> None:
+            if scope == "workflow":
+                workflow["env"] = {key: "/tmp/stub"}
+            elif scope == "task":
+                workflow["tasks"][0]["env"] = {key: "/tmp/stub"}  # type: ignore[index]
+            else:
+                find_cube(workflow, "quality-gates")["env"] = {key: "/tmp/stub"}
+
+        text = mutate_publish_workflow(sourcecraft_text, add_env)
+    violations = messages(guard.check_sourcecraft_ci(text))
+    assert key in violations
+    assert "env must not set" in violations
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\ntrap 'exit 0' ERR\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\ntrap 'exit 0' EXIT\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nbuiltin trap 'exit 0' ERR\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\n{ trap 'exit 0' ERR; }\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "set -e\nif true; then trap 'exit 0' ERR; fi\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_traps(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "uses a trap" in messages(guard.check_sourcecraft_ci(text))
+
+
+def test_sourcecraft_rejects_disabled_builtins(
+    guard: ModuleType, sourcecraft_text: str
+) -> None:
+    script = "set -e\nenable -n set\npython3.11 scripts/check_contract_boundaries.py"
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "disables a shell builtin" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\nexec true\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\n{ exit 0; }\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nif true; then exit 0; fi\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "set -e\neval 'exit 0'\npython3.11 scripts/check_contract_boundaries.py",
+    ],
+)
+def test_sourcecraft_rejects_early_termination(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "can exit before required gates" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\nE=exit; $E 0\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\nE=eval; $E 'set +e'\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\n$'\\x65xit' 0\npython3.11 scripts/check_contract_boundaries.py",
+        (
+            "set -e\nunused=1 $'\\x65xit' 0\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_dynamic_command_names(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "command name produced by" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        (
+            'set -e\neval "$(cat scripts/stub.sh)"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            'set -e\neval "`cat scripts/stub.sh`"\n'
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_dynamic_eval(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "command substitution with 'eval'" in messages(
+        guard.check_sourcecraft_ci(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        (
+            'if [ -n "$PUBLISH_CONTRACTS" ]; then\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            'if [ -n "$PUBLISH_CONTRACTS" ]; then\n'
+            "  echo enabled\n"
+            'elif [ "$PUBLISH_CONTRACTS" = 1 ]; then\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "if true; then\n"
+            "  echo enabled\n"
+            "else\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            'case "$PUBLISH_CONTRACTS" in\n'
+            "  1)\n"
+            "    python3.11 scripts/check_contract_boundaries.py\n"
+            "    ;;\n"
+            "esac"
+        ),
+        (
+            'while [ -n "$PUBLISH_CONTRACTS" ]; do\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done"
+        ),
+        (
+            'until [ -n "$PUBLISH_CONTRACTS" ]; do\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done"
+        ),
+        (
+            "for value in one two; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        "if true; then\n  python3.11 scripts/check_contract_boundaries.py\nfi",
+        "if [ 1 = 1 ]; then\n  python3.11 scripts/check_contract_boundaries.py\nfi",
+        (
+            'if [ -n "$X" ]; then\n'
+            '  if [ -n "$Y" ]; then\n'
+            "    python3.11 scripts/check_contract_boundaries.py\n"
+            "  fi\n"
+            "fi"
+        ),
+        "while true; do\n  python3.11 scripts/check_contract_boundaries.py\ndone",
+        (
+            "select value in one two; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done"
+        ),
+        (
+            "select value in one two; do\n  "
+            "python3.11 scripts/check_contract_boundaries.py; break\ndone"
+        ),
+        (
+            'X=$(if [ -n "$PUBLISH_CONTRACTS" ]; then\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi)"
+        ),
+        (
+            "X=$(for value in one two; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done)"
+        ),
+        (
+            'X=$(while [ -n "$PUBLISH_CONTRACTS" ]; do\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done)"
+        ),
+        (
+            "X=$(select value in one two; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done)"
+        ),
+        ("foo() (\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        ("foo()\n(\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        (
+            "foo()\n"
+            "# body follows\n"
+            "(\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            ")"
+        ),
+        ("function foo()\n(\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        ("function foo (\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        ("foo(){\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        (
+            "foo() (\n"
+            "  (\n"
+            "    true\n"
+            "  )\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            ")"
+        ),
+        (
+            "echo start; if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "true && if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "true || for value in one two; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        (
+            "echo start; case value in\n"
+            "  1)\n"
+            "    python3.11 scripts/check_contract_boundaries.py\n"
+            "    ;;\n"
+            "esac"
+        ),
+        (
+            "X=$(echo hi; if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi)"
+        ),
+        (
+            "X=$(echo hi && while true; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "  break\n"
+            "done)"
+        ),
+        ("foo() { echo hi\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        ("foo() ( echo hi\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        ("foo()\n{ echo hi\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        (
+            "function foo { echo hi\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "}"
+        ),
+        (
+            "echo start; foo() { echo hi\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "}"
+        ),
+        (
+            "if true; then :; fi; if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        ("{ if false; then\n  python3.11 scripts/check_contract_boundaries.py\nfi\n}"),
+        (
+            "if true; then :; fi; while false; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        ("X=`if false; then\n  python3.11 scripts/check_contract_boundaries.py\nfi`"),
+        ("foo.bar() (\n  python3.11 scripts/check_contract_boundaries.py\n)"),
+        ("1foo() {\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        ("function foo:bar {\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        (
+            'echo "a\\"b" ; if false; then\n'
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "echo a ; time if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "time while false; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        (
+            "time for value in one; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        (
+            "time case value in\n"
+            "  1)\n"
+            "    python3.11 scripts/check_contract_boundaries.py\n"
+            "    ;;\n"
+            "esac"
+        ),
+        ("time foo() {\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        ("time function foo {\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        (
+            "echo $'a\\'b' ; if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) &"),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) | cat"),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) || echo failed"),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) && echo ok"),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) >/dev/null &"),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) 2>&1 | cat"),
+        (
+            "(\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            ") >/dev/null || echo failed"
+        ),
+        ("(\n  python3.11 scripts/check_contract_boundaries.py\n) 2>&1 && echo ok"),
+        (
+            "time ! if false; then\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "fi"
+        ),
+        (
+            "time -p ! while false; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        (
+            "time -p ! for value in one; do\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            "done"
+        ),
+        (
+            "time -p ! case value in\n"
+            "  1)\n"
+            "    python3.11 scripts/check_contract_boundaries.py\n"
+            "    ;;\n"
+            "esac"
+        ),
+        ("time -p ! foo() {\n  python3.11 scripts/check_contract_boundaries.py\n}"),
+        (
+            "foo () (\n"
+            "  arr=(\n"
+            "    one\n"
+            "    two\n"
+            "  )\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            ")"
+        ),
+        (
+            "foo () (\n"
+            "  value=$(\n"
+            "    echo hi\n"
+            "  )\n"
+            "  python3.11 scripts/check_contract_boundaries.py\n"
+            ")"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_a_gate_inside_runtime_conditions(
+    guard: ModuleType, sourcecraft_text: str, block: str
+) -> None:
+    script = "set -e\n" + block
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "set -e\nalias boundaries='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nexport CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\ndeclare CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\ntypeset CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nlocal CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nreadonly CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nunset CHECK='python3.11 scripts/check_contract_boundaries.py'",
+        "set -e\nset -- python3.11 scripts/check_contract_boundaries.py",
+        "set -e\ntrap 'python3.11 scripts/check_contract_boundaries.py' EXIT",
+        (
+            "set -e\nalias boundaries='python3.11 "
+            "scripts/check_contract_boundaries.py'\nboundaries"
+        ),
+        (
+            "set -e\nalias boundaries='python3.11 \\\n"
+            "scripts/check_contract_boundaries.py'\nboundaries"
+        ),
+    ],
+)
+def test_sourcecraft_rejects_a_gate_only_declared_or_aliased(
+    guard: ModuleType, sourcecraft_text: str, script: str
+) -> None:
+    text = replace_gate_script(sourcecraft_text, "quality-gates", script)
+    assert "check_contract_boundaries.py" in messages(guard.check_sourcecraft_ci(text))
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
         "python3.11 scripts/check_contract_boundaries.py\nset -e",
         "set -e\nset +e\npython3.11 scripts/check_contract_boundaries.py",
         "set -e\nset +o errexit\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\ncommand set +e\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\nbuiltin set +e\npython3.11 scripts/check_contract_boundaries.py",
+        'set -e\neval "set +e"\npython3.11 scripts/check_contract_boundaries.py',
+        (
+            "set -e\ncommand set +o errexit\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        "env --version set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "nice set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "timeout 5 set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "env set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "nohup set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "stdbuf -o0 set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "sudo -u root set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "setsid set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "nice -n 5 --version set -e\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e | cat\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e &\npython3.11 scripts/check_contract_boundaries.py",
+        "bash -c 'set -e'\npython3.11 scripts/check_contract_boundaries.py",
+        "sh -c 'set -o errexit'\npython3.11 scripts/check_contract_boundaries.py",
+        "set -e\nbash -c 'set +e'\npython3.11 scripts/check_contract_boundaries.py",
+        "env -S 'set -e'\npython3.11 scripts/check_contract_boundaries.py",
+        ("eval 'bash -c \"set -e\"'\npython3.11 scripts/check_contract_boundaries.py"),
+        (
+            "eval 'sh -c \"set -o errexit\"'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        (
+            "command eval 'bash -c \"set -e\"'\n"
+            "python3.11 scripts/check_contract_boundaries.py"
+        ),
+        ("command -pv set -e\npython3.11 scripts/check_contract_boundaries.py"),
+        ("eval 'set -e; set +e'\npython3.11 scripts/check_contract_boundaries.py"),
+        ('eval "set -e; set +e"\npython3.11 scripts/check_contract_boundaries.py'),
+        ("eval 'false && set -e'\npython3.11 scripts/check_contract_boundaries.py"),
+        ("eval 'true || set -e'\npython3.11 scripts/check_contract_boundaries.py"),
+        ("command --help set -e\npython3.11 scripts/check_contract_boundaries.py"),
         "if false; then\n  set -e\nfi\npython3.11 scripts/check_contract_boundaries.py",
     ],
 )
