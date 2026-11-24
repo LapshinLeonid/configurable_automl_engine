@@ -12,6 +12,7 @@ from configurable_automl_engine.models import (
     clean_hyperparameters,
     create_model,
     get_allowed_hyperparameters,
+    get_param_numeric_type,
     remap_legacy_param_names,
 )
 
@@ -479,6 +480,213 @@ def test_get_constructor_param_info_merges_mro_for_var_kwargs():
     assert accepts_var_kwargs is True
     assert "n_estimators" in accepted
     assert "max_depth" in accepted
+
+
+def _opaque_init(self, *args, **kwargs):
+    """A constructor whose signature cannot be introspected."""
+    raise AssertionError("opaque constructor must not be called")
+
+
+_opaque_init.__signature__ = object()
+
+
+class _OpaqueInitParent:
+    """A parent whose ``__init__`` has no usable signature."""
+
+    __init__ = _opaque_init
+
+
+def test_get_constructor_param_info_recovers_params_from_get_params(monkeypatch):
+    """An unintrospectable parent does not hide parameter names.
+
+    ``get_params(deep=False)`` is the fallback when a C-extension constructor
+    has no signature. The recovered names are validated normally, so an
+    unknown key is rejected instead of being silently accepted through
+    ``**kwargs``.
+    """
+
+    class _KwEstimatorWithOpaqueParent(_OpaqueInitParent):
+        def __init__(self, alpha=1.0, **kwargs):
+            self.alpha = alpha
+
+        def get_params(self, deep=False):
+            return {"alpha": self.alpha, "beta": 0.5}
+
+    accepted, accepts_var_kwargs = _get_constructor_param_info(
+        _KwEstimatorWithOpaqueParent
+    )
+    assert accepts_var_kwargs is True
+    assert accepted == frozenset({"alpha", "beta"})
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _KwEstimatorWithOpaqueParent},
+    )
+    assert get_allowed_hyperparameters("opaque") == frozenset({"alpha", "beta"})
+    with pytest.raises(ValueError, match="gamma"):
+        create_model("opaque", gamma=1)
+
+
+def test_get_allowed_hyperparameters_skips_validation_without_param_source(
+    monkeypatch, caplog
+):
+    """Without a signature or ``get_params`` validation is skipped loudly."""
+
+    class _KwEstimatorWithoutParamSource(_OpaqueInitParent):
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _KwEstimatorWithoutParamSource},
+    )
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        assert get_allowed_hyperparameters("opaque") is None
+    assert any("Cannot introspect" in record.message for record in caplog.records)
+
+
+def test_get_allowed_hyperparameters_skips_validation_when_class_signature_unavailable(
+    monkeypatch, caplog
+):
+    """An unintrospectable class without ``get_params`` is skipped loudly."""
+
+    class _OpaqueEstimator:
+        __signature__ = object()
+
+        def __init__(self, alpha=1.0):
+            self.alpha = alpha
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _OpaqueEstimator},
+    )
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        assert get_allowed_hyperparameters("opaque") is None
+    assert any("Cannot introspect" in record.message for record in caplog.records)
+
+
+def test_get_constructor_param_info_recovers_params_when_class_signature_unavailable(
+    monkeypatch,
+):
+    """A class-level signature failure also falls back to ``get_params``."""
+
+    class _OpaqueEstimator:
+        __signature__ = object()
+
+        def __init__(self, alpha=1.0):
+            self.alpha = alpha
+
+        def get_params(self, deep=False):
+            return {"alpha": self.alpha}
+
+    accepted, accepts_var_kwargs = _get_constructor_param_info(_OpaqueEstimator)
+    assert accepts_var_kwargs is False
+    assert accepted == frozenset({"alpha"})
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _OpaqueEstimator},
+    )
+    assert get_allowed_hyperparameters("opaque") == frozenset({"alpha"})
+    with pytest.raises(ValueError, match="gamma"):
+        create_model("opaque", gamma=1)
+
+
+def test_base_estimator_get_params_does_not_hide_parent_parameters(
+    monkeypatch, caplog
+):
+    """The inherited ``BaseEstimator.get_params`` is not trusted.
+
+    It derives names from ``cls.__init__`` only, so it cannot see a parameter
+    declared by an unintrospectable parent. Using it would report a valid
+    inherited ``beta`` as unknown; validation is skipped instead.
+    """
+    from sklearn.base import BaseEstimator, RegressorMixin
+
+    def _opaque_mixed_init(self, *args, **kwargs):
+        self.beta = kwargs.pop("beta", 0.5)
+
+    _opaque_mixed_init.__signature__ = object()
+
+    class _OpaqueMixedParent:
+        __init__ = _opaque_mixed_init
+
+    class _MixedEstimator(RegressorMixin, _OpaqueMixedParent, BaseEstimator):
+        def __init__(self, alpha=1.0, **kwargs):
+            self.alpha = alpha
+            super().__init__(**kwargs)
+
+    assert _MixedEstimator(beta=2.0).beta == 2.0
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        accepted, accepts_var_kwargs = _get_constructor_param_info(_MixedEstimator)
+    assert accepts_var_kwargs is True
+    assert accepted == frozenset()
+    assert any("Cannot introspect" in record.message for record in caplog.records)
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"mixed": _MixedEstimator},
+    )
+    assert get_allowed_hyperparameters("mixed") is None
+    assert create_model("mixed", beta=2.0).beta == 2.0
+
+
+def test_get_params_failure_skips_validation(monkeypatch, caplog):
+    """A raising ``get_params`` is treated as no parameter source."""
+
+    class _RaisingGetParams(_OpaqueInitParent):
+        def __init__(self, alpha=1.0, **kwargs):
+            self.alpha = alpha
+
+        def get_params(self, deep=False):
+            raise RuntimeError("get_params failed")
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _RaisingGetParams},
+    )
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        assert get_allowed_hyperparameters("opaque") is None
+    assert any("Cannot introspect" in record.message for record in caplog.records)
+
+
+def test_instantiation_failure_skips_validation(monkeypatch, caplog):
+    """A class that needs constructor arguments has no usable fallback."""
+
+    class _RequiresArgument(_OpaqueInitParent):
+        def __init__(self, required, **kwargs):
+            self.required = required
+
+        def get_params(self, deep=False):
+            return {"required": self.required}
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _RequiresArgument},
+    )
+    with caplog.at_level(logging.WARNING, logger="configurable_automl_engine.models"):
+        assert get_allowed_hyperparameters("opaque") is None
+    assert any("Cannot introspect" in record.message for record in caplog.records)
+
+
+def test_get_param_numeric_type_returns_none_for_unintrospectable_class(monkeypatch):
+    """Range normalization must not fail when the class has no signature."""
+
+    class _OpaqueEstimator:
+        __signature__ = object()
+
+        def __init__(self, alpha=1.0):
+            self.alpha = alpha
+
+    monkeypatch.setattr(
+        "configurable_automl_engine.models._FACTORY",
+        {"opaque": _OpaqueEstimator},
+    )
+    get_param_numeric_type.cache_clear()
+    try:
+        assert get_param_numeric_type("opaque", "alpha") is None
+    finally:
+        get_param_numeric_type.cache_clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

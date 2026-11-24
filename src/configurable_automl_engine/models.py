@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Any
 
 from automl_contracts.definitions import AVAILABLE_ALGORITHMS  # noqa: F401
-from sklearn.base import RegressorMixin
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import (
     AdaBoostRegressor,
     ExtraTreesRegressor,
@@ -181,7 +181,63 @@ LEGACY_PARAM_MAPPINGS: dict[str, dict[str, str]] = {
 # ----------------------------------------------------------------------------- #
 
 
-def _collect_declared_params_from_mro(cls: type) -> tuple[frozenset[str], bool]:
+def _get_params_from_estimator_instance(
+    cls: type, known_params: frozenset[str] | None = None
+) -> frozenset[str] | None:
+    """Recover constructor parameter names from an estimator instance.
+
+    C-extension constructors may expose no Python signature, so
+    ``inspect.signature`` cannot report their parameters. A class that
+    overrides ``get_params`` may still expose them. An instance is created
+    only for such an override: the inherited ``BaseEstimator.get_params``
+    derives names from ``cls.__init__`` alone (not the MRO), so it cannot
+    recover parameters declared by an unintrospectable parent and is not
+    used.
+
+    Creating the instance runs a third-party constructor, which is expected
+    to be cheap and side-effect free by the sklearn estimator contract.
+
+    Args:
+        cls: The estimator class to introspect.
+        known_params: Names already recovered from the constructor
+            signatures. When given, the fallback must add at least one name
+            outside this set; otherwise it is indistinguishable from the
+            incomplete local view and is rejected.
+
+    Returns:
+        The declared parameter names, or ``None`` when they cannot be
+        recovered (the class cannot be instantiated without arguments, uses
+        the inherited ``BaseEstimator.get_params``, has no ``get_params``, or
+        the call fails).
+    """
+    get_params_attr = getattr(cls, "get_params", None)
+    if not callable(get_params_attr) or get_params_attr is BaseEstimator.get_params:
+        return None
+    try:
+        instance = cls()
+    except Exception:  # noqa: BLE001 - any failure means "no fallback"
+        return None
+    get_params = getattr(instance, "get_params", None)
+    if not callable(get_params):
+        return None
+    try:
+        params = get_params(deep=False)
+    except Exception:  # noqa: BLE001 - any failure means "no fallback"
+        return None
+    if not isinstance(params, dict):
+        return None
+    names = frozenset(name for name in params if isinstance(name, str))
+    if known_params is not None and not names - known_params:
+        # The fallback repeats what the constructor signatures already
+        # exposed. It may still be an incomplete view (BaseEstimator looks
+        # only at cls.__init__), so it cannot make validation safer.
+        return None
+    return names
+
+
+def _collect_declared_params_from_mro(
+    cls: type, known_params: frozenset[str] | None = None
+) -> tuple[frozenset[str], bool] | None:
     """Collect declared constructor params of the parent classes in the MRO.
 
     Used for a ``**kwargs`` constructor (the ``XGBRegressor`` pattern: its
@@ -191,12 +247,27 @@ def _collect_declared_params_from_mro(cls: type) -> tuple[frozenset[str], bool]:
     being a catch-all ``*args``/``**kwargs``. ``VAR_KEYWORD`` anywhere in
     the MRO still marks the class as accepting extra keys.
 
+    A C-extension ``__init__`` may have no introspectable signature. When
+    that happens the parameter names are recovered from
+    ``get_params(deep=False)`` (see
+    :func:`_get_params_from_estimator_instance`) instead of silently
+    dropping the parent from the accepted set. The fallback is used only
+    when it adds names beyond the already collected constructor signatures;
+    a fallback that merely repeats them is treated like an unavailable
+    fallback. If the names cannot be recovered, the result is ``None``: the
+    caller must skip name validation entirely rather than validate against a
+    partial set.
+
     Args:
         cls: The estimator class to introspect.
+        known_params: Names already recovered from the class's own
+            constructor signature. They are used to decide whether a
+            ``get_params`` fallback adds any information.
 
     Returns:
         ``(accepted_param_names, accepts_var_kwargs)`` — the same shape as
-        :func:`_get_constructor_param_info`.
+        :func:`_get_constructor_param_info` — or ``None`` when the declared
+        names cannot be recovered.
     """
     accepted: set[str] = set()
     accepts_var_kwargs = False
@@ -206,8 +277,27 @@ def _collect_declared_params_from_mro(cls: type) -> tuple[frozenset[str], bool]:
             continue
         try:
             sig = inspect.signature(init)
-        except (TypeError, ValueError):  # pragma: no cover
-            continue
+        except (TypeError, ValueError):
+            known = frozenset(accepted) | (known_params or frozenset())
+            fallback = _get_params_from_estimator_instance(cls, known)
+            if fallback is None:
+                logger.warning(
+                    "Cannot introspect %s.%s.__init__ and cannot read the "
+                    "parameters of %s via get_params(); hyperparameter name "
+                    "validation is skipped for %s.",
+                    ancestor.__module__,
+                    ancestor.__qualname__,
+                    cls.__qualname__,
+                    cls.__qualname__,
+                )
+                return None
+            logger.debug(
+                "Cannot introspect %s.%s.__init__; using get_params() of %s instead.",
+                ancestor.__module__,
+                ancestor.__qualname__,
+                cls.__qualname__,
+            )
+            return fallback, True
         for name, param in sig.parameters.items():
             if name == "self":
                 continue
@@ -241,10 +331,36 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
     class validation can raise a false "unknown hyperparameter" instead of
     silently passing the name to the estimator.
 
+    When the constructor signature cannot be introspected (a C-extension
+    constructor), the parameter names are recovered from an overridden
+    ``get_params(deep=False)``. The inherited ``BaseEstimator.get_params``
+    is not used: it sees only ``cls.__init__`` and would silently drop
+    parameters declared by an unintrospectable parent. If the names cannot
+    be recovered, the result is an empty accepted set with
+    ``accepts_var_kwargs=True`` so that the caller treats the names as
+    unrestricted instead of validating against an incomplete set.
+
     Returns:
         ``(accepted_param_names, accepts_var_kwargs)``.
     """
-    sig = inspect.signature(cls)
+    try:
+        sig = inspect.signature(cls)
+    except (TypeError, ValueError):
+        fallback = _get_params_from_estimator_instance(cls)
+        if fallback is None:
+            logger.warning(
+                "Cannot introspect the constructor of %s and cannot read its "
+                "parameters via get_params(); hyperparameter name validation "
+                "is skipped for this estimator.",
+                cls.__qualname__,
+            )
+            return frozenset(), True
+        logger.debug(
+            "Cannot introspect the constructor of %s; using get_params() instead.",
+            cls.__qualname__,
+        )
+        return fallback, False
+
     # Skip explicit ``self`` and treat ``**kwargs`` as accepting extra keys.
     accepted: set[str] = set()
     accepts_var_kwargs = False
@@ -264,7 +380,13 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
         # with the class's own named parameters gives the same set that
         # ``estimator.get_params()`` returns, so a typo can be detected
         # despite the catch-all. See _collect_declared_params_from_mro.
-        mro_accepted, _ = _collect_declared_params_from_mro(cls)
+        mro_info = _collect_declared_params_from_mro(cls, frozenset(accepted))
+        if mro_info is None:
+            # The parent declarations cannot be recovered: do not validate
+            # against a partial set, because a legitimate inherited name
+            # would then be reported as unknown.
+            return frozenset(), True
+        mro_accepted, _ = mro_info
         accepted |= mro_accepted
     return frozenset(accepted), accepts_var_kwargs
 
@@ -374,6 +496,8 @@ def get_param_numeric_type(algo_key: str, param: str) -> str | None:
     determined:
     - the algorithm is unknown or its optional dependency is missing
       (estimator class is ``None``);
+    - the constructor signature cannot be introspected (a C-extension
+      constructor);
     - the parameter is absent from the signature;
     - the default is non-numeric (e.g. a string or ``None``);
     - the default is a boolean (not a numeric range).
@@ -391,7 +515,12 @@ def get_param_numeric_type(algo_key: str, param: str) -> str | None:
     estimator_cls = _FACTORY.get(resolved)
     if estimator_cls is None:
         return None
-    signature = inspect.signature(estimator_cls)
+    try:
+        signature = inspect.signature(estimator_cls)
+    except (TypeError, ValueError):
+        # A C-extension constructor may expose no signature. The type stays
+        # unknown; range normalization must not fail for such an estimator.
+        return None
     p = signature.parameters.get(param)
     if p is None or p.default is inspect.Parameter.empty:
         return None
@@ -416,8 +545,10 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
 
     Single source of truth for configuration validation: the allowed set is
     derived from the estimator constructor signature (same criterion as
-    :func:`clean_hyperparameters`) plus the mapped parameter names from
-    :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to an accepted
+    :func:`clean_hyperparameters`), falling back to an overridden
+    ``get_params(deep=False)`` when the signature cannot be introspected and
+    the fallback exposes additional names, plus the mapped parameter names
+    from :data:`LEGACY_PARAM_MAPPINGS` that would be remapped to an accepted
     constructor parameter. Tuner-level data-adapter hints are added as
     documented exceptions: ``kernel_type`` for
     ``gaussian_process_regression``, ``feature_index`` for
@@ -428,7 +559,9 @@ def get_allowed_hyperparameters(algo_key: str) -> frozenset[str] | None:
       (estimator class is ``None``);
     - the constructor accepts ``**kwargs`` without declaring any named
       parameter, so no name can be considered unknown (any key would be
-      accepted by the constructor anyway).
+      accepted by the constructor anyway);
+    - neither the constructor signature nor ``get_params`` exposes the
+      parameter names (the names cannot be determined).
 
     A ``**kwargs`` constructor that still declares named parameters (the
     ``XGBRegressor(objective, **kwargs)`` pattern, with the real parameters
