@@ -83,7 +83,9 @@ def _columnwise_raw_values(
                     y_min = np.where(valid, y_true[:, None], np.inf).min(axis=0)
                     span = y_max - y_min
                     values = np.where(
-                        span < 1e-6, np.inf, np.sqrt(ss_res / n_valid) / span
+                        span >= 1e-6,
+                        np.sqrt(ss_res / n_valid) / span,
+                        np.where(ss_res == 0.0, 0.0, np.inf),
                     )
                 else:  # r2_score, with sklearn's force_finite semantics
                     y_col = np.where(valid, y_true[:, None], 0.0)
@@ -128,7 +130,11 @@ def bbc_cv_score(
     For R² and NRMSE the bootstrap runs on MSE / RMSE and the result is
     normalized by the variance / range of the target over all usable rows:
     the selection is identical, and the small out-of-bag subsets do not bias
-    the normalizer.
+    the normalizer. A constant target (range < 1e-6) makes the NRMSE
+    normalization undefined: a configuration that reproduces the target
+    exactly gets NRMSE = 0 (the error-metric counterpart of R² = 1.0),
+    while a target no configuration reproduces exactly is reported as an
+    explicit ``ValueError`` with the constant-target cause.
 
     Rows with a non-finite target and rows no configuration predicted (e.g.
     the train part of ``train_test_split``) are dropped. Non-finite
@@ -208,6 +214,21 @@ def bbc_cv_score(
                 _SCORER_OBJECTS["rmse"][0], y, preds, n_bootstrap, random_state
             )
             return float(scorer_sign_value) * (rmse / y_span)
+        # A degenerate target range makes the NRMSE normalization undefined.
+        # Only a configuration that reproduces the target exactly has a
+        # finite score (NRMSE = 0, the error-metric counterpart of R² = 1.0);
+        # the generic bootstrap error would hide this cause from the caller.
+        try:
+            return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
+        except ValueError as err:
+            raise ValueError(
+                "BBC-CV for NRMSE is undefined on a constant target: the "
+                f"target range {y_span:.3g} is below 1e-6, so the "
+                "normalization is undefined unless a configuration predicts "
+                "the target exactly, and no configuration did. Use R² or a "
+                "metric that does not normalize by the target range, or "
+                "supply a target with a larger range."
+            ) from err
     return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
 
 

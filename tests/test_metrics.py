@@ -58,16 +58,19 @@ def test_nrmse_normal_case():
 
 
 def test_nrmse_zero_range_coverage():
-    """Covers lines 35 (Error class) and 53-57 (denom < 1e-6)"""
+    """Covers the Error class and the denom < 1e-6 branch."""
     y_true = np.array([1, 1, 1])  # Constant target, range = 0
     y_pred = np.array([1, 2, 3])
 
-    # 1. Check the zero-range handling logic (lines 53-57)
-    # The code returns float('inf') instead of raising an exception
+    # A non-exact prediction returns float('inf') instead of raising.
     result = _nrmse(y_true, y_pred)
     assert result == float("inf")
 
-    # 2. Cover the NRMSEZeroRangeError class declaration (line 35)
+    # An exact prediction on a constant target is perfect: NRMSE = 0.0,
+    # the error-metric counterpart of R² = 1.0 (sklearn force_finite).
+    assert _nrmse(y_true, np.array([1, 1, 1])) == 0.0
+
+    # Cover the NRMSEZeroRangeError class declaration
     # Just instantiate it so coverage tools count the line as executed
     err = NRMSEZeroRangeError("Target range is too small")
     assert isinstance(err, ValueError)
@@ -351,6 +354,8 @@ def test_global_nrmse_coverage(caplog):
         res_inf = _global_nrmse(y_true, y_pred, target_range=1e-7)
         assert res_inf == float("inf")
         assert "Global target_range is too small" in caplog.text
+    # An exact prediction on a degenerate global range is perfect: 0.0.
+    assert _global_nrmse(y_true, y_true, target_range=1e-7) == 0.0
     # 4. Check the standard computation (main return branch)
     # RMSE for (1,2) and (1,2) = 0. Range = 10. Result = 0/10 = 0.0
     res_zero = _global_nrmse(

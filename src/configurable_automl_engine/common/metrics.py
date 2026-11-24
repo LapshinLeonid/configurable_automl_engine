@@ -14,8 +14,9 @@ Key features:
        (lower -> better) into the scorer format (higher -> better)
         for correct optimization.
     3. Numeric Stability: Built-in division-by-zero protection
-       when a constant target is encountered — returns `inf`
-       instead of an error to keep the pipeline stable.
+       when a constant target is encountered — a perfect prediction scores
+       0.0, otherwise `inf` is returned instead of an error to keep the
+       pipeline stable (mirroring scikit-learn's R² force_finite rule).
     4. Non-finite prediction policy: rows a model was REQUIRED to predict
        (the validation rows of the split strategy) but returned NaN/Inf for
        raise ``InvalidPredictionError`` — the trial/fold/candidate is then
@@ -360,14 +361,19 @@ def _nrmse(y_true: Any, y_pred: Any) -> float:
     1. The standard RMSE for the current sample is computed.
     2. The range (max - min) is determined from the
     passed true values `y_true`.
-    3. Constant-target handling: if the range < 1e-6,
-    `inf` (infinite error) is returned
-    with a warning logged to avoid division by zero.
+    3. Constant-target handling: if the range < 1e-6, the normalization is
+    undefined. A perfect prediction (RMSE = 0) is scored as 0.0 — the
+    error-metric counterpart of scikit-learn's R² force_finite rule, which
+    reports 1.0 for a perfect constant-target prediction. Otherwise `inf`
+    (infinite error) is returned with a warning logged to avoid division by
+    zero.
     4. RMSE is divided by the computed local range."""
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     denom = np.max(y_true) - np.min(y_true)
 
     if denom < 1e-6:
+        if rmse == 0.0:
+            return 0.0
         logger.warning(
             f"NRMSE: target is constant (range < 1e-6) for split of size "
             f"{len(y_true)}. Returning +inf (will be inverted to -inf by scorer)."
@@ -381,15 +387,19 @@ def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -
     using a fixed range.
     Calculation logic:
     1. Input range validation: if `target_range` is below the threshold 1e-6,
-    `inf` is returned to prevent numerical instability.
+    the normalization is undefined. A perfect prediction (RMSE = 0) is
+    scored as 0.0; otherwise `inf` is returned to prevent numerical
+    instability.
     2. The standard RMSE is computed.
     3. The error is normalized by a precomputed global range
     (independent of the current split)."""
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     if target_range < 1e-6:
+        if rmse == 0.0:
+            return 0.0
         logger.warning("Global target_range is too small. Returning +inf.")
         return float("inf")
 
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     return rmse / target_range
 
 

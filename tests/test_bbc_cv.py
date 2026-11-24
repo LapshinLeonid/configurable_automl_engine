@@ -77,13 +77,41 @@ def test_columnwise_values_all_nan_column_is_nan(metric):
 
 def test_columnwise_values_constant_target_edge_cases():
     """R² on a constant target follows sklearn (1.0 exact, 0.0 otherwise);
-    NRMSE on a constant target is +inf (raw -inf)."""
+    NRMSE scores an exact prediction as 0 (raw 0, its "perfect" value), while
+    a non-exact prediction stays +inf (raw -inf) because the range
+    normalization is undefined."""
     y = np.full(5, 2.0)
     preds = np.column_stack([y, y + 1.0])
     r2 = _columnwise_raw_values(get_scorer_object("r2"), y, preds)
     np.testing.assert_allclose(r2, [1.0, 0.0])
     nrmse = _columnwise_raw_values(get_scorer_object("nrmse"), y, preds)
-    assert np.all(np.isneginf(nrmse))
+    assert nrmse[0] == 0.0
+    assert np.isneginf(nrmse[1])
+
+
+def test_bbc_cv_score_constant_target_nrmse_exact_is_zero():
+    """A constant target with exact OOF predictions is no longer rejected.
+
+    This is the NRMSE counterpart of R² = 1.0 on the same data: the
+    normalization is undefined, but an exact prediction has zero error.
+    """
+    y = np.full(20, 3.0)
+    oof = np.vstack([y, y + 1.0])
+    raw = bbc_cv_score(get_scorer_object("nrmse"), y, oof, random_state=0)
+    assert raw == pytest.approx(0.0)
+    assert np.isfinite(raw)
+
+
+def test_bbc_cv_score_constant_target_nrmse_non_exact_explains_cause():
+    """No exact configuration: the ValueError names the constant target.
+
+    The caller's WARNING must show the real cause (target range below 1e-6)
+    instead of the generic "no bootstrap resample produced a finite score".
+    """
+    y = np.full(20, 3.0)
+    oof = np.vstack([y + 1.0, y + 2.0])
+    with pytest.raises(ValueError, match="constant target"):
+        bbc_cv_score(get_scorer_object("nrmse"), y, oof, random_state=0)
 
 
 def test_columnwise_values_generic_scorer_falls_back_to_loop():
@@ -408,3 +436,21 @@ def test_bbc_score_helper_ignores_misaligned_and_empty(caplog):
     assert value == pytest.approx(1.0)
     assert any("not aligned" in r.getMessage() for r in caplog.records)
     assert _bbc_score_in_user_metric("rmse", [np.zeros((1, 5))], y, 0) is None
+
+
+def test_bbc_score_helper_nrmse_constant_target_exact_reports_zero():
+    """The exact-prediction constant-target case reports 0.0, not None."""
+    y = pd.Series(np.full(20, 3.0))
+    exact = y.to_numpy()[None, :]
+    assert _bbc_score_in_user_metric("nrmse", [exact], y, 0) == pytest.approx(0.0)
+
+
+def test_bbc_score_helper_nrmse_constant_target_warns_with_cause(caplog):
+    """The user-facing WARNING names the constant target, not just the
+    generic bootstrap failure."""
+    y = pd.Series(np.full(20, 3.0))
+    inexact = (y.to_numpy() + 1.0)[None, :]
+    with caplog.at_level(logging.WARNING):
+        assert _bbc_score_in_user_metric("nrmse", [inexact], y, 0) is None
+    assert "constant target" in caplog.text
+    assert "1e-6" in caplog.text
