@@ -77,14 +77,14 @@ def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
     needs no model change.
 
     The token lets an orchestrator (the ``AutoMLExperiment`` facade)
-    recognize *its own* run result when reading the module-level
-    ``component.last_experiment_result`` global: the global is the
-    result of the last ``train_best_model`` call in the process and is
-    not reset between calls, so a consumer that cannot snapshot it
-    before the run (or runs concurrently in another thread) would
-    otherwise pick up a stranger's result. The engine stamps the token
-    right after assembling the result; the facade passes its private
-    token into ``train_best_model`` and matches it afterwards.
+    recognize *its own* run result when reading the result registry: the
+    registry keeps the result of the last ``train_best_model`` call in the
+    process and does not reset it between calls, so a consumer that cannot
+    snapshot it before the run (or runs concurrently in another thread)
+    would otherwise pick up a stranger's result. The registry stamps the
+    token before publishing the result; the facade passes its private
+    token into ``train_best_model`` and matches it afterwards through
+    ``result_registry.get_experiment_result_owned_by``.
 
     Args:
         result: The assembled result model to stamp (mutated in place).

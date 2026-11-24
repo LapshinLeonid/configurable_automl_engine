@@ -26,13 +26,16 @@ Covered scenarios (positive / negative / boundary):
 - B5: a full HPO failure — the failed status, no model artifact;
 - B6: two experiments in parallel threads share no state;
 - R1 (review B-1): a fresh experiment never adopts a stranger's result
-  left in the engine's ``last_experiment_result`` global (sequential
-  and concurrent threads);
+  left in the engine's result registry (sequential and concurrent
+  threads);
 - R2 (review B-2): a store registration failure never masks the run's
   own error;
 - R3: ``run()`` returns a result carrying this experiment's owner stamp
-  (the engine-side token contract).
+  (the engine-side token contract);
+- R4: a repeated run that fails before reaching the engine does not adopt
+  the previous run's result (a fresh token per run).
 """
+
 from __future__ import annotations
 
 import json
@@ -55,8 +58,12 @@ from configurable_automl_engine.experiment.reporting import (
 )
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.experiment.store import ExperimentStore
-from configurable_automl_engine.training_engine import component
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.result_registry import (
+    clear_experiment_result,
+    get_last_experiment_result,
+    publish_experiment_result,
+)
 
 # ────────────────────────── helpers ────────────────────────── #
 
@@ -121,15 +128,15 @@ def _yaml_config(tmp_path: Path, **overrides: Any) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _reset_engine_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate the engine's module-level last-result between tests.
+def _reset_engine_state() -> None:
+    """Isolate the engine's result registry between tests.
 
-    The global is reset before AND after every test (monkeypatch teardown
-    restores the pre-test value), so a stale result from one test can
-    never leak into another.
+    The registry is cleared before AND after every test, so a stale result
+    from one test can never leak into another.
     """
-    monkeypatch.setattr(component, "last_experiment_result", None)
+    clear_experiment_result()
     yield
+    clear_experiment_result()
 
 
 # ────────────────────────── positive scenarios ────────────────────────── #
@@ -488,19 +495,19 @@ def test_store_injection_shared_history(tmp_path: Path) -> None:
 def test_r1_stranger_result_never_adopted(tmp_path: Path) -> None:
     """Review B-1 (sequential): a fresh experiment after a stranger's
     completed engine run never adopts the stranger's result from the
-    engine's ``last_experiment_result`` global."""
+    engine's result registry."""
     stranger = AutoMLExperiment(_config_dict(tmp_path), _small_df())
     good = stranger.run()
     assert good.status is RunStatus.completed
 
-    # The global holds the stranger's result.
-    assert component.last_experiment_result is good
+    # The registry holds the stranger's result.
+    assert get_last_experiment_result() is good
 
     bad = AutoMLExperiment(_config_dict(tmp_path), pd.DataFrame())
     with pytest.raises(ValueError, match="empty"):
         bad.run()
-    # The failed-before-run experiment stays result-less: the global was
-    # NOT adopted (its owner stamp belongs to the stranger's experiment).
+    # The failed-before-run experiment stays result-less: the registry
+    # result was NOT adopted (its owner stamp belongs to the stranger).
     assert bad.result is None
     with pytest.raises(ExperimentNotRunError):
         bad.leaderboard()
@@ -511,14 +518,13 @@ def test_r1_stranger_result_never_adopted(tmp_path: Path) -> None:
 def test_r1_concurrent_stranger_result_never_adopted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review B-1 (concurrent): when the global is overwritten by a
+    """Review B-1 (concurrent): when the registry is overwritten by a
     stranger's stamped result before this experiment adopts it, the
     experiment NEVER adopts the stranger's result — it reports the
     unknown-outcome state instead of serving foreign data."""
     import uuid as _uuid
 
     from configurable_automl_engine.training_engine.run_result import (
-        mark_result_owner,
         result_owned_by,
     )
 
@@ -530,13 +536,14 @@ def test_r1_concurrent_stranger_result_never_adopted(
     def interleaved_train(*args: Any, **kwargs: Any) -> Any:
         value = real_train(*args, **kwargs)
         # A concurrent experiment finished while ours was running: the
-        # global now carries the stranger's (stamped) result — our own
+        # registry now carries the stranger's (stamped) result — our own
         # result was already overwritten there (the worst-case race).
+        own_result = get_last_experiment_result()
+        assert own_result is not None
         stranger_result = ExperimentResult.model_validate(
-            component.last_experiment_result.model_dump(mode="json")
+            own_result.model_dump(mode="json")
         )
-        mark_result_owner(stranger_result, _uuid.uuid4())
-        component.last_experiment_result = stranger_result
+        publish_experiment_result(stranger_result, run_token=_uuid.uuid4())
         return value
 
     monkeypatch.setattr(component_mod, "train_best_model", interleaved_train)
@@ -545,9 +552,11 @@ def test_r1_concurrent_stranger_result_never_adopted(
     # Nothing foreign was adopted into the experiment's state.
     assert experiment.result is None
     assert len(experiment.store) == 0
-    # The global itself carries the stranger's stamp, not ours.
-    assert component.last_experiment_result is not None
-    assert not result_owned_by(component.last_experiment_result, experiment._run_token)
+    # The registry itself carries the stranger's stamp, not ours.
+    latest = get_last_experiment_result()
+    assert latest is not None
+    assert experiment._run_token is not None
+    assert not result_owned_by(latest, experiment._run_token)
 
 
 def test_r2_store_failure_never_masks_run_error(
@@ -584,13 +593,43 @@ def test_r2_store_failure_never_masks_run_error(
 def test_r3_run_result_carries_owner_stamp(tmp_path: Path) -> None:
     """R3: the returned result carries this experiment's owner stamp (the
     engine-side token contract, the B-1 fix mechanism)."""
+    import uuid as _uuid
+
     from configurable_automl_engine.training_engine.run_result import (
         result_owned_by,
     )
 
     experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
     result = experiment.run()
+    assert experiment._run_token is not None
     assert result_owned_by(result, experiment._run_token)
-    # A stranger's experiment does not own it.
-    other = AutoMLExperiment(_config_dict(tmp_path), _small_df())
-    assert not result_owned_by(result, other._run_token)
+    # A stranger's token does not own it.
+    assert not result_owned_by(result, _uuid.uuid4())
+
+
+def test_r4_repeated_failed_run_keeps_previous_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4: a repeated run that fails before reaching the engine does not
+    adopt the previous run's result (each run has a fresh owner stamp)."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    first = experiment.run()
+    assert experiment.result is first
+
+    adopted: list[ExperimentResult] = []
+
+    def recording_add(result: ExperimentResult, **_kwargs: Any) -> None:
+        adopted.append(result)
+        raise AssertionError("a failed-before-engine run must not adopt a result")
+
+    monkeypatch.setattr(experiment._store, "add", recording_add)
+    # The repeat fails during data validation, before the engine publishes
+    # anything: the registry still holds ``first`` with the old token.
+    experiment._data = pd.DataFrame()
+    with pytest.warns(RuntimeWarning, match="run\\(\\) called again"):
+        with pytest.raises(ValueError, match="empty"):
+            experiment.run()
+
+    assert adopted == []
+    assert experiment.result is first
+    assert len(experiment.store) == 1

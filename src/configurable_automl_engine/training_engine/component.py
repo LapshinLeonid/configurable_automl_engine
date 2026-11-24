@@ -31,6 +31,7 @@ import logging
 import math
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,6 @@ from configurable_automl_engine.common.datetime_features import (
     datetime_expansion_columns,
 )
 from configurable_automl_engine.common.metrics import register_custom_metrics
-from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.oversampling import experimental as _oversampling
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -60,10 +60,10 @@ from .hpo_phases import (
     _hpo_phase_worker,
     _merge_complexity_guard_records,
 )
+from .result_registry import get_last_experiment_result, publish_experiment_result
 from .run_result import (
     build_experiment_result,
     build_failed_experiment_result,
-    mark_result_owner,
 )
 from .select_steps import select_step_outcome
 from .state import (
@@ -81,18 +81,18 @@ __all__ = ["execute_phases", "train_best_model"]
 
 _LOG = logging.getLogger(__name__)
 
-# The instrumented run result of the LAST ``train_best_model`` call in this
-# process (the experiment-result plumbing): the public API returns the dict
-# result, and the ``ExperimentResult`` model assembled from the same sources
-# is stored here for the consumers
-# (the facade and the experiment store). The global is NOT reset
-# between calls: a consumer that cannot pass its own ``run_token`` (the
-# owner stamp, see ``run_result.mark_result_owner``) must snapshot this
-# value before the call and verify it changed afterwards. The facade
-# passes a private token into ``train_best_model`` and matches it after
-# the call, so concurrent or sequential experiments never pick up a
-# stranger's result.
-last_experiment_result: ExperimentResult | None = None
+
+def __getattr__(name: str) -> Any:
+    """Return the latest result through the deprecated compatibility alias."""
+    if name == "last_experiment_result":
+        warnings.warn(
+            "component.last_experiment_result is deprecated; use "
+            "training_engine.result_registry.get_last_experiment_result()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return get_last_experiment_result()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def execute_phases(
@@ -665,16 +665,16 @@ def train_best_model(
     The run is instrumented: alongside the dict result the full run history
     (per-algorithm / per-phase records, trial statistics, phase and run
     timings, the resolved validation settings) is assembled into the
-    ``ExperimentResult`` model (``training_engine.run_result``), which is
-    stored in ``component.last_experiment_result`` for the consumers (the
-    facade and the experiment store). The model is built from the same
+    ``ExperimentResult`` model (``training_engine.run_result``) and
+    published through the result registry
+    (``training_engine.result_registry.publish_experiment_result``) for the
+    facade and the run-history consumers. The model is built from the same
     sources as the dict, so the dict contract is unchanged. On an
     orchestration failure (``RuntimeError``) a failed ``ExperimentResult``
-    is recorded before the error is re-raised. When ``run_token`` is
-    given, the assembled result (completed or failed) is stamped with the
-    token (``run_result.mark_result_owner``), so an orchestrator reading
-    the global afterwards can tell its own result from a stranger's (the
-    global is not reset between calls).
+    is published before the error is re-raised. When ``run_token`` is
+    given, the registry stamps the result with the token, so an
+    orchestrator can retrieve its own result through
+    ``get_experiment_result_owned_by`` and never picks up a stranger's.
 
     Args:
         config: The training
@@ -683,9 +683,8 @@ def train_best_model(
         target: The target column name. Defaults to 'target'.
         model_path_override: An alternative model save path.
         run_token: The caller's private run token (an opaque UUID);
-            when given, the assembled ``ExperimentResult`` is stamped
-            with it for owner recognition (see
-            ``run_result.mark_result_owner``). The dict result return
+            when given, the published ``ExperimentResult`` is stamped
+            with it for owner recognition. The dict result return
             value is not affected.
     Returns:
         Dict[str, Any]: A dict with the results: the algorithm name, ``score``
@@ -706,7 +705,7 @@ def train_best_model(
             algorithm (``InvalidAlgorithmError``) does NOT abort the run: the
             algorithm is excluded from the candidates and the rest continue
             training. On a ``RuntimeError`` a failed ``ExperimentResult``
-            is assembled and stored in ``last_experiment_result`` before the
+            is assembled and published to the result registry before the
             error is re-raised.
     """
     cfg, target_col = load_config(config, df, target)
@@ -859,8 +858,8 @@ def _run_after_phases(
     # The instrumented run result: assembled from the same sources as
     # the dict (not from the dict itself), so the optional dict keys stay
     # untouched. The model is not returned by the public API (the dict
-    # contract is unchanged) — it is stored on the function for the facade
-    # until the result-plumbing contract is finalized.
+    # contract is unchanged) — it is published through the result registry
+    # for the facade and the run-history consumers.
     experiment_result = build_experiment_result(
         cfg=cfg,
         prepared=prepared,
@@ -870,9 +869,7 @@ def _run_after_phases(
         run_finished_at=run_finished.finished_at(),
         run_duration_seconds=run_finished.duration_seconds(),
     )
-    if run_token is not None:
-        mark_result_owner(experiment_result, run_token)
-    globals()["last_experiment_result"] = experiment_result
+    publish_experiment_result(experiment_result, run_token=run_token)
     return result
 
 
@@ -958,12 +955,12 @@ def _record_failed_run(
     run_finished: _RunFinish,
     run_token: uuid.UUID | None = None,
 ) -> None:
-    """Assemble and store the failed ``ExperimentResult`` of a failed run.
+    """Assemble and publish the failed ``ExperimentResult`` of a failed run.
 
     The exception propagates to the caller unchanged; the failed result is
-    kept for the run history (the store consumes it via the facade).
-    When ``run_token`` is given, the failed result is stamped with it (see
-    ``run_result.mark_result_owner``).
+    published to the result registry for the run history (the store
+    consumes it via the facade). When ``run_token`` is given, the registry
+    stamps the failed result with it.
     """
     try:
         failed_result = build_failed_experiment_result(
@@ -978,6 +975,4 @@ def _record_failed_run(
     except Exception:  # noqa: BLE001 — a failed-result assembly error must not shadow the run error
         _LOG.exception("Failed to assemble the failed-run ExperimentResult")
         return
-    if run_token is not None:
-        mark_result_owner(failed_result, run_token)
-    globals()["last_experiment_result"] = failed_result
+    publish_experiment_result(failed_result, run_token=run_token)

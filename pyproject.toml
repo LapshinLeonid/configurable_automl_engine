@@ -127,11 +127,10 @@ exhaustive = true
 ignore_imports = [
     # The object facade (AutoMLExperiment) sits in the experiment
     # package but orchestrates the training engine: the facade module
-    # imports the engine lazily inside run() and _adopt_result() (a
-    # permitted exception).
+    # imports the engine and its result registry lazily inside run() and
+    # _adopt_result() (a permitted exception).
     "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
-    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
-    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.result_registry",
     "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.trainer",
     # The explainability component explains the winner's ModelTrainer
     # pipeline: it consumes the trainer from the experiment package
@@ -203,8 +202,7 @@ ancestors = ["configurable_automl_engine"]
 # the shared sibling view would report a cycle.
 ignore_imports = [
     "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine",
-    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.component",
-    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.run_result",
+    "configurable_automl_engine.experiment.experiment -> configurable_automl_engine.training_engine.result_registry",
     "configurable_automl_engine.common.metrics -> configurable_automl_engine.common.bbc_cv",
 ]
 

@@ -43,11 +43,11 @@ Documented contract:
   from the artifact path recorded in the result (auto-detected format);
 * the facade holds no global state: two experiments in different threads
   share nothing and can run concurrently (the engine itself supports
-  ``general.parallel_mode: threads``); the engine's module-level
-  ``last_experiment_result`` global is recognized as *this* run's
-  result by a private owner stamp (``run_result.mark_result_owner``), so
-  a concurrent or sequential stranger's run never leaks into the
-  experiment's own state.
+  ``general.parallel_mode: threads``); the facade retrieves the run result
+  from the engine's result registry only when it carries this run's private
+  owner stamp (``result_registry.get_experiment_result_owned_by``), so a
+  concurrent or sequential stranger's run never leaks into the experiment's
+  own state.
 
 ``explain()`` explains the winner: the permutation importance of the
 original feature columns (always available) or the SHAP contributions
@@ -237,12 +237,13 @@ class AutoMLExperiment:
         self._model_path_override = model_path_override
         self._store = store if store is not None else ExperimentStore(path=store_path)
         self._result: ExperimentResult | None = None
-        # The private owner stamp passed into the engine's run: the engine
-        # stamps its assembled ExperimentResult with this token, and the
-        # facade accepts from the shared ``last_experiment_result`` global
-        # only the result carrying its own token (concurrent or sequential
-        # stranger's runs never leak into this experiment's state).
-        self._run_token = uuid.uuid4()
+        # The private owner stamp of the current engine run, created when
+        # run() starts: the engine publishes its ExperimentResult through the
+        # result registry with this token, and the facade accepts only the
+        # result carrying it (concurrent or sequential stranger's runs never
+        # leak into this experiment's state; a reused token would make a run
+        # that fails before reaching the engine adopt the previous result).
+        self._run_token: uuid.UUID | None = None
 
     # ─────────────────────────── state views ────────────────────────── #
 
@@ -278,8 +279,8 @@ class AutoMLExperiment:
 
         Registration policy: the result of the new run (completed or
         failed) is registered in the store when the run produced one; the
-        result is recognized by this experiment's private owner stamp, so
-        a concurrent run of another experiment never leaks here. A store
+        result is recognized by this run's private owner stamp, so a
+        concurrent run of another experiment never leaks here. A store
         registration failure is logged as a warning and never masks the
         outcome of the run itself.
 
@@ -304,6 +305,11 @@ class AutoMLExperiment:
                 RuntimeWarning,
                 stacklevel=2,
             )
+        # A fresh token per run: a run that fails before reaching the engine
+        # must not adopt the previous run's result, which carries the old
+        # token in the registry.
+        run_token = uuid.uuid4()
+        self._run_token = run_token
         # Snapshot the data at run() time (see the module docstring for
         # the exact copy semantics).
         data = copy.copy(self._data)
@@ -318,14 +324,14 @@ class AutoMLExperiment:
                 data,
                 target=self._target,
                 model_path_override=self._model_path_override,
-                run_token=self._run_token,
+                run_token=run_token,
             )
         finally:
             # Both a completed and a failed run leave an ExperimentResult
-            # behind (the plumbing records the failed result too); it
-            # is recognized by this experiment's private owner stamp —
-            # the global is the result of the LAST engine call in the
-            # process and may belong to a concurrent stranger's run.
+            # behind (the registry records the failed result too); it is
+            # recognized by this run's private owner stamp — the registry
+            # holds the result of the LAST engine call in the process and
+            # may belong to a concurrent stranger's run.
             self._adopt_result()
         if self._result is None:
             # A distinct matchable prefix: this is NOT the "has not been
@@ -342,23 +348,21 @@ class AutoMLExperiment:
     def _adopt_result(self) -> None:
         """Adopt the run result from the engine, if it is ours.
 
-        Reads the engine's ``last_experiment_result`` global and accepts
-        it only when it carries this experiment's owner stamp. Failures
-        of the store registration are logged and do not mask the run
-        outcome (the run's own error propagates from the engine call).
+        Reads the result registry and accepts the latest result only when
+        it carries this run's owner stamp. Failures of the store
+        registration are logged and do not mask the run outcome (the
+        run's own error propagates from the engine call).
         """
-        from configurable_automl_engine.training_engine.component import (
-            last_experiment_result,
-        )
-        from configurable_automl_engine.training_engine.run_result import (
-            result_owned_by,
+        from configurable_automl_engine.training_engine.result_registry import (
+            get_experiment_result_owned_by,
         )
 
-        if last_experiment_result is None or not result_owned_by(
-            last_experiment_result, self._run_token
-        ):
+        run_token = self._run_token
+        if run_token is None:
             return
-        result = last_experiment_result
+        result = get_experiment_result_owned_by(run_token)
+        if result is None:
+            return
         self._attach_label(result)
         try:
             self._store.add(result)

@@ -41,17 +41,13 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 #: module).
 ALLOWED_FUNCTION_IMPORTS = {
     ("training_engine/__init__.py", f"{PACKAGE}.training_engine.component"),
-    # The object facade: the engine is imported lazily
-    # inside run()/_adopt_result()/best_model() so the facade module stays
-    # importable without it.
+    # The object facade: the engine is imported lazily inside run() and the
+    # result registry inside _adopt_result(), so the facade module stays
+    # importable without the engine.
     ("experiment/experiment.py", f"{PACKAGE}.training_engine"),
     (
         "experiment/experiment.py",
-        f"{PACKAGE}.training_engine.component",
-    ),
-    (
-        "experiment/experiment.py",
-        f"{PACKAGE}.training_engine.run_result",
+        f"{PACKAGE}.training_engine.result_registry",
     ),
     ("experiment/experiment.py", f"{PACKAGE}.trainer"),
     # The experimental ensemble loader (``ensemble_model()``): the pure

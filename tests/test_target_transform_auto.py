@@ -53,9 +53,11 @@ from configurable_automl_engine.preprocessing.target_transform import (
 )
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.trainer_params import TrainingError
-from configurable_automl_engine.training_engine import component
 from configurable_automl_engine.training_engine.component import train_best_model
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.result_registry import (
+    get_last_experiment_result,
+)
 from configurable_automl_engine.training_engine.data_prep import (
     _fallback_transform_for_full_y,
     prepare_dataset,
@@ -580,14 +582,10 @@ def test_e2e_auto_resolves_to_log1p_and_reaches_artifact(tmp_path: Path) -> None
     )
     assert result["algorithm"] == "ridge"
 
-    # The global is re-imported through the module each time: it is
-    # reassigned by ``train_best_model``, a module-level ``from`` import
-    # would keep the stale ``None`` binding.
-    assert component.last_experiment_result is not None
+    experiment_result = get_last_experiment_result()
+    assert experiment_result is not None
     # The resolved value (not 'auto') is in the ExperimentResult.
-    assert component.last_experiment_result.config["general"]["target_transform"] == (
-        "log1p"
-    )
+    assert experiment_result.config["general"]["target_transform"] == "log1p"
 
     trainer = joblib.load(model_path)
     steps = dict(trainer.pipeline.steps)
@@ -686,12 +684,11 @@ def test_e2e_no_holdout_auto_artifact_resolves_fold_locally(tmp_path: Path) -> N
     assert result["algorithm"] == "ridge"
     assert "bbc_score" in result  # the honest no-hold-out estimate exists
 
-    assert component.last_experiment_result is not None
+    experiment_result = get_last_experiment_result()
+    assert experiment_result is not None
     # The config snapshot reports the placeholder honestly (the resolution
     # is per fold; there is no single global method to report).
-    assert component.last_experiment_result.config["general"]["target_transform"] == (
-        "auto"
-    )
+    assert experiment_result.config["general"]["target_transform"] == "auto"
 
     trainer = joblib.load(model_path)
     steps = dict(trainer.pipeline.steps)

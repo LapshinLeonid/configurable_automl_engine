@@ -3,9 +3,9 @@
 Covered scenarios (positive / negative / boundary):
 
 - P1: a full run (HPO phase + select + terminal select) → the
-  ``ExperimentResult`` stored in ``component.last_experiment_result``
-  contains the records of all phases, the winner and the final score
-  consistent with the dict result;
+  ``ExperimentResult`` published to the engine result registry contains
+  the records of all phases, the winner and the final score consistent
+  with the dict result;
 - P2: the dict result keeps its legacy contract keys (the
   ``persist_artifact`` regression);
 - P3: ``additional_metrics``, ``disqualified_algorithms``, ``sanity_gate``
@@ -51,6 +51,9 @@ from configurable_automl_engine.tuner import (
     OptimizeResult,
 )
 from configurable_automl_engine.training_engine.component import execute_phases
+from configurable_automl_engine.training_engine.result_registry import (
+    get_last_experiment_result,
+)
 
 
 # The import keeps the patch target explicit: the tests patch the HPO run
@@ -113,7 +116,7 @@ def _small_df() -> pd.DataFrame:
 
 def _last_result():
     """The ExperimentResult of the last ``train_best_model`` call."""
-    return component.last_experiment_result
+    return get_last_experiment_result()
 
 
 # ────────────────────────── positive scenarios ────────────────────────── #

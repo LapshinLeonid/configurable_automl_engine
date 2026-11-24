@@ -59,7 +59,9 @@ from configurable_automl_engine.experiment.explain import (
 )
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.trainer import ModelTrainer
-from configurable_automl_engine.training_engine import component
+from configurable_automl_engine.training_engine.result_registry import (
+    clear_experiment_result,
+)
 
 # ────────────────────────── helpers ────────────────────────── #
 
@@ -115,10 +117,11 @@ def _small_df() -> pd.DataFrame:
 
 
 @pytest.fixture(autouse=True)
-def _reset_engine_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate the engine's module-level last-result between tests."""
-    monkeypatch.setattr(component, "last_experiment_result", None)
+def _reset_engine_state() -> None:
+    """Isolate the engine's result registry between tests."""
+    clear_experiment_result()
     yield
+    clear_experiment_result()
 
 
 def _fit_trainer(X: pd.DataFrame, y: pd.Series) -> ModelTrainer:

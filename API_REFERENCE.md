@@ -1689,9 +1689,10 @@ contract replacement.
 | `configurable_automl_engine.trainer_params` | `automl_contracts.errors` for `TrainingError` | The trainer parameter validation helpers |
 | `configurable_automl_engine.tuner` | `automl_contracts.definitions` or the root for `WORST_SCORE_THRESHOLD` | `optimize`, `OptimizeResult`, `TrialStats`, the HPO exceptions, `HPO_WORST_SCORE` |
 | `configurable_automl_engine.preprocessing` | `automl_contracts.definitions` or the root for `EncodingStrategy` | Runtime transformers and preprocessing helpers |
-| `configurable_automl_engine.training_engine` | No contract replacement | `train_best_model`, `last_experiment_result`, `execute_phases` |
+| `configurable_automl_engine.training_engine` | No contract replacement | `train_best_model`, `execute_phases` |
 | `configurable_automl_engine.training_engine.thread_pool` | No contract replacement | `run_parallel`, `run_parallel_outcomes` |
-| `configurable_automl_engine.training_engine.component` | No contract replacement | `train_best_model`, `last_experiment_result`, `execute_phases` |
+| `configurable_automl_engine.training_engine.component` | No contract replacement | `train_best_model`, `execute_phases`, the deprecated read-only `last_experiment_result` alias |
+| `configurable_automl_engine.training_engine.result_registry` | No contract replacement | `publish_experiment_result`, `get_last_experiment_result`, `get_experiment_result_owned_by`, `clear_experiment_result` |
 | `configurable_automl_engine.experiment.explain` | No contract replacement | `explain_permutation_importance`, `explain_shap`, `aggregate_to_original_features`, `render_importance_markdown` |
 | `configurable_automl_engine.experiment.store` | No contract replacement | `ExperimentStore`, `RunSummary`, `DuplicateRunError`, `ExperimentStoreError` |
 | `configurable_automl_engine.oversampling` | No contract replacement | `DataOversampler`, `oversample` and the public package names |
@@ -1773,7 +1774,17 @@ The main entry point for the AutoML pipeline. Validates data, runs multi-phase h
 
 **Raises:** `TypeError` for unsupported config types; pydantic `ValidationError` (a subclass of `ValueError`) for structural config errors; `ValueError` for runtime config checks that need the installed environment (algorithm dependencies, hyperparameter compatibility, custom-metric imports and signatures, process/thread limits) and for unusable data (for example a missing or non-numeric target column); custom-metric runtime checks may raise a `pydantic_core.PydanticCustomError`; `RuntimeError` if no algorithm succeeds. The contract models alone perform only the structural part — see [Contracts package](#contracts-package-configurable-automl-contracts).
 
-**Experiment result.** Alongside the dict, the full run history is assembled into the `ExperimentResult` model (per-algorithm / per-phase records with raw and user-semantic scores, trial statistics, phase and run timings, the resolved validation settings, the circuit-breaker map, and the report sections) and stored in `configurable_automl_engine.training_engine.component.last_experiment_result` after every call — including a failed run (`status: "failed"` with the error message and the records of the completed phases). The model is a pure serializable Pydantic model (`ExperimentResult.to_json()` / `ExperimentResult.from_json()`); the winner, its user-semantic score and the params are taken from the same sources as the dict keys `algorithm` / `score` / `params`, so the two cannot diverge.
+**Experiment result.** Alongside the dict, the full run history is assembled into the `ExperimentResult` model (per-algorithm / per-phase records with raw and user-semantic scores, trial statistics, phase and run timings, the resolved validation settings, the circuit-breaker map, and the report sections) and published to the process-wide result registry (`configurable_automl_engine.training_engine.result_registry`) after every call — including a failed run (`status: "failed"` with the error message and the records of the completed phases). The registry hides the hand-off state behind explicit functions: `get_last_experiment_result()` returns the latest result for a normal caller. The `AutoMLExperiment` facade passes its private `run_token` into `train_best_model` and reads only the result stamped with that token through `get_experiment_result_owned_by(token)`; a stranger's result never matches. The `component.last_experiment_result` attribute is a deprecated read-only alias of `get_last_experiment_result()`; new code should call the registry API. `clear_experiment_result()` resets the slot (test isolation). The model is a pure serializable Pydantic model (`ExperimentResult.to_json()` / `ExperimentResult.from_json()`); the winner, its user-semantic score and the params are taken from the same sources as the dict keys `algorithm` / `score` / `params`, so the two cannot diverge.
+
+```python
+from configurable_automl_engine import train_best_model
+from configurable_automl_engine.training_engine.result_registry import (
+    get_last_experiment_result,
+)
+
+results = train_best_model(config=config, df=df, target="target")
+experiment_result = get_last_experiment_result()  # the ExperimentResult of the last run
+```
 
 ---
 
@@ -2151,10 +2162,12 @@ import mlflow
 
 import configurable_automl_engine as caml
 from configurable_automl_engine.experiment import MLflowReporter
-from configurable_automl_engine.training_engine import component as caml_component
+from configurable_automl_engine.training_engine.result_registry import (
+    get_last_experiment_result,
+)
 
 results = caml.train_best_model(config=config, df=df, target="target")  # the engine run
-result = caml_component.last_experiment_result  # the ExperimentResult of the last run
+result = get_last_experiment_result()  # the ExperimentResult of the last run
 
 with mlflow.start_run(run_name="my-experiment"):
     MLflowReporter().report(result)          # into the active run
@@ -2241,7 +2254,7 @@ experiment.explain()         # feature importance of the winner model
 
 **State errors.** Every result consumer (`leaderboard`, `best_model`, `ensemble_model`, `report`, `export`, `explain`) raises `ExperimentNotRunError` (a subclass of `RuntimeError`) before `run()`, with a message naming the state and the fix. A separate error form: the engine ran but did not record a result stamped with the experiment's owner — diagnosed as an engine/facade version mismatch.
 
-**Owner stamp.** The facade keeps no global state: two experiments in different threads share nothing and may run concurrently (the engine supports `general.parallel_mode: threads`). A run's result is recognized as "its own" by a private owner stamp (`run_token`) passed to the engine: a foreign concurrent or sequential run never leaks into the experiment's state. A store-registration failure is logged as a WARNING and does not mask the run outcome.
+**Owner stamp.** The facade keeps no global state: two experiments in different threads share nothing and may run concurrently (the engine supports `general.parallel_mode: threads`). Each `run()` gets a fresh private owner stamp (`run_token`) passed to the engine; the result is read back from the explicit result registry only through `get_experiment_result_owned_by(token)`, so a foreign concurrent or sequential run never leaks into the experiment's state. A store-registration failure is logged as a WARNING and does not mask the run outcome.
 
 **Data snapshot.** The data is snapshotted at `run()` time (a shallow copy of the DataFrame): mutations of the caller's frame after `run()` (adding/removing columns, reassignment) do not change the trained data. The snapshot is a copy of the frame object, not a deep copy of every block: mutating column values *in place* (`df.loc[...] = ...`) still lands in the training data, as with any pandas copy; assign a new frame instead.
 

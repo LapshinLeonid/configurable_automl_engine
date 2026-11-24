@@ -196,6 +196,7 @@ repeat counts as one split.
 │       │   ├── parallel_transport.py       # run_parallel: shared memory / disk cache / pickle payload transport
 │       │   ├── parallel_worker.py          # run_parallel: worker side (start signal, argument restore)
 │       │   ├── robust_winner.py            # Robust winner: Sanity Gate audit of the finalists, fallback ranking
+│       │   ├── result_registry.py          # Explicit hand-off of the last ExperimentResult: publish / latest / owner-scoped read
 │       │   ├── run_result.py               # build_experiment_result: assembly of the ExperimentResult model; owner stamp (mark_result_owner)
 │       │   ├── sanity_circuits.py          # Sanity Gate circuits A–D (diversity, unique, dead features, gap)
 │       │   ├── sanity_gate.py              # ModelSanityGate: settings, check(), audit logging
