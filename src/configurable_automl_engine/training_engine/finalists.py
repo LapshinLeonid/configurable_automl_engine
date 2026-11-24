@@ -2,9 +2,11 @@
 
 Selects the winner by the raw CV score (``select_winner``), builds the
 corridor-based finalists pool (``select_finalists``) and trains every finalist
-on 100% of the data exactly once (``_train_finalists``); the Sanity Gate audit
-with the fallback ranking is in :mod:`.robust_winner`. It may import ``state``,
-``hpo_phases`` and ``artifact`` (the shared trainer assembly) and must not
+on 100% of the data exactly once (``_train_finalists``) — in parallel when
+``general.parallel_strategy`` is enabled; the Sanity Gate audit with the
+fallback ranking is in :mod:`.robust_winner`. It may import ``state``,
+``hpo_phases``, ``artifact`` (the shared trainer assembly) and
+``thread_pool`` (the same execution layer as the HPO phases) and must not
 import ``select_steps`` or ``component``.
 """
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -36,6 +39,7 @@ from ..tuner import WORST_SCORE_THRESHOLD
 from .artifact import _build_trainer
 from .hpo_phases import _algorithms_as_dict
 from .state import FinalistCandidate, PhaseResult, PreparedData
+from .thread_pool import run_parallel_outcomes
 
 _LOG = logging.getLogger(__name__)
 
@@ -571,6 +575,174 @@ def _to_candidate(
     )
 
 
+@dataclass(frozen=True)
+class _FinalistSpec:
+    """The immutable inputs of one finalist training task.
+
+    Built once per pool member and passed to ``_train_finalist_worker``. The
+    worker is a module-level function so that it can be serialized in the
+    ``processes`` mode; the feature matrix ``X`` is NOT part of the spec —
+    ``run_parallel`` transfers it through shared memory / the disk cache
+    instead of pickling it for every finalist.
+
+    Attributes:
+        algo_name (str): The algorithm name.
+        algo_cfg (AlgoCfg): The algorithm configuration.
+        params (dict[str, Any]): The best hyperparameters from HPO.
+        cv_score (float): The raw HPO score of the candidate.
+        cfg (Config): The root config (trainer assembly settings).
+        metric_name_sklearn (str): The metric in sklearn semantics.
+        validation_strategy (ValidationStrategy | str): The resolved
+            validation strategy.
+        n_folds (int): The number of folds (for 'k_fold').
+        test_size (float | int): The hold-out size.
+        random_state (int | None): The engine seed for splits and model
+            seeds; ``None`` — a non-reproducible fit.
+        target_transform (TargetTransform): The target transformation of the
+            ``model`` step.
+        datetime_expansion (dict[str, list[str]] | None): The datetime
+            expansion registered on the trainer before fit.
+        y (pd.Series): The full target vector.
+    """
+
+    algo_name: str
+    algo_cfg: AlgoCfg
+    params: dict[str, Any]
+    cv_score: float
+    cfg: Config
+    metric_name_sklearn: str
+    validation_strategy: ValidationStrategy | str
+    n_folds: int
+    test_size: float | int
+    random_state: int | None
+    target_transform: TargetTransform
+    datetime_expansion: dict[str, list[str]] | None
+    y: pd.Series
+
+
+@dataclass(frozen=True)
+class _TrainedFinalist:
+    """A fitted finalist trainer and its in-memory per-repeat OOF vectors.
+
+    ``ValidationScores.__getstate__`` deliberately drops
+    ``oof_predictions_by_repeat`` from a serialized trainer (an
+    ``O(repeats × rows)`` diagnostic that must not grow the artifact), so in
+    the ``processes`` mode the trainer alone would arrive in the parent
+    without the repeated-validation vectors. The worker returns them
+    separately, and the parent reattaches them before assembling the
+    ``FinalistCandidate``.
+
+    Attributes:
+        trainer (Any): The fitted ``ModelTrainer``.
+        oof_predictions_by_repeat (list[Any] | None): The per-repeat OOF
+            vectors (``None`` when the trainer keeps no such diagnostic, e.g.
+            ``n_repeats = 1``).
+    """
+
+    trainer: Any
+    oof_predictions_by_repeat: list[Any] | None
+
+
+def _train_finalist_worker(
+    spec: _FinalistSpec, X: pd.DataFrame
+) -> _TrainedFinalist | None:
+    """Train one finalist on 100% of the data (a parallel task).
+
+    A module-level function: serializable in the ``processes`` mode. A
+    training failure does not abort the run — the reason is logged (WARNING)
+    in the worker (forwarded to the parent's log) and ``None`` is returned,
+    so the caller skips this candidate and keeps the others.
+
+    Args:
+        spec: The immutable inputs of the finalist training.
+        X: The full feature matrix (transferred through shared memory / the
+            disk cache by ``run_parallel`` in the processes mode).
+
+    Returns:
+        _TrainedFinalist | None: The fitted trainer with its per-repeat OOF
+            vectors, or ``None`` if training failed.
+    """
+    try:
+        trainer = _fit_finalist(
+            spec.algo_name,
+            spec.algo_cfg,
+            X,
+            spec.y,
+            spec.params,
+            spec.cfg,
+            spec.metric_name_sklearn,
+            validation_strategy=spec.validation_strategy,
+            n_folds=spec.n_folds,
+            test_size=spec.test_size,
+            random_state=spec.random_state,
+            target_transform=spec.target_transform,
+            datetime_expansion=spec.datetime_expansion,
+        )
+    except Exception as err:  # noqa: BLE001 — the finalist is excluded
+        _LOG.warning(
+            "Finalist %s failed to train on the full dataset: %s. "
+            "The candidate is skipped.",
+            spec.algo_name,
+            err,
+            exc_info=True,
+        )
+        return None
+    vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
+    return _TrainedFinalist(
+        trainer=trainer,
+        oof_predictions_by_repeat=(
+            list(vectors) if isinstance(vectors, (list, tuple)) else None
+        ),
+    )
+
+
+def _restore_trainer_repeat_vectors(trained: _TrainedFinalist) -> None:
+    """Reattach the per-repeat OOF vectors lost by the process pickle.
+
+    In the ``processes`` mode ``ValidationScores.__getstate__`` drops the
+    diagnostic ``oof_predictions_by_repeat`` field; the worker carries it in
+    ``_TrainedFinalist`` instead. The trainer restores its own state (only
+    ``ModelTrainer`` mutates a ``ModelTrainer``); in the ``threads`` mode the
+    vectors are already present, so nothing is restored.
+    """
+    vectors = trained.oof_predictions_by_repeat
+    if vectors is None:
+        return
+    if getattr(trained.trainer, "oof_predictions_by_repeat_", None) is not None:
+        return
+    trained.trainer._restore_oof_repeat_vectors(vectors)
+
+
+def _build_finalist_specs(
+    pool: list[str],
+    phase_results: dict[str, PhaseResult],
+    cfg: Config,
+    prepared: PreparedData,
+    random_state: int | None,
+) -> list[_FinalistSpec]:
+    """Build the training tasks of the finalists that have HPO results."""
+    algos = _algorithms_as_dict(cfg.algorithms)
+    return [
+        _FinalistSpec(
+            algo_name=name,
+            algo_cfg=algos[name],
+            params=phase_results[name].params,
+            cv_score=phase_results[name].score,
+            cfg=cfg,
+            metric_name_sklearn=prepared.metric_sklearn,
+            validation_strategy=prepared.resolved_validation,
+            n_folds=prepared.resolved_n_folds,
+            test_size=prepared.resolved_test_size,
+            random_state=random_state,
+            target_transform=cfg.general.target_transform,
+            datetime_expansion=prepared.datetime_expansion,
+            y=prepared.y,
+        )
+        for name in pool
+        if name in phase_results
+    ]
+
+
 def _train_finalists(
     pool: list[str],
     phase_results: dict[str, PhaseResult],
@@ -579,6 +751,13 @@ def _train_finalists(
     random_state: int | None,
 ) -> dict[str, FinalistCandidate]:
     """Train every finalist in the pool on 100% of the data exactly once.
+
+    When ``general.parallel_strategy`` is ``"algorithms"`` and the pool has
+    more than one candidate, the trainings run through the same execution
+    layer as the HPO phases: ``general.parallel_mode`` selects threads or
+    processes, ``general.max_workers`` bounds the concurrency, and in the
+    processes mode the feature matrix is transferred through shared memory.
+    A single finalist is trained directly, without pool overhead.
 
     A training failure of a single finalist does not abort the run: the
     exception is caught, the reason is logged (WARNING), and the candidate is
@@ -593,40 +772,47 @@ def _train_finalists(
         random_state: The engine seed (``general.random_state``)
             forwarded to every finalist's ``ModelTrainer``.
     """
-    algos = _algorithms_as_dict(cfg.algorithms)
+    specs = _build_finalist_specs(pool, phase_results, cfg, prepared, random_state)
+    if not specs:
+        return {}
+    if cfg.general.parallel_strategy == "algorithms" and len(specs) > 1:
+        outcomes = run_parallel_outcomes(
+            _train_finalist_worker,
+            args_seq=[(spec, prepared.X) for spec in specs],
+            max_workers=cfg.general.max_workers,
+            mode=cfg.general.parallel_mode,
+            # X is transferred through shared memory (or the disk cache)
+            # instead of being pickled for every finalist.
+            shared_args_indices=(
+                [1] if cfg.general.parallel_mode == "processes" else None
+            ),
+            # None — the run_parallel default (forkserver, else spawn).
+            mp_context=cfg.general.start_method,
+        )
+        trained_tasks: list[_TrainedFinalist | None] = []
+        for spec, outcome in zip(specs, outcomes):
+            if not outcome.ok:
+                _LOG.warning(
+                    "Finalist %s failed to train on the full dataset: %s. "
+                    "The candidate is skipped.",
+                    spec.algo_name,
+                    outcome.reason(),
+                )
+            trained_tasks.append(outcome.value if outcome.ok else None)
+    else:
+        trained_tasks = [_train_finalist_worker(spec, prepared.X) for spec in specs]
+
     candidates: dict[str, FinalistCandidate] = {}
-    for name in pool:
-        if name not in phase_results:
+    for spec, trained in zip(specs, trained_tasks):
+        if trained is None:
             continue
-        record = phase_results[name]
-        params = record.params
-        score = record.score
-        try:
-            trainer = _fit_finalist(
-                name,
-                algos[name],
-                prepared.X,
-                prepared.y,
-                params,
-                cfg,
-                prepared.metric_sklearn,
-                validation_strategy=prepared.resolved_validation,
-                n_folds=prepared.resolved_n_folds,
-                test_size=prepared.resolved_test_size,
-                random_state=random_state,
-                target_transform=cfg.general.target_transform,
-                datetime_expansion=prepared.datetime_expansion,
-            )
-        except Exception as err:  # noqa: BLE001 — the finalist is excluded
-            _LOG.warning(
-                "Finalist %s failed to train on the full dataset: %s. "
-                "The candidate is skipped.",
-                name,
-                err,
-                exc_info=True,
-            )
-            continue
-        candidates[name] = _to_candidate(
-            name, trainer, params, score, prepared.X, prepared.y
+        _restore_trainer_repeat_vectors(trained)
+        candidates[spec.algo_name] = _to_candidate(
+            spec.algo_name,
+            trained.trainer,
+            spec.params,
+            spec.cv_score,
+            prepared.X,
+            prepared.y,
         )
     return candidates

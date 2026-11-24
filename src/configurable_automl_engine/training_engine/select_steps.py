@@ -374,7 +374,8 @@ def _select_sanity_gate(
     1. Finalists pool (corridor δ ∩ ``top_k_candidates`` from
        ``general.sanity_gate``);
     2. ``_train_finalists`` — train each finalist on 100% of the data exactly
-       once (a repeated select after HPO phases trains the finalists anew —
+       once, in parallel through the ``general.parallel_*`` pool (a repeated
+       select after HPO phases trains the finalists anew —
        old full-fit trainers are not reused);
     3. ``ModelSanityGate`` audit: with repeated validation circuits A/B and D
        are evaluated per repeat and aggregated by the median (for D — the
@@ -532,7 +533,9 @@ def select_step_outcome(
 ) -> SelectOutcome:
     """Run a select step and return the new pipeline state (strategy dispatcher).
 
-    Select runs synchronously (outside ``run_parallel``). An empty incoming
+    The step runs synchronously between the HPO phases; a ``sanity_gate``
+    select trains its finalists in parallel through the same ``run_parallel``
+    layer as the HPO phases. An empty incoming
     set is an error: there is nothing to select from. The context is only
     read; ``component._apply_select_outcome`` applies the outcome.
 

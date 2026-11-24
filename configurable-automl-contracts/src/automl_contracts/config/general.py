@@ -104,7 +104,8 @@ class GeneralCfg(BaseModel):
         categorical_encoding (EncodingStrategy): Encoding strategy for
             categorical features ('one_hot', 'ordinal', 'target', 'frequency'
             or 'hashing'). Default is 'one_hot'.
-        parallel_strategy (str): Parallelization level (only by algorithms).
+        parallel_strategy (str): Parallelization level (only by algorithms:
+            HPO phases and the training of the select-step finalists).
         max_workers (int | None): Limit on threads or processes.
         parallel_mode (str): Technical execution mode ('threads' or 'processes').
         start_method (str | None): How the worker processes start in
@@ -358,7 +359,8 @@ class GeneralCfg(BaseModel):
         description=(
             "Parallelization strategy."
             "Currently only 'algorithms' is supported"
-            " (each algorithm in its own thread/process)."
+            " (each algorithm in its own thread/process; the finalists of a"
+            " select step are trained on 100% of the data in the same pool)."
         ),
     )
     max_workers: int | None = Field(

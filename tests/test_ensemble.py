@@ -763,7 +763,11 @@ def test_holdout_members_refit_on_full_data_comparison_stays_on_train_part(
 
     model = experiment.ensemble_model()
     for name in members:
-        assert model.predictors[name]._features.X.shape[0] == 40
+        # The saved trainer keeps the feature schema but not the fit-time
+        # matrix; the refit-on-all-rows check above uses the captured sizes.
+        assert model.predictors[name]._features.X is None
+        predictions = model.predictors[name].predict(frame.drop(columns=["target"]))
+        assert len(predictions) == len(frame)
 
     comparison = result.ensemble["comparison"]
     assert comparison is not None

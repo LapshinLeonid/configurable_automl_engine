@@ -519,6 +519,11 @@ class ModelTrainer(TrainerViewMixin):
         self.lock = threading.RLock()
         self.logger = logging.getLogger(__name__)
 
+    def _restore_oof_repeat_vectors(self, vectors: Iterable[Any] | None) -> None:
+        """Reattach the per-repeat OOF vectors dropped by serialization."""
+        if vectors is not None and self._scores is not None:
+            self._scores = self._scores.with_oof_repeat_vectors(vectors)
+
     # ── training ───────────────────────────────────────────────────────────
     def _create_base_model(self) -> Any:
         """Create the regressor via the model factory.

@@ -368,7 +368,7 @@ A config has three top-level sections. Only `algorithms` is required:
 |--------|---------|-------------|
 | `max_workers` | CPU count | Maximum number of threads/processes. |
 | `parallel_mode` | `"threads"` | `"threads"` or `"processes"`. |
-| `parallel_strategy` | `"algorithms"` | What runs in parallel. Currently only `"algorithms"` (different algorithms are tuned at the same time). |
+| `parallel_strategy` | `"algorithms"` | What runs in parallel. Currently only `"algorithms"`: different algorithms are tuned at the same time, and the finalists of a `sanity_gate` select step are trained on 100% of the data at the same time through the same thread/process pool. |
 | `phase_timeout` | `null` (3600 s) | Time limit of one search step, seconds (≥ 1). **Only with `parallel_mode: "processes"`**, where hung workers are terminated. In `"threads"` mode setting it is a config error: a running Python thread cannot be stopped, so the limit would only throw away finished results. |
 | `task_timeout` | `null` (= `phase_timeout`) | Time limit of one algorithm, seconds (≥ 1). Only with `"processes"`, same reason. |
 | `start_method` | `null` | How the worker processes start with `"processes"`: `"forkserver"`, `"spawn"` or `"fork"`. `null` — `"forkserver"` where the platform has it (Linux, macOS), otherwise `"spawn"`. With `"forkserver"` and `"spawn"` the main script must guard its top-level code with `if __name__ == "__main__":` (see "A script that uses `parallel_mode: \"processes\"`" above); `"fork"` (POSIX only) does not need the guard but can deadlock a worker of a multi-threaded process. Setting it with `"threads"` is a config error, and so is a method the platform does not have. |

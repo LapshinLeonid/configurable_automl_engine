@@ -84,8 +84,10 @@ for the inclusion rules, versioning policy and contract-change process.
   [Categorical encoding](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#categorical-encoding) and
   [preprocessing presets](https://github.com/LapshinLeonid/configurable_automl_engine/blob/v0.6.0/API_REFERENCE.md#adaptive-feature-preprocessing-preprocessing-presets).
 * **Parallel Execution Across Algorithms** — algorithms are tuned at the same
-  time in threads or processes (`parallel_strategy: "algorithms"`); a config
-  with a single algorithm does not get faster with more workers. With
+  time in threads or processes (`parallel_strategy: "algorithms"`), and the
+  finalists of a `sanity_gate` select step are trained on 100% of the data
+  through the same pool. A config with a single algorithm does not get faster
+  with more workers. With
   `parallel_mode: "processes"` the workers start with `forkserver` (or
   `spawn`) and import the main script again: **guard the script's top-level
   code with `if __name__ == "__main__":`**, or set

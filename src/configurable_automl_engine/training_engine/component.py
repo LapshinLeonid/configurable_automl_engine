@@ -102,7 +102,8 @@ def execute_phases(
     """Run all pipeline phases and return the final phase context.
 
     Pipeline step 3. Contains the phase loop, parallel HPO execution,
-    synchronous select steps, circuit breaker disqualification, and filtering
+    select steps (their finalists are trained in parallel too), circuit
+    breaker disqualification, and filtering
     of invalid results. The HPO worker ``_hpo_phase_worker`` and the helper
     ``_execute_hpo_phase`` are module-level functions: the phase data is
     passed through ``_HpoPhaseSpec`` so that the worker is serializable in
@@ -201,8 +202,9 @@ def execute_phases(
         phase_started_at = dt.datetime.now(dt.UTC)
         phase_started_monotonic = time.monotonic()
         if phase.action == "select":
-            # The select step runs synchronously (outside run_parallel): it
-            # operates on already-finished HPO results.
+            # The select step operates on already-finished HPO results and
+            # runs between the HPO phases; a sanity_gate select trains its
+            # finalists through its own run_parallel pool.
             outcome = select_step_outcome(phase, cfg, prepared, ctx)
             _apply_select_outcome(ctx, outcome, phase.name)
             _attribute_disqualifications(ctx, phase.name)

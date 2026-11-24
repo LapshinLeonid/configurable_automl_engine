@@ -13,7 +13,8 @@ module holds definitions only (it is part of the saved artifact format, see
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, field, fields
+from collections.abc import Iterable
+from dataclasses import MISSING, dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from configurable_automl_engine.common.definitions import TargetTransform
@@ -160,7 +161,8 @@ class PreparedFeatures:
     """The training features after the diagnostics, cleaning and typing.
 
     Attributes:
-        X: The feature matrix the pipeline is trained on.
+        X: The feature matrix the pipeline is trained on (not serialized:
+            it is not read after ``fit``).
         feature_names: The feature names in training order (``predict``
             aligns its input to them).
         categorical_features: The categorical columns.
@@ -178,6 +180,34 @@ class PreparedFeatures:
     dropped_features: list[str]
     datetime_expansion: dict[str, list[str]]
     detected_dtypes: Any = field(compare=False)
+
+    def without_matrix(self) -> PreparedFeatures:
+        """Return the features with the fit-time matrix released.
+
+        The matrix is not read after ``fit`` (``predict`` uses the feature
+        names and the datetime expansion), so dropping it keeps the
+        processes-mode finalist payload free of a full copy of ``X``.
+        """
+        if self.X is None:
+            return self
+        return replace(self, X=None)
+
+
+def _prepared_features_getstate(self) -> list[Any]:
+    """Serialize the features without the fit-time matrix.
+
+    The matrix is not read after ``fit``; dropping it keeps the
+    processes-mode finalist payload and the saved artifact free of a full
+    copy of ``X``.
+    """
+    features = self.without_matrix()
+    return [getattr(features, field_.name) for field_ in fields(features)]
+
+
+# The dataclass decorator overwrites ``__setstate__`` (see the additive-fields
+# note above), so both hooks are re-asserted after it.
+PreparedFeatures.__setstate__ = _frozen_slots_setstate  # type: ignore[attr-defined]
+PreparedFeatures.__getstate__ = _prepared_features_getstate  # type: ignore[attr-defined,method-assign]
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +265,24 @@ class ValidationScores:
     oof_predictions_by_repeat: list[pd.Series | np.ndarray] | None = field(
         default=None, compare=False
     )
+
+    def with_oof_repeat_vectors(self, vectors: Iterable[Any]) -> ValidationScores:
+        """Return a copy carrying the per-repeat OOF vectors if absent.
+
+        The vectors are dropped from the serialized state on purpose; the
+        engine's processes-mode finalist transfer carries them separately and
+        restores them on the fitted trainer.
+
+        Args:
+            vectors: The per-repeat OOF prediction vectors.
+
+        Returns:
+            ValidationScores: ``self`` when the vectors are already present,
+            otherwise a copy with ``vectors`` attached.
+        """
+        if self.oof_predictions_by_repeat is not None:
+            return self
+        return replace(self, oof_predictions_by_repeat=list(vectors))
 
 
 def _validation_scores_getstate(self) -> list[Any]:

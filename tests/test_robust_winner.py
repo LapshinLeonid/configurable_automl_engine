@@ -42,7 +42,9 @@ from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.training_engine.component import train_best_model
-from configurable_automl_engine.training_engine.robust_winner import select_robust_winner
+from configurable_automl_engine.training_engine.robust_winner import (
+    select_robust_winner,
+)
 from configurable_automl_engine.training_engine.state import (
     FinalistCandidate,
     PhaseResult,
@@ -838,12 +840,173 @@ def test_train_finalists_failure_skips_candidate_and_logs_reason(
     mocker.patch.object(finalists_mod, "_fit_finalist", side_effect=_fake_fit)
     with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
         candidates = finalists_mod._train_finalists(
-            ["elasticnet", "ridge"], phase_results, cfg, prepared, cfg.general.random_state
+            ["elasticnet", "ridge"],
+            phase_results,
+            cfg,
+            prepared,
+            cfg.general.random_state,
         )
     assert set(candidates) == {"ridge"}
     assert any(
         "elasticnet" in r.message and "boom" in r.message for r in caplog.records
     )
+
+
+def test_train_finalists_runs_in_parallel_threads(mocker):
+    """Two finalists are trained concurrently in the threads mode.
+
+    A barrier that both fits must reach proves concurrency: a sequential
+    implementation would time out on the first fit and skip both candidates.
+    """
+    import threading
+
+    import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
+
+    cfg = Config(
+        general=GeneralCfg(
+            comparison_metric="rmse",
+            max_workers=2,
+            parallel_mode="threads",
+            phases=[
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                FINAL_SELECT_PHASE,
+            ],
+        ),
+        algorithms={
+            "ridge": {"enable": True},
+            "elasticnet": {"enable": True},
+        },
+    )
+    prepared = comp.prepare_dataset(cfg, _tiny_df(), "target")
+    phase_results = {
+        "ridge": PhaseResult(score=-0.08, params={"alpha": 1.0}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 0.5, "l1_ratio": 0.5}),
+    }
+    barrier = threading.Barrier(2)
+
+    def _fake_fit(algo_name, *args, **kwargs):
+        barrier.wait(timeout=10)
+        return _FakeTrainer(len(prepared.y))
+
+    mocker.patch.object(finalists_mod, "_fit_finalist", side_effect=_fake_fit)
+    candidates = finalists_mod._train_finalists(
+        ["ridge", "elasticnet"], phase_results, cfg, prepared, cfg.general.random_state
+    )
+    assert list(candidates) == ["ridge", "elasticnet"]
+
+
+def test_train_finalists_processes_mode_returns_trained_candidates():
+    """The processes mode pickles the worker, the data and the fitted trainer."""
+    import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
+
+    cfg = Config(
+        general=GeneralCfg(
+            comparison_metric="rmse",
+            n_repeats=2,
+            max_workers=2,
+            parallel_mode="processes",
+            phases=[
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                FINAL_SELECT_PHASE,
+            ],
+        ),
+        algorithms={
+            "ridge": {"enable": True},
+            "elasticnet": {"enable": True},
+        },
+    )
+    prepared = comp.prepare_dataset(cfg, _tiny_df(), "target")
+    phase_results = {
+        "ridge": PhaseResult(score=-0.08, params={"alpha": 1.0}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 0.5, "l1_ratio": 0.5}),
+    }
+    candidates = finalists_mod._train_finalists(
+        ["ridge", "elasticnet"], phase_results, cfg, prepared, cfg.general.random_state
+    )
+    assert list(candidates) == ["ridge", "elasticnet"]
+    for candidate in candidates.values():
+        assert candidate.trainer is not None
+        assert candidate.model is not None
+        assert candidate.rmse_oof is not None
+        assert np.isfinite(candidate.rmse_oof)
+        assert candidate.n_repeats == 2
+        assert candidate.y_pred_oof_by_repeat is not None
+        assert len(candidate.y_pred_oof_by_repeat) == 2
+        assert candidate.trainer.oof_predictions_by_repeat_ is not None
+        assert len(candidate.trainer.oof_predictions_by_repeat_) == 2
+        assert candidate.trainer._features is not None
+        assert candidate.trainer._features.X is None
+
+
+def test_train_finalists_single_candidate_bypasses_parallel_pool(mocker):
+    """A one-candidate pool trains directly, without creating a worker pool."""
+    import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
+
+    cfg = Config(
+        general=GeneralCfg(
+            comparison_metric="rmse",
+            parallel_mode="processes",
+            phases=[
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                FINAL_SELECT_PHASE,
+            ],
+        ),
+        algorithms={"ridge": {"enable": True}},
+    )
+    prepared = comp.prepare_dataset(cfg, _tiny_df(), "target")
+    phase_results = {"ridge": PhaseResult(score=-0.08, params={"alpha": 1.0})}
+    pool = mocker.patch.object(
+        finalists_mod,
+        "run_parallel_outcomes",
+        side_effect=AssertionError("the parallel pool must not be used"),
+    )
+    candidates = finalists_mod._train_finalists(
+        ["ridge"], phase_results, cfg, prepared, cfg.general.random_state
+    )
+    assert list(candidates) == ["ridge"]
+    pool.assert_not_called()
+
+
+def test_train_finalists_processes_mode_skips_failed_finalist():
+    """One failed finalist does not stop the others in the processes mode."""
+    import configurable_automl_engine.training_engine.component as comp
+    import configurable_automl_engine.training_engine.finalists as finalists_mod
+
+    cfg = Config(
+        general=GeneralCfg(
+            comparison_metric="rmse",
+            n_repeats=2,
+            max_workers=2,
+            parallel_mode="processes",
+            phases=[
+                {"name": "p", "n_trials": 1, "action": "all_algorithms"},
+                FINAL_SELECT_PHASE,
+            ],
+        ),
+        algorithms={
+            "ridge": {"enable": True},
+            "elasticnet": {"enable": True},
+        },
+    )
+    prepared = comp.prepare_dataset(cfg, _tiny_df(), "target")
+    phase_results = {
+        # Ridge rejects a negative alpha during validation scoring.
+        "ridge": PhaseResult(score=-0.08, params={"alpha": -1.0}),
+        "elasticnet": PhaseResult(score=-0.081, params={"alpha": 0.5, "l1_ratio": 0.5}),
+    }
+    candidates = finalists_mod._train_finalists(
+        ["ridge", "elasticnet"], phase_results, cfg, prepared, cfg.general.random_state
+    )
+    assert list(candidates) == ["elasticnet"]
+    survivor = candidates["elasticnet"]
+    assert survivor.n_repeats == 2
+    assert survivor.y_pred_oof_by_repeat is not None
+    assert len(survivor.y_pred_oof_by_repeat) == 2
+    assert survivor.trainer.oof_predictions_by_repeat_ is not None
+    assert len(survivor.trainer.oof_predictions_by_repeat_) == 2
 
 
 def test_train_best_model_all_finalists_fail_raises(tmp_path: Path):
