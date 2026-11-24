@@ -47,6 +47,7 @@ from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.training_engine.sanity_gate import (
+    Circuit,
     ModelSanityGate,
     SanityCheckResult,
 )
@@ -130,6 +131,29 @@ def test_reasons_and_soft_warnings_are_distinct_channels():
     assert any("Circuit B" in r for r in result.reasons)
     # Signals and disqualifications do not mix.
     assert not any("signal" in r for r in result.reasons)
+    # Every reason carries its circuit as structured data for the fallback
+    # ranking, alignment with the reason list included.
+    assert len(result.reason_circuits) == len(result.reasons)
+    assert set(result.reason_circuits) == {Circuit.A, Circuit.B}
+
+
+def test_reason_circuits_must_align_with_reasons():
+    aligned = SanityCheckResult(
+        is_valid=False,
+        reasons=["first", "second"],
+        reason_circuits=(Circuit.A, Circuit.D),
+    )
+    assert aligned.reason_circuits == (Circuit.A, Circuit.D)
+
+    # An empty tuple stays valid for manually built records.
+    SanityCheckResult(is_valid=False, reasons=["only"])
+
+    with pytest.raises(ValueError, match="reason_circuits must be empty or aligned"):
+        SanityCheckResult(
+            is_valid=False,
+            reasons=["only"],
+            reason_circuits=(Circuit.A, Circuit.B),
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -962,6 +986,7 @@ def test_gap_example_0_1_vs_0_19_fails_at_1_5_passes_at_2_0():
     strict = _gap_only_gate(1.5).check(y=y, y_pred_oof=oof, y_pred_full=full)
     assert not strict.is_valid
     assert any("Circuit D" in r for r in strict.reasons)
+    assert set(strict.reason_circuits) == {Circuit.D}
     assert strict.generalization_gap == pytest.approx(1.9, rel=1e-6)
 
     soft = _gap_only_gate(2.0).check(y=y, y_pred_oof=oof, y_pred_full=full)

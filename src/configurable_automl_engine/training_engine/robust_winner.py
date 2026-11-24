@@ -23,7 +23,7 @@ from configurable_automl_engine.training_engine.config_parser import (
     SanityGateMode,
 )
 
-from .sanity_gate import ModelSanityGate, SanityCheckResult
+from .sanity_gate import Circuit, ModelSanityGate, SanityCheckResult
 from .state import FinalistCandidate, RobustWinnerResult
 
 _LOG = logging.getLogger(__name__)
@@ -35,43 +35,50 @@ _LOG = logging.getLogger(__name__)
 # above the threshold nor an infinite gap from division by zero) produces a
 # reason — everything goes to soft_warnings and does not take part in the
 # fallback ranking; the D rank (3) applies only to the reject mode.
-_CIRCUIT_RANK_BY_LETTER = {
-    "A": 2,  # A — diversity
-    "B": 1,  # B — unique
-    "C": 0,  # C — dead features
-    "D": 3,  # D — generalization gap (the most severe)
+_CIRCUIT_RANK: dict[Circuit, int] = {
+    Circuit.A: 2,  # A — diversity
+    Circuit.B: 1,  # B — unique
+    Circuit.C: 0,  # C — dead features
+    Circuit.D: 3,  # D — generalization gap (the most severe)
 }
 
 
-def _circuit_rank(reason: str) -> int:
-    """Significance rank of a circuit from the reason string (D > A > B > C).
+def _circuit_rank(circuit: Circuit | None) -> int:
+    """Significance rank of a circuit (D > A > B > C).
 
-    Parses the ``Circuit <letter>`` prefix in reason (``ModelSanityGate``
-    format). An unknown format is treated as the least significant circuit
-    (rank 0) — a defensive fallback so the fallback ranking never fails on
-    custom reasons.
+    The circuit identity is structured data attached to the audit result, so
+    the rank never depends on the wording of a reason. ``None`` (a reason not
+    tied to a circuit) is treated as the least significant (rank 0) — a
+    defensive fallback so the fallback ranking never fails on custom reasons.
 
     Returns:
         int: The significance rank (0..3); 3 — circuit D, 2 — A, 1 — B,
             0 — C/unknown.
     """
-    match = re.search(r"Circuit\s+([A-D])", reason)
-    if match is None:
+    if circuit is None:
         return 0
-    return _CIRCUIT_RANK_BY_LETTER.get(match.group(1), 0)
+    return _CIRCUIT_RANK.get(circuit, 0)
 
 
-def _severity_signature(reasons: list[str]) -> tuple[int, ...]:
+def _severity_signature(audit: SanityCheckResult) -> tuple[int, ...]:
     """Violation severity signature for the fallback criterion.
 
     A tuple of circuit significance ranks sorted in descending order (the most
     severe violation first). A lexicographically smaller signature means a less
-    problematic model given the same number of violated circuits.
+    problematic model given the same number of violated circuits. The ranks
+    come from the structured ``reason_circuits`` of the audit, not from the
+    reason text; a reason without structured circuit information is unknown
+    (rank 0).
 
     Returns:
         tuple[int, ...]: The severity signature sorted in descending order.
     """
-    return tuple(sorted((_circuit_rank(r) for r in reasons), reverse=True))
+    circuits = audit.reason_circuits
+    ranks = [
+        _circuit_rank(circuits[index] if index < len(circuits) else None)
+        for index in range(len(audit.reasons))
+    ]
+    return tuple(sorted(ranks, reverse=True))
 
 
 def _best_by_rmse_oof(
@@ -113,12 +120,12 @@ def _fallback_sort_key(
     best aggregated ``RMSE_oof``. Hoisted to module level so the select step
     ranking (``output: top_k``/``pool``) matches the winner selection."""
     candidate = candidate_models[name]
-    reasons = audits[name].reasons
+    audit = audits[name]
     rmse = candidate.rmse_oof
     return (
         not candidate.has_valid_oof,
-        len(reasons),
-        _severity_signature(reasons),
+        len(audit.reasons),
+        _severity_signature(audit),
         rmse is None,
         rmse if rmse is not None else float("inf"),
     )
@@ -321,6 +328,7 @@ def select_robust_winner(
             audits[name] = SanityCheckResult(
                 is_valid=False,
                 reasons=reasons,
+                reason_circuits=(None,),
                 severity=2,
                 n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
                 n_valid_repeats=0,
@@ -336,6 +344,7 @@ def select_robust_winner(
             audits[name] = SanityCheckResult(
                 is_valid=False,
                 reasons=[_audit_budget_skip_reason(audit_time_budget_seconds)],
+                reason_circuits=(None,),
                 severity=0,
                 n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
                 n_valid_repeats=0,
@@ -360,6 +369,7 @@ def select_robust_winner(
             audits[name] = SanityCheckResult(
                 is_valid=False,
                 reasons=[f"Sanity audit failed: {err}"],
+                reason_circuits=(None,),
                 severity=4,
                 n_repeats=max(cand.n_repeats, len(cand.y_pred_oof_by_repeat or [])),
                 n_valid_repeats=0,

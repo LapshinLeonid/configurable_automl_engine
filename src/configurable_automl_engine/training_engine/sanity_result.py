@@ -12,12 +12,26 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import numpy as np
 
 _SEVERITY_CLEAN = 0
 _SEVERITY_WARNING = 1
+
+
+class Circuit(str, Enum):
+    """Identifiers of the Sanity Gate circuits.
+
+    The identity of a circuit is carried as structured data, so the fallback
+    ranking never depends on the wording of a reason.
+    """
+
+    A = "A"  # diversity
+    B = "B"  # unique
+    C = "C"  # dead features
+    D = "D"  # generalization gap
 
 
 def _same_metric(left: float, right: float) -> bool:
@@ -48,7 +62,12 @@ class SanityCheckResult:
     Attributes:
         is_valid: True when no circuit disqualified the model. In ``warn_only``
             mode it is always True (the gate does not disqualify).
-        reasons: disqualification reasons (each a string naming the circuit).
+        reasons: disqualification reasons (human-readable messages).
+        reason_circuits: the circuit behind every reason, positionally aligned
+            with ``reasons``; ``None`` for a reason that is not tied to a
+            circuit (a skipped or failed audit). The fallback ranking reads
+            this field, never the reason text. An empty tuple is allowed for
+            manually built records; its entries then count as unknown.
         soft_warnings: signals for the report — they never disqualify alone.
         diversity_ratio: ``Var(y_pred_oof) / Var(y)`` (circuit A); NaN when the
             circuit is disabled or not computable.
@@ -77,6 +96,10 @@ class SanityCheckResult:
             valid vector is aggregated by the median; exactly one valid
             vector uses the single-split path even when ``n_repeats > 1``.
             ``1`` also covers a single OOF vector.
+
+    Raises:
+        ValueError: When ``reason_circuits`` is non-empty and its length
+            differs from ``reasons``.
     """
 
     is_valid: bool
@@ -89,6 +112,16 @@ class SanityCheckResult:
     severity: int = _SEVERITY_CLEAN
     n_repeats: int = 1
     n_valid_repeats: int = 1
+    reason_circuits: tuple[Circuit | None, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the positional alignment of reasons and circuits."""
+        if self.reason_circuits and len(self.reason_circuits) != len(self.reasons):
+            raise ValueError(
+                "reason_circuits must be empty or aligned with reasons "
+                f"(got {len(self.reason_circuits)} circuit(s) for "
+                f"{len(self.reasons)} reason(s))"
+            )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SanityCheckResult):
@@ -104,6 +137,7 @@ class SanityCheckResult:
             and self.severity == other.severity
             and self.n_repeats == other.n_repeats
             and self.n_valid_repeats == other.n_valid_repeats
+            and self.reason_circuits == other.reason_circuits
         )
 
     def __hash__(self) -> int:
@@ -119,6 +153,7 @@ class SanityCheckResult:
                 self.severity,
                 self.n_repeats,
                 self.n_valid_repeats,
+                self.reason_circuits,
             )
         )
 

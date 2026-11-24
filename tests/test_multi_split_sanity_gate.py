@@ -43,6 +43,7 @@ from configurable_automl_engine.training_engine.sanity_circuits import (
     check_unique,
 )
 from configurable_automl_engine.training_engine.sanity_gate import (
+    Circuit,
     ModelSanityGate,
 )
 from configurable_automl_engine.training_engine.sanity_repeats import (
@@ -683,6 +684,41 @@ def test_circuit_d_infinite_median_rejects_in_reject_mode():
     assert np.isinf(result.generalization_gap)
     assert result.is_valid is False
     assert any("median gap=inf" in reason for reason in result.reasons)
+
+
+def test_circuit_d_reject_repeats_keeps_reason_circuits_aligned():
+    """Reject mode with several repeats keeps every circuit D reason aligned."""
+    y = np.linspace(-1.0, 1.0, 100)
+    full = _with_rmse(y, 0.2, 1)
+    repeats = [_with_rmse(y, 0.4, 2), _with_rmse(y, 0.6, 3)]
+    gate = _gate_without_other_circuits(
+        check_diversity=False,
+        check_unique=False,
+        generalization_gap_mode="reject",
+        max_generalization_gap=1.5,
+    )
+
+    # Median gap violation: the aggregated warning is routed to reasons.
+    median_rejected = gate.check(
+        y=y,
+        y_pred_oof=repeats[0],
+        y_pred_full=full,
+        y_pred_oof_by_repeat=repeats,
+    )
+    assert median_rejected.reasons
+    assert median_rejected.reason_circuits == (Circuit.D,) * len(
+        median_rejected.reasons
+    )
+
+    # Contract violation: the repeat path reports it through g_reasons.
+    missing_full = gate.check(
+        y=y,
+        y_pred_oof=repeats[0],
+        y_pred_full=None,
+        y_pred_oof_by_repeat=repeats,
+    )
+    assert missing_full.reasons
+    assert missing_full.reason_circuits == (Circuit.D,) * len(missing_full.reasons)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

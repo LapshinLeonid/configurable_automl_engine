@@ -59,6 +59,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 )
 from configurable_automl_engine.common.metrics import oof_rmse
 from configurable_automl_engine.training_engine.sanity_gate import (
+    Circuit,
     ModelSanityGate,
     SanityCheckResult,
 )
@@ -379,8 +380,15 @@ def test_audit_time_budget_exhausted_skips_remaining_audits(mocker):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _result(reasons: list[str]) -> SanityCheckResult:
-    return SanityCheckResult(is_valid=False, reasons=reasons, severity=2)
+def _result(
+    reasons: list[str], circuits: tuple[Circuit | None, ...] = ()
+) -> SanityCheckResult:
+    return SanityCheckResult(
+        is_valid=False,
+        reasons=reasons,
+        reason_circuits=circuits,
+        severity=2,
+    )
 
 
 def test_fallback_min_number_of_violated_circuits():
@@ -389,12 +397,16 @@ def test_fallback_min_number_of_violated_circuits():
     gate = _gate()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
+        _result(
+            ["Circuit D (generalization gap): gap=2.0 > 1.5"],
+            (Circuit.D,),
+        ),
         _result(
             [
                 "Circuit A (diversity): ratio=0.05 < 0.15",
                 "Circuit B (unique): nunique=2 < 5",
-            ]
+            ],
+            (Circuit.A, Circuit.B),
         ),
     ]
     cands = {
@@ -421,8 +433,14 @@ def test_fallback_tie_breaks_by_severity_circuit_order():
     gate = _gate()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),  # D — the heaviest
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),  # A — lighter than D
+        _result(
+            ["Circuit D (generalization gap): gap=2.0 > 1.5"],
+            (Circuit.D,),
+        ),  # D — the heaviest
+        _result(
+            ["Circuit A (diversity): ratio=0.05 < 0.15"],
+            (Circuit.A,),
+        ),  # A — lighter than D
     ]
     cands = {
         "violates_G": _candidate("violates_G", -0.08, 0.3, y_oof),
@@ -438,13 +456,42 @@ def test_fallback_tie_breaks_by_severity_circuit_order():
     assert res.winner_algo == "violates_A"
 
 
+def test_fallback_orders_reworded_reasons_by_structured_circuit():
+    """Fallback: reworded reason text does not change the circuit severity order."""
+    y, y_oof, y_full = _honest_vectors()
+    mocker_gate = MagicMock()
+    mocker_gate.check.side_effect = [
+        _result(["the model overfits badly"], (Circuit.D,)),
+        _result(["predictions collapse to a near constant"], (Circuit.A,)),
+    ]
+    cands = {
+        "reworded_D": _candidate("reworded_D", -0.08, 0.3, y_oof),
+        "reworded_A": _candidate("reworded_A", -0.09, 0.3, y_oof),
+    }
+    res = select_robust_winner(
+        cands,
+        pd.DataFrame(np.zeros((len(y), 2))),
+        pd.Series(y),
+        mocker_gate,
+        mode="active",
+    )
+    assert res.fallback_used is True
+    assert res.winner_algo == "reworded_A"
+
+
 def test_fallback_tie_breaks_by_best_rmse_oof():
     """Fallback: equal violation count and severity → the best RMSE_oof."""
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),
+        _result(
+            ["Circuit A (diversity): ratio=0.05 < 0.15"],
+            (Circuit.A,),
+        ),
+        _result(
+            ["Circuit A (diversity): ratio=0.05 < 0.15"],
+            (Circuit.A,),
+        ),
     ]
     cands = {
         "worse_oof": _candidate("worse_oof", -0.08, 0.5, y_oof),
@@ -465,7 +512,10 @@ def test_fallback_logs_warning_with_reasons(caplog):
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
+        _result(
+            ["Circuit D (generalization gap): gap=2.0 > 1.5"],
+            (Circuit.D,),
+        ),
     ]
     cands = {"only": _candidate("only", -0.08, 0.3, y_oof)}
     with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):
@@ -484,18 +534,35 @@ def test_fallback_logs_warning_with_reasons(caplog):
 
 def test_circuit_rank_order_fixed():
     """Circuit significance is fixed in the code: D(3) > A(2) > B(1) > C(0)."""
-    assert _circuit_rank("Circuit A (diversity): ...") == 2
-    assert _circuit_rank("Circuit B (unique): ...") == 1
-    assert _circuit_rank("Circuit C (dead features): ...") == 0
-    assert _circuit_rank("Circuit D (generalization gap): ...") == 3
-    assert _circuit_rank("custom reason without prefix") == 0
+    assert _circuit_rank(Circuit.A) == 2
+    assert _circuit_rank(Circuit.B) == 1
+    assert _circuit_rank(Circuit.C) == 0
+    assert _circuit_rank(Circuit.D) == 3
+    assert _circuit_rank(None) == 0
 
 
 def test_severity_signature_sorted_descending():
-    sig = _severity_signature(
-        ["Circuit B (unique): ...", "Circuit D (generalization gap): ..."]
+    result = _result(
+        ["Circuit B (unique): ...", "Circuit D (generalization gap): ..."],
+        (Circuit.B, Circuit.D),
     )
-    assert sig == (3, 1)  # D first, B second
+    assert _severity_signature(result) == (3, 1)  # D first, B second
+
+
+def test_severity_signature_ignores_reason_text():
+    """Ranking reads the structured circuit, not the wording of the reason.
+
+    Rewording a reason must not change the fallback order, and a textual
+    ``Circuit X`` prefix alone carries no ranking information.
+    """
+    reworded = _result(
+        ["completely reworded message", "Circuit A (diversity): ..."],
+        (Circuit.D, None),
+    )
+    assert _severity_signature(reworded) == (3, 0)
+
+    textual_only = _result(["Circuit D (generalization gap): gap=2.0 > 1.5"])
+    assert _severity_signature(textual_only) == (0,)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1070,7 +1137,10 @@ def test_active_disqualification_logs_warning_per_candidate(caplog):
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit A (diversity): ratio=0.05 < 0.15"]),
+        _result(
+            ["Circuit A (diversity): ratio=0.05 < 0.15"],
+            (Circuit.A,),
+        ),
         SanityCheckResult(is_valid=True, reasons=[], severity=0),
     ]
     cands = {
@@ -1106,7 +1176,10 @@ def test_fallback_logs_formal_criterion(caplog):
     y, y_oof, y_full = _honest_vectors()
     mocker_gate = MagicMock()
     mocker_gate.check.side_effect = [
-        _result(["Circuit D (generalization gap): gap=2.0 > 1.5"]),
+        _result(
+            ["Circuit D (generalization gap): gap=2.0 > 1.5"],
+            (Circuit.D,),
+        ),
     ]
     cands = {"only": _candidate("only", -0.08, 0.3, y_oof)}
     with caplog.at_level("WARNING", logger=_COMPONENT_LOGGER):

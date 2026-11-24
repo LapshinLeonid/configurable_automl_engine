@@ -43,6 +43,7 @@ from configurable_automl_engine.training_engine.sanity_repeats import (
     check_unique_repeats,
 )
 from configurable_automl_engine.training_engine.sanity_result import (
+    Circuit,
     SanityCheckResult,
     _compute_severity,
     _validate_check_inputs,
@@ -51,7 +52,7 @@ from configurable_automl_engine.training_engine.sanity_result import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
+__all__ = ["Circuit", "GeneralizationGapMode", "ModelSanityGate", "SanityCheckResult"]
 
 
 @dataclass
@@ -65,6 +66,7 @@ class _CircuitsOutcome:
     n_repeats: int = 1
     n_valid_repeats: int = 1
     reasons: list[str] = field(default_factory=list)
+    reason_circuits: list[Circuit | None] = field(default_factory=list)
     soft_warnings: list[str] = field(default_factory=list)
 
 
@@ -329,6 +331,7 @@ class ModelSanityGate:
         return SanityCheckResult(
             is_valid=is_valid,
             reasons=reasons,
+            reason_circuits=tuple(outcome.reason_circuits),
             soft_warnings=soft_warnings,
             diversity_ratio=outcome.diversity_ratio,
             unique_ratio=outcome.unique_ratio,
@@ -357,6 +360,7 @@ class ModelSanityGate:
         """
         outcome = _CircuitsOutcome()
         reasons, soft_warnings = outcome.reasons, outcome.soft_warnings
+        reason_circuits = outcome.reason_circuits
         diversity_failed = False
 
         n_repeats = len(repeat_vectors) if repeat_vectors else 1
@@ -387,6 +391,7 @@ class ModelSanityGate:
                     min_prediction_diversity=self.min_prediction_diversity,
                 )
             reasons.extend(d_reasons)
+            reason_circuits.extend([Circuit.A] * len(d_reasons))
             soft_warnings.extend(d_warnings)
             diversity_failed = bool(d_reasons)
 
@@ -407,6 +412,7 @@ class ModelSanityGate:
                     min_unique_ratio=self.min_unique_ratio,
                 )
             reasons.extend(u_reasons)
+            reason_circuits.extend([Circuit.B] * len(u_reasons))
             soft_warnings.extend(u_warnings)
 
         if self.check_dead_features:
@@ -418,6 +424,7 @@ class ModelSanityGate:
                 settings=self._dead_feature_settings(),
             )
             reasons.extend(c_reasons)
+            reason_circuits.extend([Circuit.C] * len(c_reasons))
             soft_warnings.extend(c_warnings)
 
         if self.check_generalization_gap:
@@ -440,6 +447,7 @@ class ModelSanityGate:
                     )
                 )
             reasons.extend(g_reasons)
+            reason_circuits.extend([Circuit.D] * len(g_reasons))
             # Routing of circuit D violations: warn mode
             # (default) — soft_warnings (does not disqualify,
             # including an infinite gap from division by zero); reject mode —
@@ -450,11 +458,13 @@ class ModelSanityGate:
             # must not be overridden by a single repeat's infinite ratio.
             if self.generalization_gap_mode == "reject":
                 if n_repeats > 1:
-                    reasons.extend(
+                    rejected = [
                         warning
                         for warning in g_warnings
                         if "possible target leakage" not in warning
-                    )
+                    ]
+                    reasons.extend(rejected)
+                    reason_circuits.extend([Circuit.D] * len(rejected))
                     soft_warnings.extend(
                         warning
                         for warning in g_warnings
@@ -462,6 +472,7 @@ class ModelSanityGate:
                     )
                 else:
                     reasons.extend(g_warnings)
+                    reason_circuits.extend([Circuit.D] * len(g_warnings))
             else:
                 soft_warnings.extend(g_warnings)
         return outcome
