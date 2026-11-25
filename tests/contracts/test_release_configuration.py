@@ -1017,6 +1017,88 @@ def test_github_ci_requires_engine_integration(
     assert "smoke_engine_install.py" in messages(guard.check_github_ci(text))
 
 
+def python_matrix_job(document: dict[str, object]) -> dict[str, object]:
+    """Return the CI job that runs the supported-interpreter matrix."""
+    for job in document["jobs"].values():  # type: ignore[union-attr]
+        strategy = job.get("strategy", {})
+        matrix = strategy.get("matrix", {})
+        versions = matrix.get("python-version")
+        if versions == ["3.11", "3.12", "3.13", "3.14"]:
+            return job
+    raise AssertionError("CI has no supported-interpreter matrix job")
+
+
+def test_github_ci_python_matrix_is_wired(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    assert guard.check_github_ci_python_versions(github_ci_text) == []
+
+
+def test_github_ci_main_job_pins_the_supported_interpreter(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    text = inside(
+        github_ci_text, "  test:\n", 'python-version: "3.11"', 'python-version: "3.12"'
+    )
+    assert "3.11" in messages(guard.check_github_ci_python_versions(text))
+
+
+def test_github_ci_main_job_requires_setup_python_v5(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    text = inside(
+        github_ci_text,
+        "  test:\n",
+        "actions/setup-python@v5",
+        "actions/setup-python@v4",
+    )
+    assert "actions/setup-python@v5" in messages(
+        guard.check_github_ci_python_versions(text)
+    )
+
+
+def test_github_ci_matrix_covers_every_supported_version(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    text = github_ci_text.replace(
+        '        python-version: ["3.11", "3.12", "3.13", "3.14"]',
+        '        python-version: ["3.11", "3.12", "3.13"]',
+        1,
+    )
+    assert text != github_ci_text
+    assert "3.14" in messages(guard.check_github_ci_python_versions(text))
+
+
+def test_github_ci_matrix_runs_the_fast_subset_outside_releases(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    text = github_ci_text.replace("        if: github.ref_type != 'tag'\n", "", 1)
+    assert text != github_ci_text
+    assert "fast test subset" in messages(guard.check_github_ci_python_versions(text))
+
+
+def test_github_ci_matrix_runs_the_full_suite_for_a_release(
+    guard: ModuleType, github_ci_text: str
+) -> None:
+    document = load_document(github_ci_text)
+    job = python_matrix_job(document)
+    steps = job["steps"]  # type: ignore[index]
+    step = next(
+        step
+        for step in steps
+        if step.get("name") == "Run the full test suite for a release"
+    )
+    step["run"] = "pytest tests/test_models.py"
+    text = dump_document(document)
+    assert "full pytest suite" in messages(guard.check_github_ci_python_versions(text))
+
+
+def test_github_workflows_use_the_current_setup_python_action() -> None:
+    for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        assert "actions/setup-python@v4" not in text, path
+
+
 def test_missing_repository_files_are_reported(
     guard: ModuleType, tmp_path: Path
 ) -> None:

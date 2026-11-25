@@ -50,6 +50,9 @@ PAT_SECRET_EXPRESSION = re.compile(r"\$\{\{\s*secrets\.PYPI_REGISTRY_PAT\s*\}\}"
 REGISTRY_ID_NAME = "SOURCECRAFT_PYPI_REGISTRY_ID"
 PAT_SCOPED_CUBES = ("publish", "verify-from-registry")
 PYTHON_SETUP_SCRIPT = "scripts/setup_python311.sh"
+SUPPORTED_PYTHON_VERSIONS = ("3.11", "3.12", "3.13", "3.14")
+SETUP_PYTHON_ACTION = "actions/setup-python@v5"
+MATRIX_VERSION_EXPRESSION = "${{ matrix.python-version }}"
 _PYTHON311_INSTALL = re.compile(
     r"(?:add-apt-repository[^\n]*ppa:deadsnakes"
     r"|\bapt(?:-get)?\b[^\n]*\binstall\b[^\n]*python3\.11)"
@@ -3063,6 +3066,209 @@ def check_github_ci(text: str, path: Path = GITHUB_CI) -> list[Violation]:
     return violations
 
 
+def _job_steps(job: Any) -> list[dict[str, Any]]:
+    """Return the mapping steps of a GitHub Actions job."""
+    if not isinstance(job, dict):
+        return []
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def _setup_python_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the ``setup-python`` steps among ``steps``."""
+    return [
+        step
+        for step in steps
+        if str(step.get("uses", "")).startswith("actions/setup-python@")
+    ]
+
+
+def _setup_python_version(step: dict[str, Any]) -> str | None:
+    """Return the configured ``python-version`` of a setup step."""
+    options = step.get("with")
+    if not isinstance(options, dict):
+        return None
+    version = options.get("python-version")
+    return None if version is None else str(version).strip()
+
+
+def _check_main_python_version(jobs: dict[str, Any], path: Path) -> list[Violation]:
+    """Require the main job to pin the oldest supported interpreter."""
+    job = jobs.get("test")
+    if not isinstance(job, dict):
+        return [Violation(path, 1, "GitHub CI has no 'test' job")]
+    setups = _setup_python_steps(_job_steps(job))
+    if not setups:
+        return [Violation(path, 1, "the main CI job does not set up Python")]
+    step = setups[0]
+    violations: list[Violation] = []
+    if str(step.get("uses", "")) != SETUP_PYTHON_ACTION:
+        violations.append(
+            Violation(path, 1, f"the main CI job must use {SETUP_PYTHON_ACTION}")
+        )
+    if _setup_python_version(step) != SUPPORTED_PYTHON_VERSIONS[0]:
+        violations.append(
+            Violation(
+                path,
+                1,
+                "the main CI job must pin python-version to "
+                f'"{SUPPORTED_PYTHON_VERSIONS[0]}"',
+            )
+        )
+    return violations
+
+
+def _python_matrix_job(
+    jobs: dict[str, Any],
+) -> tuple[str, dict[str, Any], list[str]] | None:
+    """Return the job whose matrix enumerates the supported interpreters."""
+    expected = list(SUPPORTED_PYTHON_VERSIONS)
+    for name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        strategy = job.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        versions = matrix.get("python-version") if isinstance(matrix, dict) else None
+        if not isinstance(versions, list):
+            continue
+        normalized = [str(version).strip() for version in versions]
+        if normalized == expected:
+            return str(name), job, normalized
+    return None
+
+
+def _pytest_step(steps: list[dict[str, Any]], operator: str) -> dict[str, Any] | None:
+    """Return the ``pytest`` step gated by a ``github.ref_type`` comparison."""
+    for step in steps:
+        condition = str(step.get("if", ""))
+        if "github.ref_type" not in condition or operator not in condition:
+            continue
+        if "pytest" in str(step.get("run", "")):
+            return step
+    return None
+
+
+def _runs_full_suite(step: dict[str, Any]) -> bool:
+    """Tell whether a step invokes pytest without selecting test paths."""
+    arguments = str(step.get("run", "")).split()
+    if not arguments or arguments[0] != "pytest":
+        return False
+    return not any(
+        argument == "tests" or argument.startswith("tests/")
+        for argument in arguments[1:]
+    )
+
+
+def _check_python_matrix(jobs: dict[str, Any], path: Path) -> list[Violation]:
+    """Require the interpreter matrix to split the fast and release suites."""
+    expected = list(SUPPORTED_PYTHON_VERSIONS)
+    found = _python_matrix_job(jobs)
+    if found is None:
+        return [
+            Violation(
+                path,
+                1,
+                f"GitHub CI has no Python version matrix covering {expected!r}",
+            )
+        ]
+    name, job, _ = found
+    steps = _job_steps(job)
+    violations: list[Violation] = []
+    setups = _setup_python_steps(steps)
+    if not setups:
+        violations.append(
+            Violation(
+                path, 1, f"the Python version matrix job {name!r} sets up no Python"
+            )
+        )
+    else:
+        step = setups[0]
+        if str(step.get("uses", "")) != SETUP_PYTHON_ACTION:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    f"the Python version matrix job must use {SETUP_PYTHON_ACTION}",
+                )
+            )
+        if _setup_python_version(step) != MATRIX_VERSION_EXPRESSION:
+            violations.append(
+                Violation(
+                    path,
+                    1,
+                    "the Python version matrix job must set python-version to "
+                    f'"{MATRIX_VERSION_EXPRESSION}"',
+                )
+            )
+    fast = _pytest_step(steps, "!=")
+    if fast is None:
+        violations.append(
+            Violation(
+                path,
+                1,
+                "the Python version matrix has no fast test subset for pushes "
+                "and pull requests",
+            )
+        )
+    elif not any(
+        argument.startswith("tests/") for argument in str(fast.get("run", "")).split()
+    ):
+        violations.append(
+            Violation(
+                path, 1, "the fast test subset of the Python version matrix is empty"
+            )
+        )
+    full = _pytest_step(steps, "==")
+    if full is None:
+        violations.append(
+            Violation(
+                path,
+                1,
+                "the Python version matrix has no full test suite for releases",
+            )
+        )
+    elif not _runs_full_suite(full):
+        violations.append(
+            Violation(
+                path,
+                1,
+                "the release test step of the Python version matrix must run "
+                "the full pytest suite",
+            )
+        )
+    return violations
+
+
+def check_github_ci_python_versions(
+    text: str, path: Path = GITHUB_CI
+) -> list[Violation]:
+    """Check the supported-interpreter matrix and the release test scope.
+
+    The main job is pinned to the oldest supported interpreter. A matrix job
+    runs the fast test subset on every push and pull request, and a release
+    tag runs the full suite on every supported version.
+
+    Args:
+        text: Content of ``.github/workflows/CI.yaml``.
+        path: File path used in diagnostics.
+
+    Returns:
+        Every violated interpreter-matrix rule.
+    """
+    document = _load_yaml(path, text)
+    if document is None:
+        return [Violation(path, 1, "GitHub CI is not valid YAML")]
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        return [Violation(path, 1, "GitHub CI defines no jobs")]
+    return [
+        *_check_main_python_version(jobs, path),
+        *_check_python_matrix(jobs, path),
+    ]
+
+
 def _as_mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -3388,9 +3594,9 @@ def run_checks(root: Path = REPO_ROOT) -> list[Violation]:
     if not github_ci.is_file():
         violations.append(Violation(github_ci, 1, "GitHub CI file is missing"))
     else:
-        violations.extend(
-            check_github_ci(github_ci.read_text(encoding="utf-8"), github_ci)
-        )
+        github_ci_text = github_ci.read_text(encoding="utf-8")
+        violations.extend(check_github_ci(github_ci_text, github_ci))
+        violations.extend(check_github_ci_python_versions(github_ci_text, github_ci))
     violations.extend(check_scripts(root))
     return violations
 
