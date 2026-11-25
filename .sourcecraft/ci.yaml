@@ -377,7 +377,6 @@ workflows:
                 python3.11 -m pip install --ignore-installed blinker
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e configurable-automl-contracts
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e ".[all,test]"
-                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov "coverage>=7.10.6" import-linter==2.15
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
