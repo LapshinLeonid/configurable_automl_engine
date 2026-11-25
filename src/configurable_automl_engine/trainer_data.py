@@ -358,7 +358,7 @@ def _detect_feature_types(
     # Auto-detect categorical features (object, category, bool)
     if cats is None:
         cats = df_to_analyze.select_dtypes(
-            include=["object", "str", "category", "bool"]
+            include=["object", "string", "category", "bool"]
         ).columns.tolist()
     # Auto-detect numerical features (all remaining 'number' dtypes)
     if nums is None:

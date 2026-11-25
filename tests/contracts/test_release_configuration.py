@@ -579,7 +579,7 @@ def test_sourcecraft_installs_python_311_through_the_shared_script(
     guard: ModuleType, sourcecraft_text: str
 ) -> None:
     assert "add-apt-repository" not in sourcecraft_text
-    assert sourcecraft_text.count("bash scripts/setup_python311.sh") == 6
+    assert sourcecraft_text.count("bash scripts/setup_python311.sh") == 7
     assert guard.check_sourcecraft_ci(sourcecraft_text) == []
 
 

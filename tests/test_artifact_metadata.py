@@ -207,6 +207,38 @@ def test_load_pickle_wrong_extension_falls_back(
     )
 
 
+def test_load_falls_back_when_candidate_yields_wrong_type(
+    trained_trainer: ModelTrainer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate that deserializes to a non-trainer is skipped, not fatal.
+
+    Older joblib releases read plain pickle streams (and vice versa), so the
+    first candidate can succeed without raising yet return another object.
+    """
+    path = tmp_path / "model.pkl"
+    trained_trainer.save(path)
+
+    from configurable_automl_engine import trainer_artifact
+
+    real_load_artifact = trainer_artifact.load_artifact
+    calls: list[SerializationFormat] = []
+
+    def fake_load_artifact(*, path: Path, fmt: SerializationFormat) -> Any:
+        calls.append(fmt)
+        if fmt is SerializationFormat.pickle:
+            return object()
+        return real_load_artifact(path=path, fmt=fmt)
+
+    monkeypatch.setattr(trainer_artifact, "load_artifact", fake_load_artifact)
+
+    loaded = ModelTrainer.load(path)
+
+    assert isinstance(loaded, ModelTrainer)
+    assert calls == [SerializationFormat.pickle, SerializationFormat.joblib]
+
+
 def test_load_unknown_extension(trained_trainer: ModelTrainer, tmp_path: Path) -> None:
     """An unknown extension tries joblib first, then pickle."""
     trained_trainer.settings = dataclasses.replace(

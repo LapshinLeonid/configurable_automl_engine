@@ -140,16 +140,16 @@ We recommend using the latest version of Python. AutoML Engine supports Python 3
 
 The required dependencies (installed automatically):
 
-* NumPy (>=2.4.2)
-* SciPy (>=1.17.0)
-* Pandas (>=3.0.0)
-* PyArrow (>=23.0.0)
-* Scikit-learn (>=1.8.0)
-* Imbalanced-learn (>=0.14.1)
-* Optuna (>=4.7.0)
+* NumPy (>=1.26.4)
+* SciPy (>=1.11.4)
+* Pandas (>=2.2.2)
+* PyArrow (>=14.0.0)
+* Scikit-learn (>=1.6.0)
+* Imbalanced-learn (>=0.13.0)
+* Optuna (>=3.1.0)
 * Pydantic (>=2.12.5)
-* PyYAML (>=6.0.3)
-* Joblib (>=1.5.3)
+* PyYAML (>=6.0)
+* Joblib (>=1.3.0)
 * `configurable-automl-contracts` (>=0.2.0,<0.3.0) — the public data contract, installed
   automatically from PyPI
 

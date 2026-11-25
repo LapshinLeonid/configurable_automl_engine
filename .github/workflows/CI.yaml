@@ -166,6 +166,41 @@ jobs:
           AUTOML_RUN_NETWORK_TESTS: "1"
         run: pytest
 
+  # The declared lower bounds are a supported range, not documentation:
+  # installing with `--resolution lowest-direct` pins every direct dependency
+  # to its floor (transitive ones resolve to the highest compatible release)
+  # and the suite must pass on that set.
+  minimum-versions:
+    name: Minimum dependency versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Install the lowest allowed direct dependency versions
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+        run: |
+          uv venv --python 3.11
+          uv pip install --resolution lowest-direct \
+            -e configurable-automl-contracts -e ".[test,xgboost]"
+
+      - name: Show the resolved versions
+        run: uv pip list
+
+      - name: Run the suite on the minimum versions
+        env:
+          PYTHONPATH: .
+        run: .venv/bin/python -m pytest --ignore=tests/contracts
+
   # The contract is independent from the engine: it is checked, built and
   # installed in a clean environment without the engine runtime packages.
   contracts:

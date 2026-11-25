@@ -244,18 +244,21 @@ def load_trainer_artifact(
     last_error: Exception | None = None
     for candidate in formats:
         try:
-            obj = load_artifact(path=path_obj, fmt=candidate)
-            break
+            loaded = load_artifact(path=path_obj, fmt=candidate)
         except FileNotFoundError:
             raise TrainingError(f"File not found: {path}")
         except Exception as e:  # noqa: BLE001
             last_error = e
+            continue
+        if isinstance(loaded, trainer_cls):
+            obj = loaded
+            break
+        # A candidate can deserialize successfully yet yield another object
+        # (older joblib releases read plain pickle streams and vice versa):
+        # keep the error and try the next candidate format.
+        last_error = TrainingError(f"Loaded object is not a ModelTrainer: {path}")
     if obj is None:
         raise TrainingError(f"Error loading artifact: {last_error}") from last_error
-
-    # Verify the type of the loaded object
-    if not isinstance(obj, trainer_cls):
-        raise TrainingError(f"Loaded object is not a ModelTrainer: {path}")
 
     # The artifact format version is checked before anything else of
     # the object is used: the state of another format cannot be read.

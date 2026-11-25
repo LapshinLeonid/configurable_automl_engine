@@ -45,7 +45,7 @@ def detect_feature_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
         its own value-based logic for standalone calls.
     """
     categorical = X.select_dtypes(
-        include=["object", "str", "category", "bool"]
+        include=["object", "string", "category", "bool"]
     ).columns.tolist()
     numerical = X.select_dtypes(include=["number"]).columns.tolist()
     return categorical, numerical

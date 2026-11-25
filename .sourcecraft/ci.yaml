@@ -563,6 +563,51 @@ workflows:
                   --engine-sdist "$ENGINE_SDIST"
                 echo "✅ Engine artifacts: contract sources are not included"
 
+      # The declared lower bounds are a supported range, not documentation:
+      # `--resolution lowest-direct` pins every direct dependency to its floor
+      # and the engine suite must pass on that set.
+      - name: minimum-versions
+        cubes:
+          - name: install-lowest
+            script:
+              - |
+                set -e
+                bash scripts/setup_python311.sh
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                python3.11 -m pip install uv
+                rm -rf /tmp/minimum-venv
+                python3.11 -m uv venv --python python3.11 /tmp/minimum-venv
+                SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" \
+                  python3.11 -m uv pip install \
+                    --python /tmp/minimum-venv/bin/python \
+                    --resolution lowest-direct \
+                    -e configurable-automl-contracts -e ".[test,xgboost]"
+                python3.11 -m uv pip list --python /tmp/minimum-venv/bin/python
+          - name: minimum-tests
+            script:
+              - |
+                set -e
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  MINIMUM VERSIONS: ENGINE TESTS"
+                echo "═══════════════════════════════════════════════════════════════"
+                /tmp/minimum-venv/bin/python -m pytest \
+                  --ignore=tests/contracts \
+                  --ignore=tests/test_refactor_safety_net.py
+                echo "✅ The suite passes on the lowest allowed dependency versions"
+          - name: minimum-refactor-safety-net
+            script:
+              - |
+                set -e
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  MINIMUM VERSIONS: REFACTOR SAFETY NET"
+                echo "═══════════════════════════════════════════════════════════════"
+                /tmp/minimum-venv/bin/python -m pytest \
+                  tests/test_refactor_safety_net.py
+                echo "✅ The safety net passes on the lowest allowed dependency versions"
+
   # ----------------------------------------------------
   # Mirror configurable-automl-contracts to the SourceCraft PyPI registry
   #
