@@ -377,7 +377,7 @@ workflows:
                 python3.11 -m pip install --ignore-installed blinker
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e configurable-automl-contracts
                 SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0" python3.11 -m pip install -e ".[all,test]"
-                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov import-linter==2.15
+                python3.11 -m pip install ruff mypy types-PyYAML pytest-cov "coverage>=7.10.6" import-linter==2.15
               - |
                 echo ""
                 echo "═══════════════════════════════════════════════════════════════"
@@ -417,7 +417,7 @@ workflows:
                 # installs, run in the contracts-guarantees task instead.
                 # The slow refactor safety net runs in its own cube below so
                 # both test cubes stay under the 1200 second limit.
-                python3.11 -m pytest --cov=src --ignore=tests/contracts \
+                python3.11 -m coverage run --parallel-mode -m pytest --ignore=tests/contracts \
                   --ignore=tests/test_refactor_safety_net.py
 
           - name: run-refactor-safety-net
@@ -428,8 +428,23 @@ workflows:
                 echo "═══════════════════════════════════════════════════════════════"
                 echo "  5. REFACTOR SAFETY NET (Pytest)"
                 echo "═══════════════════════════════════════════════════════════════"
-                python3.11 -m pytest --cov=src --cov-append \
+                python3.11 -m coverage run --parallel-mode -m pytest \
                   tests/test_refactor_safety_net.py
+
+          # The test cubes run in parallel coverage mode: every process writes
+          # its own data file, so they must be merged before the report and
+          # the 90% threshold are evaluated.
+          - name: coverage-report
+            script:
+              - |
+                set -e
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  COMBINE AND REPORT COVERAGE"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 -m coverage combine
+                python3.11 -m coverage report
+                python3.11 -m coverage xml
 
           # The engine must work with the contract installed from the built
           # wheel, not only with the editable source checkout.

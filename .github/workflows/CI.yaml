@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15
+          pip install pytest pytest-cov "coverage>=7.10.6" pytest-mock ruff mypy types-PyYAML pyyaml import-linter==2.15
           # Install the project itself in "editable" mode so it is visible as a package
           # This works if there is a setup.py or pyproject.toml at the repository root
           pip install -e configurable-automl-contracts
@@ -52,7 +52,19 @@ jobs:
         env:
           PYTHONPATH: .
           AUTOML_RUN_NETWORK_TESTS: "1"
-        run: pytest --cov=src --cov-report=xml
+        run: coverage run --parallel-mode -m pytest
+
+      # Parallel coverage data from the main process, threads and the
+      # subprocesses started by the worker pool must be merged before the
+      # report is produced and the 90% threshold is enforced.
+      - name: Combine coverage data
+        run: coverage combine
+
+      - name: Report coverage
+        run: coverage report
+
+      - name: Write coverage XML
+        run: coverage xml
 
       # The engine must work with the contract installed from the built wheel,
       # and every documented legacy public import path must stay available.

@@ -54,7 +54,7 @@ mlflow = ["mlflow>=2.0.0"]
 
 shap = ["shap>=0.48.0"]
 
-test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "import-linter==2.15", "jsonschema>=4.18", "mypy>=1.13"]
+test = ["pytest>=9.0.2", "pytest-mock>=3.14.0", "pytest-cov>=7.0", "coverage>=7.10.6", "import-linter==2.15", "jsonschema>=4.18", "mypy>=1.13"]
 
 all = ["configurable-automl-engine[xgboost,logging,mlflow,shap]"]
 
@@ -215,3 +215,15 @@ filterwarnings = [
     "error::pydantic.warnings.PydanticDeprecatedSince20",
     "error::pydantic.warnings.PydanticDeprecatedSince211",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+# Covered workers start with forkserver/spawn and import the main module again:
+# patch them so their coverage data is collected as well.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+fail_under = 90
