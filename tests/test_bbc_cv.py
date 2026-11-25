@@ -6,7 +6,8 @@ Coverage:
        non-finite predictions and an all-NaN column) and for a generic scorer.
     2. ``metrics.bbc_cv_score`` — input validation, determinism, removal of
        the best-of-N selection bias on pure-noise configurations, duplicate
-       and uncovered-row handling.
+       and uncovered-row handling, and the wall-clock budget of the bootstrap
+       loop.
     3. ``tuner.optimize(collect_oof=True)`` — one OOF row per completed trial
        on every evaluation path (pooled k_fold, additive k_fold,
        train_test_split, pruning), each row reproducing its trial value.
@@ -34,10 +35,12 @@ from configurable_automl_engine.training_engine.component import (
     train_best_model,
 )
 from configurable_automl_engine.training_engine.data_prep import prepare_dataset
+import configurable_automl_engine.training_engine.artifact as artifact_mod
 from configurable_automl_engine.training_engine.artifact import (
     _bbc_score_in_user_metric,
 )
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.common import bbc_cv as bbc_cv_module
 from configurable_automl_engine.common.bbc_cv import _columnwise_raw_values
 from configurable_automl_engine.common.metrics import (
     bbc_cv_score,
@@ -45,7 +48,14 @@ from configurable_automl_engine.common.metrics import (
     pooled_scorer_value,
 )
 
-COMPARISON_METRICS = ["rmse", "neg_root_mean_squared_error", "mse", "mae", "r2", "nrmse"]
+COMPARISON_METRICS = [
+    "rmse",
+    "neg_root_mean_squared_error",
+    "mse",
+    "mae",
+    "r2",
+    "nrmse",
+]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -220,6 +230,103 @@ def test_bbc_cv_score_tie_keeps_first_configuration_order():
     assert reversed_order == pytest.approx(-20.0)
 
 
+def test_bbc_cv_score_rejects_negative_time_budget():
+    y = np.arange(10.0)
+    with pytest.raises(ValueError, match="time_budget"):
+        bbc_cv_score(get_scorer_object("rmse"), y, y[None, :], time_budget=-1.0)
+
+
+def test_bbc_cv_score_time_budget_stops_the_loop(monkeypatch, caplog):
+    """An exhausted budget keeps the completed resamples and logs a warning.
+
+    The fake clock makes the second loop check fail, so only the first
+    resample runs; the result must equal a normal one-resample estimate.
+    """
+    rng = np.random.default_rng(9)
+    y = rng.normal(size=40)
+    oof = y[None, :] + rng.normal(size=(4, 40))
+    scorer = get_scorer_object("rmse")
+    expected = bbc_cv_score(
+        scorer, y, oof, n_bootstrap=1, random_state=11, time_budget=0
+    )
+
+    calls = 0
+
+    def fake_monotonic() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else 100.0
+
+    monkeypatch.setattr(bbc_cv_module.time, "monotonic", fake_monotonic)
+    with caplog.at_level(logging.WARNING):
+        value = bbc_cv_score(
+            scorer, y, oof, n_bootstrap=50, random_state=11, time_budget=5.0
+        )
+    assert value == expected
+    assert any("bootstrap time budget" in r.getMessage() for r in caplog.records)
+
+
+def test_bbc_cv_score_time_budget_waits_for_first_completed_resample(
+    monkeypatch, caplog
+):
+    """An empty first bootstrap draw does not stop the loop before any score."""
+    y = np.array([0.0, 1.0])
+    oof = y[None, :]
+    scorer = get_scorer_object("rmse")
+    first_draw = np.random.default_rng(1).integers(0, y.size, size=y.size)
+    assert set(first_draw) == {0, 1}
+
+    calls = 0
+
+    def fake_monotonic() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else 100.0
+
+    monkeypatch.setattr(bbc_cv_module.time, "monotonic", fake_monotonic)
+    with caplog.at_level(logging.WARNING):
+        value = bbc_cv_score(
+            scorer, y, oof, n_bootstrap=10, random_state=1, time_budget=5.0
+        )
+
+    assert np.isfinite(value)
+    assert any(
+        "after 1 of 10 completed resamples" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_bbc_cv_score_zero_time_budget_is_unlimited():
+    rng = np.random.default_rng(10)
+    y = rng.normal(size=30)
+    oof = y[None, :] + rng.normal(size=(3, 30))
+    scorer = get_scorer_object("r2")
+    unlimited = bbc_cv_score(
+        scorer, y, oof, n_bootstrap=20, random_state=4, time_budget=0
+    )
+    assert unlimited == bbc_cv_score(
+        scorer, y, oof, n_bootstrap=20, random_state=4, time_budget=None
+    )
+
+
+def test_bbc_bootstrap_options_are_configurable(tmp_path):
+    cfg = _engine_cfg(tmp_path, holdout=None)
+    cfg["general"]["bbc_n_bootstrap"] = 7
+    cfg["general"]["bbc_time_budget_seconds"] = 2.5
+    parsed = Config.model_validate(cfg)
+    assert parsed.general.bbc_n_bootstrap == 7
+    assert parsed.general.bbc_time_budget_seconds == 2.5
+
+    bad = _engine_cfg(tmp_path, holdout=None)
+    bad["general"]["bbc_n_bootstrap"] = 0
+    with pytest.raises(ValueError):
+        Config.model_validate(bad)
+    bad = _engine_cfg(tmp_path, holdout=None)
+    bad["general"]["bbc_time_budget_seconds"] = -1.0
+    with pytest.raises(ValueError):
+        Config.model_validate(bad)
+
+
 def test_bbc_cv_score_duplicates_and_uncovered_rows_do_not_change_result():
     rng = np.random.default_rng(5)
     y = rng.normal(size=30)
@@ -263,12 +370,22 @@ def _completed_values(res) -> list[float]:
         (
             "r2",
             "k_fold",
-            {"enable": True, "strategy": "median", "min_steps": 1, "n_startup_trials": 1},
+            {
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
         ),
         (
             "neg_mean_absolute_error",
             "k_fold",
-            {"enable": True, "strategy": "median", "min_steps": 1, "n_startup_trials": 1},
+            {
+                "enable": True,
+                "strategy": "median",
+                "min_steps": 1,
+                "n_startup_trials": 1,
+            },
         ),
     ],
 )
@@ -379,6 +496,33 @@ def test_bbc_score_reported_without_holdout(tmp_path, metric):
         assert result["bbc_score"] <= result["score"]
     else:
         assert result["bbc_score"] >= result["score"]
+
+
+def test_engine_passes_bbc_budget_options(tmp_path, monkeypatch):
+    """The engine forwards general.bbc_* into bbc_cv_score."""
+    cfg = _engine_cfg(tmp_path, holdout=None, metric="rmse")
+    cfg["general"]["bbc_n_bootstrap"] = 7
+    cfg["general"]["bbc_time_budget_seconds"] = 2.5
+    captured: dict[str, object] = {}
+
+    def fake_bbc(scorer, y_true, oof_matrix, *, n_bootstrap, random_state, time_budget):
+        captured.update(
+            n_bootstrap=n_bootstrap,
+            random_state=random_state,
+            time_budget=time_budget,
+        )
+        return -0.5
+
+    monkeypatch.setattr(artifact_mod, "bbc_cv_score", fake_bbc)
+    df = _noisy_df(60)
+    result = train_best_model(config=cfg, df=df, target="target")
+
+    assert result["bbc_score"] == pytest.approx(0.5)
+    assert captured == {
+        "n_bootstrap": 7,
+        "random_state": 42,
+        "time_budget": 2.5,
+    }
 
 
 def test_bbc_score_absent_with_holdout(tmp_path):

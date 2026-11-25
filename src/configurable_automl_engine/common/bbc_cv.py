@@ -16,6 +16,8 @@ private row subset).
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -28,6 +30,8 @@ from sklearn.metrics import (
 from .metrics import _SCORER_OBJECTS, _nrmse, _rmse, pooled_scorer_value
 from .sklearn_compat import scorer_raw_parts
 
+_LOG = logging.getLogger(__name__)
+
 # --------------------------------------------------------------------------- #
 #  BBC-CV: bootstrap bias-corrected estimate of the selection procedure
 # --------------------------------------------------------------------------- #
@@ -36,6 +40,13 @@ BBC_N_BOOTSTRAP = 500
 #: Upper bound on the kept OOF values (trials x rows) for BBC-CV: about
 #: 32 MB of float64; the bootstrap cost scales with it as well.
 BBC_MAX_OOF_CELLS = 4_000_000
+#: Wall-clock budget of the bootstrap loop, in seconds. The deadline is checked
+#: between resamples, so the loop can overrun it by at most one resample plus
+#: the attempts needed to collect the first finite out-of-bag score. After that
+#: the estimate uses the resamples completed so far and a WARNING is logged.
+#: ``0`` disables the limit. The engine exposes the budget as
+#: ``general.bbc_time_budget_seconds``.
+BBC_TIME_BUDGET_SECONDS = 60.0
 
 
 def _columnwise_raw_values(
@@ -115,6 +126,7 @@ def bbc_cv_score(
     *,
     n_bootstrap: int = BBC_N_BOOTSTRAP,
     random_state: int | None = None,
+    time_budget: float | None = BBC_TIME_BUDGET_SECONDS,
 ) -> float:
     """Estimate the out-of-sample score of the selection procedure (BBC-CV).
 
@@ -155,14 +167,18 @@ def bbc_cv_score(
         n_bootstrap: The number of bootstrap resamples (>= 1).
         random_state: The bootstrap seed; ``None`` — not
             reproducible.
+        time_budget: The wall-clock budget of the bootstrap loop in seconds;
+            ``None`` or ``0`` — no limit. When the budget is exhausted the
+            estimate is the mean over the resamples completed so far (at
+            least one) and a WARNING is logged.
 
     Returns:
         float: The raw (sign-applied, higher is better) BBC-CV estimate.
 
     Raises:
-        ValueError: If the shapes do not match, ``n_bootstrap < 1``, fewer
-            than 2 usable rows remain, or no resample produced a finite
-            out-of-bag score.
+        ValueError: If the shapes do not match, ``n_bootstrap < 1``,
+            ``time_budget < 0``, fewer than 2 usable rows remain, or no
+            resample produced a finite out-of-bag score.
     """
     y = np.asarray(y_true, dtype=float).reshape(-1)
     configs = np.asarray(oof_matrix, dtype=float)
@@ -173,6 +189,8 @@ def bbc_cv_score(
         )
     if n_bootstrap < 1:
         raise ValueError(f"n_bootstrap must be >= 1; got {n_bootstrap}.")
+    if time_budget is not None and time_budget < 0:
+        raise ValueError(f"time_budget must be >= 0; got {time_budget}.")
     preds = configs.T
     # The comparison must run on a COMMON set of rows for all configurations:
     # the rows with a finite target that EVERY configuration predicted. A
@@ -204,14 +222,24 @@ def bbc_cv_score(
         y_var = float(np.var(y))
         if y_var > 0.0:
             mse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["mse"][0], y, preds, n_bootstrap, random_state
+                _SCORER_OBJECTS["mse"][0],
+                y,
+                preds,
+                n_bootstrap,
+                random_state,
+                time_budget,
             )
             return float(scorer_sign_value) * (1.0 - mse / y_var)
     if not kwargs and score_func is _nrmse:
         y_span = float(np.max(y) - np.min(y))
         if y_span >= 1e-6:
             rmse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["rmse"][0], y, preds, n_bootstrap, random_state
+                _SCORER_OBJECTS["rmse"][0],
+                y,
+                preds,
+                n_bootstrap,
+                random_state,
+                time_budget,
             )
             return float(scorer_sign_value) * (rmse / y_span)
         # A degenerate target range makes the NRMSE normalization undefined.
@@ -219,7 +247,9 @@ def bbc_cv_score(
         # finite score (NRMSE = 0, the error-metric counterpart of R² = 1.0);
         # the generic bootstrap error would hide this cause from the caller.
         try:
-            return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
+            return _bbc_mean_oob(
+                scorer, y, preds, n_bootstrap, random_state, time_budget
+            )
         except ValueError as err:
             raise ValueError(
                 "BBC-CV for NRMSE is undefined on a constant target: the "
@@ -229,7 +259,7 @@ def bbc_cv_score(
                 "metric that does not normalize by the target range, or "
                 "supply a target with a larger range."
             ) from err
-    return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state)
+    return _bbc_mean_oob(scorer, y, preds, n_bootstrap, random_state, time_budget)
 
 
 def _bbc_mean_oob(
@@ -238,6 +268,7 @@ def _bbc_mean_oob(
     preds: np.ndarray,
     n_bootstrap: int,
     random_state: int | None,
+    time_budget: float | None = None,
 ) -> float:
     """Run the BBC-CV bootstrap loop and return the mean out-of-bag score.
 
@@ -248,7 +279,8 @@ def _bbc_mean_oob(
             ``(n_rows, n_configurations)``.
         n_bootstrap: The number of bootstrap resamples.
         random_state: The bootstrap seed.
-
+        time_budget: The wall-clock budget of the loop in seconds;
+            ``None`` or ``0`` — no limit.
 
     Returns:
         float: The mean raw (sign-applied) out-of-bag score.
@@ -256,7 +288,25 @@ def _bbc_mean_oob(
     n_rows = y.shape[0]
     rng = np.random.default_rng(random_state)
     oob_scores: list[float] = []
+    started = time.monotonic()
+    deadline = (
+        None
+        if time_budget is None or time_budget <= 0.0
+        else started + float(time_budget)
+    )
     for _ in range(n_bootstrap):
+        # The budget may stop the loop only after a completed resample: an
+        # exhausted budget must not turn a skipped first draw (an empty OOB
+        # mask or a non-finite score) into an empty estimate.
+        if oob_scores and deadline is not None and time.monotonic() >= deadline:
+            _LOG.warning(
+                "BBC-CV: bootstrap time budget of %gs exhausted after %d of %d "
+                "completed resamples; the estimate uses them.",
+                time_budget,
+                len(oob_scores),
+                n_bootstrap,
+            )
+            break
         in_bag = rng.integers(0, n_rows, size=n_rows)
         oob_mask = np.ones(n_rows, dtype=bool)
         oob_mask[in_bag] = False

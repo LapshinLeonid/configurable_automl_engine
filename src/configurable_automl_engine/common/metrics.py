@@ -852,6 +852,7 @@ def register_custom_metrics(
 from configurable_automl_engine.common.bbc_cv import (
     BBC_MAX_OOF_CELLS,
     BBC_N_BOOTSTRAP,
+    BBC_TIME_BUDGET_SECONDS,
     bbc_cv_score,
 )
 
@@ -859,6 +860,7 @@ __all__ = [
     "AVAILABLE_METRICS",
     "BBC_MAX_OOF_CELLS",
     "BBC_N_BOOTSTRAP",
+    "BBC_TIME_BUDGET_SECONDS",
     "BUILTIN_METRIC_DIRECTIONS",
     "bbc_cv_score",
     "to_sklearn_name",

@@ -43,6 +43,8 @@
     "split_aggregation": "median",
     "random_state": 42,
     "holdout_fraction": "auto",
+    "bbc_n_bootstrap": 500,
+    "bbc_time_budget_seconds": 60.0,
     "categorical_encoding": "one_hot",
     "high_cardinality_threshold": 50,
     "high_cardinality_encoding": "frequency",

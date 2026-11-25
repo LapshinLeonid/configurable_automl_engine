@@ -25,6 +25,8 @@ from configurable_automl_engine.common.definitions import (
 )
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import (
+    BBC_N_BOOTSTRAP,
+    BBC_TIME_BUDGET_SECONDS,
     bbc_cv_score,
     get_scorer_object,
     pooled_scorer_value,
@@ -759,7 +761,12 @@ def persist_artifact(
     # every evaluated configuration, without retraining.
     if oof_pool and prepared.holdout_X is None:
         bbc_score = _bbc_score_in_user_metric(
-            prepared.metric_user, oof_pool, prepared.y, prepared.random_state
+            prepared.metric_user,
+            oof_pool,
+            prepared.y,
+            prepared.random_state,
+            n_bootstrap=cfg.general.bbc_n_bootstrap,
+            time_budget=cfg.general.bbc_time_budget_seconds,
         )
         if bbc_score is not None:
             result["bbc_score"] = bbc_score
@@ -771,6 +778,9 @@ def _bbc_score_in_user_metric(
     oof_pool: list[np.ndarray],
     y: pd.Series,
     random_state: int | None,
+    *,
+    n_bootstrap: int = BBC_N_BOOTSTRAP,
+    time_budget: float | None = BBC_TIME_BUDGET_SECONDS,
 ) -> float | None:
     """Compute the BBC-CV estimate in the comparison metric semantics.
 
@@ -780,6 +790,9 @@ def _bbc_score_in_user_metric(
             evaluated trials (``(n_trials × n_repeats, n_rows)`` each).
         y: The target vector the OOF rows are aligned to.
         random_state: The bootstrap seed (the engine seed).
+        n_bootstrap: The number of bootstrap resamples.
+        time_budget: The wall-clock budget of the bootstrap loop in seconds;
+            ``None`` or ``0`` — no limit.
     """
     y_arr = np.asarray(y, dtype=float).reshape(-1)
     matrices = [m for m in oof_pool if m.ndim == 2 and m.shape[1] == len(y_arr)]
@@ -795,7 +808,12 @@ def _bbc_score_in_user_metric(
     try:
         scorer = get_scorer_object(metric_user, global_y=y_arr)
         raw = bbc_cv_score(
-            scorer, y_arr, np.vstack(matrices), random_state=random_state
+            scorer,
+            y_arr,
+            np.vstack(matrices),
+            n_bootstrap=n_bootstrap,
+            random_state=random_state,
+            time_budget=time_budget,
         )
     except Exception as err:  # noqa: BLE001 — a BBC-CV failure must not crash the report
         _LOG.warning("BBC-CV estimate could not be computed: %s", err)

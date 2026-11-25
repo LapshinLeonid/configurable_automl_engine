@@ -5,13 +5,26 @@ based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The contract is versioned independently of `configurable-automl-engine`.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-24
+
+Compatibility: MINOR (0.x MINOR). The two new `general` fields are optional
+and have safe defaults, so the JSON Schema only gains optional properties; the
+distribution rename is a breaking packaging change for consumers pinned to the
+old name. The engine adopts the new fields and therefore raises its minimum
+contract version to `0.2.0`.
+
+### Added
+
+- **MINOR (compatible API):** `general.bbc_n_bootstrap` (default 500) and
+  `general.bbc_time_budget_seconds` (default 60, `0` disables the limit)
+  configure the BBC-CV bootstrap resample count and its wall-clock budget.
 
 ### Changed
 
-- The distribution is renamed from `automl-contracts` to
-  `configurable-automl-contracts`. Consumers must update pinned requirements;
-  the import package remains `automl_contracts`.
+- **BREAKING (0.x MINOR):** the distribution is renamed from
+  `automl-contracts` to `configurable-automl-contracts`. Migration: replace the
+  old distribution name with the new one in requirements and lock files; the
+  import package remains `automl_contracts`.
 
 ## [0.1.0] - 2026-11-15
 

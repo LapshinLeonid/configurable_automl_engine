@@ -138,6 +138,18 @@ class GeneralCfg(BaseModel):
             whose absolute Fisher skewness exceeds the threshold receives
             ``log1p`` (``min(y) > -1``) or ``yeo-johnson``, a more symmetric
             target keeps ``none``. Must be > 0.
+        bbc_n_bootstrap (int): Number of bootstrap resamples of the BBC-CV
+            estimate (>= 1). More resamples reduce its Monte-Carlo noise at a
+            linear CPU cost.
+        bbc_time_budget_seconds (float): Wall-clock budget of the BBC-CV
+            bootstrap loop in seconds (>= 0). ``0`` disables the limit. When
+            the budget is exhausted the estimate uses the resamples completed
+            so far and a WARNING is logged. The deadline is checked between
+            resamples, so one resample (and the attempts needed to collect the
+            first finite out-of-bag score) can run past the budget. A
+            wall-clock cutoff makes the number of completed resamples, and
+            therefore ``bbc_score``, dependent on hardware and load even with
+            the same ``random_state``; use ``0`` for exact repeatability.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -286,6 +298,33 @@ class GeneralCfg(BaseModel):
             'result["oof_score"] are computed on the folds that selected the '
             "algorithm and hyperparameters and are optimistic; the honest "
             'estimate is then the bias-corrected (BBC-CV) result["bbc_score"].'
+        ),
+    )
+    bbc_n_bootstrap: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "Number of bootstrap resamples of the BBC-CV honest estimate "
+            "(>= 1). More resamples reduce the Monte-Carlo noise of "
+            "result['bbc_score'] at a linear CPU cost; fewer resamples keep "
+            "the estimate cheap on large OOF matrices."
+        ),
+    )
+    bbc_time_budget_seconds: float = Field(
+        default=60.0,
+        ge=0.0,
+        description=(
+            "Wall-clock budget of the BBC-CV bootstrap loop in seconds "
+            "(>= 0; 0 — no limit). The deadline is checked between resamples, "
+            "so the loop can overrun the budget by at most one resample plus "
+            "the attempts needed to collect the first finite out-of-bag "
+            "score; a single scorer call is not interrupted. When the budget "
+            "is exhausted the estimate uses the resamples completed so far "
+            "(at least one) and a WARNING is logged. The wall-clock cutoff "
+            "can make the number of completed resamples, and therefore "
+            "bbc_score, differ between runs with the same random_state on "
+            "different hardware or under different load; use 0 for exact "
+            "repeatability."
         ),
     )
     categorical_encoding: EncodingStrategy = Field(

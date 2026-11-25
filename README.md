@@ -31,7 +31,7 @@ The repository ships two independently versioned Python distributions:
 
 Both distributions are released to public PyPI. A contract release is
 published before the engine release that depends on it. The engine declares
-`configurable-automl-contracts>=0.1.0,<0.2.0`, so installing the engine also installs a
+`configurable-automl-contracts>=0.2.0,<0.3.0`, so installing the engine also installs a
 compatible contract. Existing imports from `configurable_automl_engine` keep
 working through re-exports, but new code should import contract symbols from
 `automl_contracts`. See the
@@ -150,7 +150,7 @@ The required dependencies (installed automatically):
 * Pydantic (>=2.12.5)
 * PyYAML (>=6.0.3)
 * Joblib (>=1.5.3)
-* `configurable-automl-contracts` (>=0.1.0,<0.2.0) — the public data contract, installed
+* `configurable-automl-contracts` (>=0.2.0,<0.3.0) — the public data contract, installed
   automatically from PyPI
 
 ## Optional Dependencies

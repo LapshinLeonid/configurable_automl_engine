@@ -360,7 +360,9 @@ A config has three top-level sections. Only `algorithms` is required:
 | `n_repeats` | `1` | Number of repeats of the validation strategy in the multi-split (repeated) validation mode (≥ 1). `1` — a single split. `R > 1` — the base strategy is re-drawn `R` times with the deterministic seeds `random_state + r` (r = 0..R−1), so the same `random_state` gives identical sets of repeated splits; the per-repeat scores are combined by `split_aggregation`. With `"loo"` (explicit or resolved from `"auto"`) any `R > 1` is ignored with a WARNING (LOO folds are deterministic — repeating them only multiplies the cost). Every repeat multiplies the validation cost of every trial; the budget guard (`sum(n_trials) × n_folds × n_repeats`, WARN above 2000, a config error above 10000) rejects a prohibitive combination at config validation. With `"train_test_split"` and `n_repeats > 1` the repeats draw different hold-out rows, so BBC-CV is skipped for this mode. |
 | `split_aggregation` | `"median"` | How the per-repeat scores of the multi-split validation are combined into a single estimate: `"median"` (robust to a "lucky" split on a micro-sample) or `"mean"` (the arithmetic average). Used only when `n_repeats > 1`; in HPO a non-finite (NaN/±inf) repeat score is replaced by the worst-score sentinel with a WARNING and stays in the aggregate — one failed repeat does not fail the whole trial, only when every repeat fails. |
 | `holdout_fraction` | `"auto"` | Rows reserved **before** tuning for an honest final estimate (`result["holdout_score"]`): a fraction strictly in `(0, 1)`, `"auto"` or `null`. `"auto"` reserves 20 % when the data has at least 100 rows and nothing on smaller data (a WARNING then says that `score`/`oof_score` are optimistic, and `result["bbc_score"]` is the honest estimate). `null` disables the hold-out. The final model is still trained on all rows. |
-| `random_state` | `42` | Seed of the data splits, the models and the tuner — the same seed gives the same result. `null` makes the run non-reproducible (a WARNING is logged). Recorded as `result["random_state"]`. |
+| `bbc_n_bootstrap` | `500` | Number of bootstrap resamples of the BBC-CV estimate (≥ 1). More resamples reduce its Monte-Carlo noise at a linear CPU cost. |
+| `bbc_time_budget_seconds` | `60` | Wall-clock budget of the BBC-CV bootstrap loop, seconds (≥ 0; `0` — no limit). The deadline is checked between resamples, so the loop can overrun the budget by at most one resample plus the attempts needed to collect the first finite out-of-bag score, and a single scorer call is not interrupted. When the budget is exhausted the estimate uses the resamples completed so far (at least one) and a WARNING is logged. Because the cutoff is wall-clock based, the completed resample count — and therefore `bbc_score` — can differ between runs with the same `random_state` on different hardware or under different load; set `0` when exact repeatability of `bbc_score` matters. |
+| `random_state` | `42` | Seed of the data splits, the models and the tuner — the same seed gives the same result. `null` makes the run non-reproducible (a WARNING is logged). Recorded as `result["random_state"]`. Exception: with a non-zero `bbc_time_budget_seconds` the BBC-CV resample count is wall-clock dependent, so `bbc_score` may vary between machines or under different load; set the budget to `0` for an exactly repeatable estimate. |
 
 **Parallelism and time limits**
 
@@ -1406,10 +1408,14 @@ estimate and fewer rows for tuning.
 Corrected CV estimate (Tsamardinos et al., 2018), in the same form as
 `score`. During tuning it keeps the out-of-fold predictions of every
 completed trial of every algorithm in every search step — all the
-configurations the selection chose from. In each of 500 bootstrap resamples
+configurations the selection chose from. In each of
+`general.bbc_n_bootstrap` (500 by default) bootstrap resamples
 of the rows, the best configuration is picked on the in-bag rows and scored on
 the out-of-bag rows; `bbc_score` is the mean out-of-bag score. No model is
-retrained. For R² and NRMSE the bootstrap runs on MSE / RMSE and is normalized
+retrained. The bootstrap loop is bounded by
+`general.bbc_time_budget_seconds` (60 s by default; `0` — no limit): when the
+budget expires the estimate uses the resamples completed so far and a WARNING
+is logged. For R² and NRMSE the bootstrap runs on MSE / RMSE and is normalized
 by the variance / range of the whole target. The estimate is slightly
 conservative (fold models see fewer rows than the final model) and models the
 selection as "best comparison metric over all trials" — the Sanity Gate is not
@@ -1535,7 +1541,7 @@ dependencies install in one step:
 python -m pip install configurable-automl-contracts
 ```
 
-The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`, so
+The engine declares `configurable-automl-contracts>=0.2.0,<0.3.0`, so
 `pip install configurable-automl-engine` installs a compatible contract
 automatically. A clean environment needs no credentials, private index or
 `--no-deps` workaround. Run `python -m pip check` after installation to confirm
@@ -1734,13 +1740,13 @@ with a safe default is MINOR; a new required field, a removed value or a
 changed type/semantics is MAJOR. Description-only or field-order-only schema
 changes are PATCH; schema changes that break producers or consumers are MAJOR.
 
-The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`:
+The engine declares `configurable-automl-contracts>=0.2.0,<0.3.0`:
 
 | `configurable-automl-contracts` | `configurable-automl-engine` | Status |
 |---|---|---|
-| `0.1.x` | Releases declaring `>=0.1.0,<0.2.0` | Supported; compatibility is part of the release gate |
-| `<0.1.0` | Any | Not supported |
-| `>=0.2.0,<1.0.0` | The current engine line | Requires a new engine release with an updated range |
+| `0.2.x` | Releases declaring `>=0.2.0,<0.3.0` | Supported; compatibility is part of the release gate |
+| `<0.2.0` | Any | Not supported |
+| `>=0.3.0,<1.0.0` | The current engine line | Requires a new engine release with an updated range |
 | `>=1.0.0,<2.0.0` | A future engine declaring `>=1.0.0,<2.0.0` | Supported after the policy and range update |
 
 A combination outside the declared range is unsupported even if an import

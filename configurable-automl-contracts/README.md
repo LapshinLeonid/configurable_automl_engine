@@ -99,7 +99,7 @@ dependencies install in one step:
 python -m pip install configurable-automl-contracts
 ```
 
-The engine declares `configurable-automl-contracts>=0.1.0,<0.2.0`, so
+The engine declares `configurable-automl-contracts>=0.2.0,<0.3.0`, so
 `pip install configurable-automl-engine` installs a compatible contract
 automatically. The contract release is published before the engine release that
 depends on it. A clean environment needs no credentials, private index or
@@ -114,7 +114,7 @@ reinstall the contract:
 
 ```bash
 python -m pip uninstall -y automl-contracts
-python -m pip install "configurable-automl-contracts>=0.1.0,<0.2.0"
+python -m pip install "configurable-automl-contracts>=0.2.0,<0.3.0"
 ```
 
 The import package is unchanged: code continues to import `automl_contracts`.
@@ -299,7 +299,7 @@ releases are tagged `contracts-v<version>`, while engine releases are tagged
 accepts only the `v<version>` family. A `contracts-v<version>` tag at HEAD
 therefore neither supplies an engine version nor breaks an engine build.
 
-The current line is `0.1.x`. Until `1.0.0`:
+The current line is `0.2.x`. Until `1.0.0`:
 
 - potentially incompatible changes are released as a MINOR version and marked
   `BREAKING` in `CHANGELOG.md` with a migration note;
@@ -333,20 +333,20 @@ The engine declares the contract range in its own `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "configurable-automl-contracts>=0.1.0,<0.2.0",
+    "configurable-automl-contracts>=0.2.0,<0.3.0",
 ]
 ```
 
 | `configurable-automl-contracts` | `configurable-automl-engine` | Status |
 |---|---|---|
-| `0.1.x` | Releases that declare `>=0.1.0,<0.2.0` | Supported; compatibility is part of the release gate |
-| `<0.1.0` | Any | Not supported |
-| `>=0.2.0,<1.0.0` | The current engine line | Requires a new engine release with an updated range |
+| `0.2.x` | Releases that declare `>=0.2.0,<0.3.0` | Supported; compatibility is part of the release gate |
+| `<0.2.0` | Any | Not supported |
+| `>=0.3.0,<1.0.0` | The current engine line | Requires a new engine release with an updated range |
 | `>=1.0.0,<2.0.0` | A future engine that declares `>=1.0.0,<2.0.0` | Supported after the policy and range update |
 
 The engine's range is deliberately narrow during `0.x`: a MINOR contract
 release may contain an incompatible change, so the engine must not accept
-`0.2.0` automatically. A combination outside the declared range is not
+`0.3.0` automatically. A combination outside the declared range is not
 supported even if an import happens to work. Changing the range is a separate
 change with its own changelog entry; the contract tests verify the declared
 range.
