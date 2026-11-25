@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 import logging
 from unittest.mock import MagicMock
+from configurable_automl_engine.common.scorer_primitives import nrmse, rmse
 from configurable_automl_engine.common.metrics import (
-    _rmse,
-    _nrmse,
     direction_label,
     get_metric,
     is_error_metric,
@@ -43,7 +42,7 @@ def test_rmse_calculation():
     y_pred = np.array([2.5, 0.0, 2, 8])
     # MSE = (0.5^2 + 0.5^2 + 0 + 1^2) / 4 = 1.5 / 4 = 0.375
     # RMSE = sqrt(0.375) approx 0.61237
-    result = _rmse(y_true, y_pred)
+    result = rmse(y_true, y_pred)
     assert isinstance(result, float)
     assert result == pytest.approx(np.sqrt(0.375))
 
@@ -54,7 +53,7 @@ def test_nrmse_normal_case():
     # RMSE = sqrt((0^2 + 5^2)/2) = sqrt(12.5) approx 3.535
     # Denom = 10 - 0 = 10
     # Result = 3.535 / 10 = 0.3535
-    assert _nrmse(y_true, y_pred) == pytest.approx(np.sqrt(12.5) / 10)
+    assert nrmse(y_true, y_pred) == pytest.approx(np.sqrt(12.5) / 10)
 
 
 def test_nrmse_zero_range_coverage():
@@ -63,12 +62,12 @@ def test_nrmse_zero_range_coverage():
     y_pred = np.array([1, 2, 3])
 
     # A non-exact prediction returns float('inf') instead of raising.
-    result = _nrmse(y_true, y_pred)
+    result = nrmse(y_true, y_pred)
     assert result == float("inf")
 
     # An exact prediction on a constant target is perfect: NRMSE = 0.0,
     # the error-metric counterpart of R² = 1.0 (sklearn force_finite).
-    assert _nrmse(y_true, np.array([1, 1, 1])) == 0.0
+    assert nrmse(y_true, np.array([1, 1, 1])) == 0.0
 
     # Cover the NRMSEZeroRangeError class declaration
     # Just instantiate it so coverage tools count the line as executed
@@ -82,8 +81,8 @@ def test_nrmse_zero_range_coverage():
 
 def test_get_metric():
     # Check correct retrieval
-    assert get_metric("rmse") == _rmse
-    assert get_metric("NRMSE") == _nrmse
+    assert get_metric("rmse") == rmse
+    assert get_metric("NRMSE") == nrmse
 
     # Check the KeyError exception
     with pytest.raises(KeyError, match="Metric 'unknown' not implemented"):
@@ -268,17 +267,17 @@ def test_is_greater_better_reflects_registry_mutation():
     """
     from sklearn.metrics import make_scorer, mean_squared_error
 
-    import configurable_automl_engine.common.metrics as metrics_mod
+    import configurable_automl_engine.common.scorer_primitives as primitives_mod
 
     custom_name = "dyn_registry_metric"
-    assert custom_name not in metrics_mod._SCORER_OBJECTS
+    assert custom_name not in primitives_mod.SCORER_OBJECTS
 
     # Before registration the metric is unknown -> ValueError.
     with pytest.raises(ValueError):
         is_greater_better(custom_name)
 
     # Register an "error" (lower is better) and check the direction.
-    metrics_mod._SCORER_OBJECTS[custom_name] = (
+    primitives_mod.SCORER_OBJECTS[custom_name] = (
         make_scorer(mean_squared_error, greater_is_better=False),
         False,
     )
@@ -286,11 +285,11 @@ def test_is_greater_better_reflects_registry_mutation():
         assert is_greater_better(custom_name) is False
         # Change the direction in the registry — the result must update,
         # despite preceding calls (there is no registry cache).
-        scorer, _ = metrics_mod._SCORER_OBJECTS[custom_name]
-        metrics_mod._SCORER_OBJECTS[custom_name] = (scorer, True)
+        scorer, _ = primitives_mod.SCORER_OBJECTS[custom_name]
+        primitives_mod.SCORER_OBJECTS[custom_name] = (scorer, True)
         assert is_greater_better(custom_name) is True
     finally:
-        del metrics_mod._SCORER_OBJECTS[custom_name]
+        del primitives_mod.SCORER_OBJECTS[custom_name]
 
 
 def test_get_scorer_object():

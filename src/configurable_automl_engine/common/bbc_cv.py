@@ -5,7 +5,9 @@ estimates the out-of-sample score of a selection procedure from the
 out-of-fold predictions of ALL evaluated configurations, without retraining.
 Split out of ``common.metrics`` (the module-size limit) as a cohesive unit;
 ``common.metrics`` re-exports the public names so the documented import path
-(``configurable_automl_engine.common.metrics``) keeps working.
+(``configurable_automl_engine.common.metrics``) keeps working. The metric
+primitives themselves live in ``common.scorer_primitives``, so this module and
+``common.metrics`` both depend on them instead of on each other.
 
 All configurations are compared on the SAME set of rows — the rows every
 configuration predicted on top of the finite-target rows (a configuration
@@ -27,7 +29,12 @@ from sklearn.metrics import (
     r2_score,
 )
 
-from .metrics import _SCORER_OBJECTS, _nrmse, _rmse, pooled_scorer_value
+from .scorer_primitives import (
+    SCORER_OBJECTS,
+    nrmse,
+    pooled_scorer_value,
+    rmse,
+)
 from .sklearn_compat import scorer_raw_parts
 
 _LOG = logging.getLogger(__name__)
@@ -75,7 +82,7 @@ def _columnwise_raw_values(
     """
     score_func, raw_sign, kwargs = scorer_raw_parts(scorer)
     sign = float(raw_sign)
-    vectorized = {_rmse, _nrmse, mean_squared_error, mean_absolute_error, r2_score}
+    vectorized = {rmse, nrmse, mean_squared_error, mean_absolute_error, r2_score}
     if score_func in vectorized and not kwargs:
         valid = np.isfinite(preds) & np.isfinite(y_true)[:, None]
         n_valid = valid.sum(axis=0)
@@ -87,9 +94,9 @@ def _columnwise_raw_values(
                 ss_res = (err**2).sum(axis=0)
                 if score_func is mean_squared_error:
                     values = ss_res / n_valid
-                elif score_func is _rmse:
+                elif score_func is rmse:
                     values = np.sqrt(ss_res / n_valid)
-                elif score_func is _nrmse:
+                elif score_func is nrmse:
                     y_max = np.where(valid, y_true[:, None], -np.inf).max(axis=0)
                     y_min = np.where(valid, y_true[:, None], np.inf).min(axis=0)
                     span = y_max - y_min
@@ -222,7 +229,7 @@ def bbc_cv_score(
         y_var = float(np.var(y))
         if y_var > 0.0:
             mse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["mse"][0],
+                SCORER_OBJECTS["mse"][0],
                 y,
                 preds,
                 n_bootstrap,
@@ -230,18 +237,18 @@ def bbc_cv_score(
                 time_budget,
             )
             return float(scorer_sign_value) * (1.0 - mse / y_var)
-    if not kwargs and score_func is _nrmse:
+    if not kwargs and score_func is nrmse:
         y_span = float(np.max(y) - np.min(y))
         if y_span >= 1e-6:
-            rmse = -_bbc_mean_oob(
-                _SCORER_OBJECTS["rmse"][0],
+            rmse_value = -_bbc_mean_oob(
+                SCORER_OBJECTS["rmse"][0],
                 y,
                 preds,
                 n_bootstrap,
                 random_state,
                 time_budget,
             )
-            return float(scorer_sign_value) * (rmse / y_span)
+            return float(scorer_sign_value) * (rmse_value / y_span)
         # A degenerate target range makes the NRMSE normalization undefined.
         # Only a configuration that reproduces the target exactly has a
         # finite score (NRMSE = 0, the error-metric counterpart of R² = 1.0);

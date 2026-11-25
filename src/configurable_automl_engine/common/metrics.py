@@ -53,7 +53,6 @@ from sklearn.metrics import get_scorer as sklearn_get_scorer
 from sklearn.metrics import (
     get_scorer_names,
     make_scorer,
-    mean_absolute_error,
     mean_squared_error,
     r2_score,
 )
@@ -67,71 +66,16 @@ from configurable_automl_engine.common.custom_metrics import (
     register_custom_metric,
     validate_custom_metric_spec,
 )
-from configurable_automl_engine.common.errors import InvalidPredictionError
-from configurable_automl_engine.common.sklearn_compat import (
-    scorer_raw_parts,
-    scorer_sign,
+from configurable_automl_engine.common.scorer_primitives import (
+    SCORER_OBJECTS,
+    nrmse,
+    pooled_scorer_value,
+    resolve_expected_valid_mask,
+    rmse,
 )
+from configurable_automl_engine.common.sklearn_compat import scorer_sign
 
 logger = logging.getLogger(__name__)
-
-
-# --------------------------------------------------------------------------- #
-#  The metrics themselves
-# --------------------------------------------------------------------------- #
-def _rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Compute the root mean squared error (RMSE).
-    Calculation logic:
-    1. MSE is computed with the standard `mean_squared_error` function.
-    2. The square root is taken from the result via `np.sqrt`.
-    3. The result is forcibly cast to float for consistency."""
-    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
-
-
-def _resolve_expected_valid_mask(
-    yt: np.ndarray, yp: np.ndarray, expected: np.ndarray | None
-) -> np.ndarray:
-    """Resolve the shared masking contract of ``oof_rmse``/``pooled_scorer_value``.
-
-    The two cases of the non-finite prediction policy:
-
-    - a row the split strategy did not require to predict (outside the
-      ``expected`` mask, e.g. the train part of ``train_test_split``) stays
-      masked out of the estimate even when its values are finite — a normal
-      coverage gap by design;
-    - a row the model WAS required to predict (inside ``expected``) must
-      carry a finite prediction: a model-returned NaN/Inf there is a quality
-      defect, not a coverage gap, and raises ``InvalidPredictionError``
-      instead of being silently masked (a model that fails on most
-      validation rows must not get a good estimate from the few rows it
-      predicted).
-
-    Args:
-        yt: The true values as a float array.
-        yp: The predictions as a float array.
-        expected: An optional boolean mask aligned with ``yp``: True where
-            the model was required to produce a finite prediction.
-            ``None`` — every row is expected: any non-finite pair is dropped.
-
-    Returns:
-        np.ndarray: The boolean mask of the rows entering the estimate.
-
-    Raises:
-        InvalidPredictionError: If any expected row has a non-finite
-            prediction (with ``expected`` given).
-    """
-    if expected is None:
-        return np.isfinite(yt) & np.isfinite(yp)
-    exp = np.asarray(expected, dtype=bool)
-    if not np.isfinite(yp[exp]).all():
-        raise InvalidPredictionError(
-            "Model returned non-finite predictions for validation samples "
-            f"({int((~np.isfinite(yp[exp])).sum())} of {int(exp.sum())} "
-            "expected rows)"
-        )
-    # Rows outside the expected set (e.g. the train part of a hold-out)
-    # are excluded from the estimate even when their values are finite.
-    return exp & np.isfinite(yt) & np.isfinite(yp)
 
 
 def oof_rmse(y_true: Any, y_pred: Any, *, expected: Any | None = None) -> float:
@@ -169,10 +113,10 @@ def oof_rmse(y_true: Any, y_pred: Any, *, expected: Any | None = None) -> float:
     """
     yt = np.asarray(y_true, dtype=float)
     yp = np.asarray(y_pred, dtype=float)
-    valid = _resolve_expected_valid_mask(yt, yp, expected)
+    valid = resolve_expected_valid_mask(yt, yp, expected)
     if not np.any(valid):
         raise ValueError("No valid (y_true, y_pred) pairs for OOF RMSE.")
-    return _rmse(yt[valid], yp[valid])
+    return rmse(yt[valid], yp[valid])
 
 
 # Metrics whose estimate cannot be obtained by averaging per-fold values:
@@ -239,59 +183,6 @@ def is_non_additive_metric(name: str) -> bool:
     return name.lower().strip() in _NON_ADDITIVE_METRICS
 
 
-def pooled_scorer_value(
-    scorer: Any, y_true: Any, y_pred: Any, *, expected: Any | None = None
-) -> float:
-    """Compute a scorer value over the whole aligned vector at once.
-
-    Applies the raw metric function (with the scorer's sign and kwargs) over
-    the concatenated vector, dropping non-finite pairs — the same masking
-    contract as ``oof_rmse``. Used to estimate non-additive metrics (RMSE,
-    MSE, R², nRMSE) over the pooled OOF vector instead of averaging per-fold
-    values.
-
-    With ``expected`` the masking splits into the two fundamentally different
-    cases (the same contract as ``oof_rmse``): rows outside the expected set
-    (e.g. the train part of ``train_test_split``) stay masked out — a normal
-    coverage gap by design — while a non-finite prediction on an EXPECTED row
-    raises ``InvalidPredictionError``: the model was required to predict it,
-    and silently scoring only the rows it happened to predict would reward a
-    model that fails on most of the validation rows. Without ``expected``
-    any non-finite pair is dropped.
-
-    Args:
-        scorer: A scikit-learn ``make_scorer`` object (its raw metric parts
-            are read through the stable adapter
-            ``common.sklearn_compat.scorer_raw_parts``).
-        y_true: True values aligned with ``y_pred`` by position.
-        y_pred: Predictions aligned with ``y_true`` by position.
-        expected: An optional boolean mask aligned with ``y_pred``: True
-            where the model was required to produce a finite prediction
-            (validation rows). ``None`` — every row is expected.
-
-    Returns:
-        float: The raw (sign-applied) metric value over all valid pairs.
-
-    Raises:
-        InvalidPredictionError: If any expected row has a non-finite
-            prediction (with ``expected`` given).
-        ValueError: If no valid pair remains after dropping non-finite pairs,
-            or if the scorer does not expose a raw ``_score_func`` (it cannot
-            be pooled).
-    """
-    yt = np.asarray(y_true, dtype=float)
-    yp = np.asarray(y_pred, dtype=float)
-    valid = _resolve_expected_valid_mask(yt, yp, expected)
-    if not np.any(valid):
-        raise ValueError("No valid (y_true, y_pred) pairs for the pooled metric.")
-    score_func, sign, kwargs = scorer_raw_parts(scorer)
-    if score_func is None:
-        raise ValueError(
-            "The scorer cannot be pooled: no raw metric function is exposed."
-        )
-    return float(sign * score_func(yt[valid], yp[valid], **kwargs))
-
-
 # Fallback-warning deduplication: when a scorer cannot be pooled (no raw
 # ``_score_func`` exposed, or the pooled value is impossible), the engine
 # falls back to the per-fold mean. The WARNING is emitted exactly once per
@@ -354,34 +245,6 @@ class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 
 
-# Per-fold NRMSE
-def _nrmse(y_true: Any, y_pred: Any) -> float:
-    """Compute the local normalized RMSE (NRMSE).
-    Calculation logic:
-    1. The standard RMSE for the current sample is computed.
-    2. The range (max - min) is determined from the
-    passed true values `y_true`.
-    3. Constant-target handling: if the range < 1e-6, the normalization is
-    undefined. A perfect prediction (RMSE = 0) is scored as 0.0 — the
-    error-metric counterpart of scikit-learn's R² force_finite rule, which
-    reports 1.0 for a perfect constant-target prediction. Otherwise `inf`
-    (infinite error) is returned with a warning logged to avoid division by
-    zero.
-    4. RMSE is divided by the computed local range."""
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    denom = np.max(y_true) - np.min(y_true)
-
-    if denom < 1e-6:
-        if rmse == 0.0:
-            return 0.0
-        logger.warning(
-            f"NRMSE: target is constant (range < 1e-6) for split of size "
-            f"{len(y_true)}. Returning +inf (will be inverted to -inf by scorer)."
-        )
-        return float("inf")
-    return float(rmse / denom)
-
-
 def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -> float:
     """Compute the global normalized RMSE
     using a fixed range.
@@ -435,33 +298,13 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> ScorerCallable:
 # --------------------------------------------------------------------------- #
 _METRICS: dict[str, Callable[..., Any]] = {
     # "lower → better"
-    "rmse": _rmse,
-    "nrmse": _nrmse,
+    "rmse": rmse,
+    "nrmse": nrmse,
     "global_nrmse": _global_nrmse,
     # "higher → better"
     "r2": r2_score,
     # alias: "higher → better" (negative RMSE)
-    "neg_root_mean_squared_error": lambda y_t, y_p: -_rmse(y_t, y_p),
-}
-
-
-# --------------------------------------------------------------------------- #
-#  Registry of ready-made scorer objects for use in the sklearn API
-# --------------------------------------------------------------------------- #
-# For each metric the optimization direction (is_greater_better) is stored
-# explicitly next to the scorer: True — "higher is better" (r2, as well as
-# inverted neg_ metrics), False — "lower is better" (rmse, mae, etc.).
-# The direction is never inferred heuristically from name substrings — only
-# from this registry or from the sklearn scorer object itself.
-_SCORER_OBJECTS: dict[str, tuple[Callable[..., Any], bool]] = {
-    # For errors set greater_is_better=False;
-    # sklearn itself will return negative values for maximization
-    "nrmse": (make_scorer(_nrmse, greater_is_better=False), False),
-    "rmse": (make_scorer(_rmse, greater_is_better=False), False),
-    "neg_root_mean_squared_error": (make_scorer(_rmse, greater_is_better=False), True),
-    "mae": (make_scorer(mean_absolute_error, greater_is_better=False), False),
-    "mse": (make_scorer(mean_squared_error, greater_is_better=False), False),
-    "r2": (make_scorer(r2_score, greater_is_better=True), True),
+    "neg_root_mean_squared_error": lambda y_t, y_p: -rmse(y_t, y_p),
 }
 
 
@@ -492,7 +335,7 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
     """Resolve a metric name into an actual scorer object.
 
     Resolution logic:
-    1. For metrics in the ``_SCORER_OBJECTS`` registry, the preconfigured
+    1. For metrics in the ``SCORER_OBJECTS`` registry, the preconfigured
        ``make_scorer`` object is returned (the first tuple element).
     2. Otherwise the name is delegated to ``sklearn.metrics.get_scorer``.
 
@@ -502,8 +345,8 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
     if custom is not None:
         return cast(Callable[..., Any], build_custom_scorer(custom))
     lname = name.lower()
-    if lname in _SCORER_OBJECTS:
-        return _SCORER_OBJECTS[lname][0]
+    if lname in SCORER_OBJECTS:
+        return SCORER_OBJECTS[lname][0]
     try:
         return cast(Callable[..., Any], sklearn_get_scorer(lname))
     except ValueError as err:
@@ -520,7 +363,7 @@ def _sklearn_direction(name: str) -> bool:
 
     Only the "stable" part is cached: the sklearn scorers registry does not
     change at runtime, so the result for a given name is deterministic and
-    safe to cache. In contrast, the ``_SCORER_OBJECTS`` registry can be
+    safe to cache. In contrast, the ``SCORER_OBJECTS`` registry can be
     extended/changed by the user, so it is read without caching
     (see ``is_greater_better``).
 
@@ -539,7 +382,7 @@ def is_greater_better(name: str) -> bool:
 
     The direction is determined from the actual scorer object, not from
     name substrings:
-    1. For metrics in the ``_SCORER_OBJECTS`` registry, the direction is
+    1. For metrics in the ``SCORER_OBJECTS`` registry, the direction is
        stored explicitly next to the scorer (rmse/mae/mse/nrmse — False,
        r2 and neg_root_mean_squared_error — True). The registry is read each
        time without caching: it is mutable, and the result must reflect the
@@ -565,8 +408,8 @@ def is_greater_better(name: str) -> bool:
         return natural_greater_is_better(custom)
     lname = name.lower()
     # 1. Explicit direction from the private registry — no cache.
-    if lname in _SCORER_OBJECTS:
-        return _SCORER_OBJECTS[lname][1]
+    if lname in SCORER_OBJECTS:
+        return SCORER_OBJECTS[lname][1]
     # 2. Dynamic global NRMSE — an error ("lower is better"), just like
     #    regular NRMSE. The scorer requires global_y and is not resolved by
     #    sklearn, so it is handled explicitly (in sync with to_user_value).
@@ -702,7 +545,7 @@ def get_scorer_object(
     Lookup logic:
     1. Handle 'global_nrmse': requires `global_y` to be present
     for creating the dynamic scorer.
-    2. Search the `_SCORER_OBJECTS` registry: returns the preconfigured custom scorers.
+    2. Search the `SCORER_OBJECTS` registry: returns the preconfigured custom scorers.
     3. Fallback: if the name is not in the registry, the
     standard `sklearn.metrics.get_scorer` is used.
     Args:
@@ -725,8 +568,8 @@ def get_scorer_object(
         return get_global_nrmse_scorer(global_y)
 
     # If this is our custom metric (nrmse, rmse, etc.)
-    if lname in _SCORER_OBJECTS:
-        return _SCORER_OBJECTS[lname][0]
+    if lname in SCORER_OBJECTS:
+        return SCORER_OBJECTS[lname][0]
 
     # Otherwise return the name as is
     # (sklearn will find the built-in metric itself)
@@ -753,7 +596,7 @@ def reserved_metric_names() -> frozenset[str]:
     """
     return frozenset(
         {
-            *_SCORER_OBJECTS,
+            *SCORER_OBJECTS,
             *_METRICS,
             *ALIAS_TO_SKLEARN,
             *ALIAS_TO_SKLEARN.values(),
@@ -863,5 +706,7 @@ __all__ = [
     "BBC_TIME_BUDGET_SECONDS",
     "BUILTIN_METRIC_DIRECTIONS",
     "bbc_cv_score",
+    "oof_rmse",
+    "pooled_scorer_value",
     "to_sklearn_name",
 ]
