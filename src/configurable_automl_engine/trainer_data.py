@@ -147,7 +147,7 @@ def load_training_data(X: Any, y: Any) -> TrainingData:
     except (ValueError, TypeError, IndexError) as e:
         if str(e) == "Data is empty":
             raise
-        raise TrainingError(f"Data transformation error: {e}")
+        raise TrainingError(f"Data transformation error: {e}") from e
 
     _check_training_data(X_obj, y_obj)
     return TrainingData(

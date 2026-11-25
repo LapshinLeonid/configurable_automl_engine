@@ -172,7 +172,9 @@ def _get_estimator(algo: str) -> Any:
         return True
     except (ValueError, ImportError) as err:
         # Missing model or backend package (for example, XGBoost).
-        raise InvalidAlgorithmError(f"Algorithm '{algo}' is not supported: {err}")
+        raise InvalidAlgorithmError(
+            f"Algorithm '{algo}' is not supported: {err}"
+        ) from err
 
 
 class _OptimizeRunner:

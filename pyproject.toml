@@ -104,7 +104,7 @@ target-version = "py311"
 extend-exclude = ["src/configurable_automl_engine/_version.py"]
 
 [tool.ruff.lint]
-extend-select = ["C901"]
+extend-select = ["C901", "B904", "B905", "RUF100"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

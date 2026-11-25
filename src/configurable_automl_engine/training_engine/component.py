@@ -555,7 +555,7 @@ def _lost_worker_reasons(
     A worker that timed out, crashed or failed in the pool leaves no result,
     so the algorithm would silently disappear from the phase; it is recorded
     in the circuit breaker instead, so the result and the log say why."""
-    lost = {n: o.reason() for n, o in zip(names, outcomes) if not o.ok}
+    lost = {n: o.reason() for n, o in zip(names, outcomes, strict=True) if not o.ok}
     for name, reason in lost.items():
         _LOG.warning("Algorithm %s lost in the HPO phase: %s", name, reason)
     return lost

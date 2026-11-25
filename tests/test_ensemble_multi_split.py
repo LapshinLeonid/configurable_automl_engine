@@ -216,6 +216,22 @@ def test_comparison_returns_none_when_repeats_are_missing() -> None:
     )
 
 
+def test_comparison_returns_none_when_weights_do_not_match_predictions() -> None:
+    """A weight without a member prediction makes the comparison unavailable."""
+    y = np.array([0.0, 1.0])
+    prediction = np.array([0.0, 1.0])
+    assert (
+        winner_vs_ensemble_comparison(
+            y_true=y,
+            member_predictions_by_repeat=[{"a": prediction}],
+            winner_predictions_by_repeat=[prediction],
+            weights={"a": 0.5, "b": 0.5},
+            winner_algorithm="a",
+        )
+        is None
+    )
+
+
 def test_markdown_report_renders_comparison() -> None:
     section = {
         "enabled": True,

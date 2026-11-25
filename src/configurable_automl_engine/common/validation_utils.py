@@ -691,9 +691,11 @@ def get_effective_train_size(
     if isinstance(strategy, str):
         try:
             strategy = ValidationStrategy(strategy)
-        except ValueError:
+        except ValueError as err:
             # If an unknown strategy is passed, return n_total as fallback
-            raise ValueError(f"Unknown validation strategy string: '{strategy}'")
+            raise ValueError(
+                f"Unknown validation strategy string: '{strategy}'"
+            ) from err
 
     if strategy == ValidationStrategy.auto:
         return _effective_size_for_auto(n_total, n_features, n_folds, test_size)

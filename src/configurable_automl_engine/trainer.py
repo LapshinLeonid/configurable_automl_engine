@@ -619,7 +619,7 @@ class ModelTrainer(TrainerViewMixin):
             # Wrap all other system errors in TrainingError
             self.logger.debug("Unexpected pipeline fit failure trace:", exc_info=True)
             self.logger.error(f"Unexpected error in pipeline fit: {e}")
-            raise TrainingError(f"Internal training failure: {e}")
+            raise TrainingError(f"Internal training failure: {e}") from e
         # Record the actual selection status and the selected-column mask.
         # The mask is taken from the selector step inside the pipeline and
         # has the dimensionality of the post-preprocessor matrix (after
@@ -884,8 +884,8 @@ class ModelTrainer(TrainerViewMixin):
 
             except TrainingError:
                 raise
-            except Exception as e:  # noqa: BLE001
-                raise TrainingError(f"Error during prediction: {e}")
+            except Exception as e:
+                raise TrainingError(f"Error during prediction: {e}") from e
 
     def save(self, path: str | Path) -> None:
         """Serialize and save the current trainer instance to disk.

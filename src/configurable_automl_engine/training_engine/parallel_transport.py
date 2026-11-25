@@ -264,13 +264,21 @@ class PayloadTransport:
 
         Returns:
             list[TaskPayload]: One payload per task, in the task order.
+
+        Raises:
+            ValueError: If ``args_seq`` and ``kwargs_seq`` have different
+                lengths.
         """
+        if len(args_seq) != len(kwargs_seq):
+            raise ValueError(
+                "args_seq and kwargs_seq must contain the same number of tasks"
+            )
         if not (self._shared or self._disk):
             return self._plain(args_seq, kwargs_seq)
         try:
             return [
                 self._encode_task(args, kwargs)
-                for args, kwargs in zip(args_seq, kwargs_seq)
+                for args, kwargs in zip(args_seq, kwargs_seq, strict=True)
             ]
         except Exception as e:  # noqa: BLE001
             # The original disk indices are kept: in _worker_proxy a
@@ -303,7 +311,7 @@ class PayloadTransport:
     ) -> list[TaskPayload]:
         return [
             TaskPayload(tuple(a), kw, list(self._disk_list), {})
-            for a, kw in zip(args_seq, kwargs_seq)
+            for a, kw in zip(args_seq, kwargs_seq, strict=True)
         ]
 
     def _encode_task(

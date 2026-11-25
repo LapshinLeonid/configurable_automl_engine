@@ -389,7 +389,7 @@ def _comparison_repeat_rmse(
         return float("nan"), float("nan")
     y_valid = y[mask]
     ensemble_prediction = np.zeros_like(y_valid)
-    for name, vector in zip(names, member_vectors):
+    for name, vector in zip(names, member_vectors, strict=True):
         ensemble_prediction += normalized_weights[name] * vector[mask]
     ensemble_rmse = float(np.sqrt(np.mean((y_valid - ensemble_prediction) ** 2)))
     winner_rmse = float(np.sqrt(np.mean((y_valid - winner_array[mask]) ** 2)))
@@ -459,7 +459,8 @@ def winner_vs_ensemble_comparison(
     if not math.isfinite(total_weight) or total_weight <= 0.0:
         return None
     normalized = {
-        name: weight / total_weight for name, weight in zip(names, weight_values)
+        name: weight / total_weight
+        for name, weight in zip(names, weight_values, strict=True)
     }
 
     y = _finite_vector(y_true)
@@ -496,7 +497,7 @@ def winner_vs_ensemble_comparison(
     n_repeats_used = sum(
         1
         for ensemble_value, winner_value in zip(
-            ensemble_repeat_rmse, winner_repeat_rmse
+            ensemble_repeat_rmse, winner_repeat_rmse, strict=True
         )
         if math.isfinite(ensemble_value) and math.isfinite(winner_value)
     )

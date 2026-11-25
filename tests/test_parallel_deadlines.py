@@ -178,3 +178,16 @@ def test_transport_failed_preparation_falls_back_to_pickle(monkeypatch, caplog):
     assert payloads[0].args[0] is df1
     assert payloads[1].args[0] is df2
     assert "transferring dataframes through pickle instead" in caplog.text
+
+
+def test_transport_rejects_mismatched_task_counts():
+    """A task-count mismatch is a caller error, not a transport failure."""
+    transport = PayloadTransport(shared_indices=[0])
+    with pytest.raises(ValueError, match="same number of tasks"):
+        transport.prepare([(1,)], [])
+    assert transport.segment_names == []
+
+
+def test_transport_plain_path_rejects_mismatched_task_counts():
+    with pytest.raises(ValueError, match="same number of tasks"):
+        PayloadTransport().prepare([(1,)], [])

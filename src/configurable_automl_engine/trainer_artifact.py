@@ -245,8 +245,8 @@ def load_trainer_artifact(
     for candidate in formats:
         try:
             loaded = load_artifact(path=path_obj, fmt=candidate)
-        except FileNotFoundError:
-            raise TrainingError(f"File not found: {path}")
+        except FileNotFoundError as err:
+            raise TrainingError(f"File not found: {path}") from err
         except Exception as e:  # noqa: BLE001
             last_error = e
             continue

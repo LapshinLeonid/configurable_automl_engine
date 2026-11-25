@@ -553,7 +553,7 @@ def _to_candidate(
             has_valid_oof = any(finite_mask)
             repeat_vectors = [
                 vector
-                for vector, is_finite in zip(repeat_vectors, finite_mask)
+                for vector, is_finite in zip(repeat_vectors, finite_mask, strict=True)
                 if is_finite
             ]
         if repeat_vectors:
@@ -790,7 +790,7 @@ def _train_finalists(
             mp_context=cfg.general.start_method,
         )
         trained_tasks: list[_TrainedFinalist | None] = []
-        for spec, outcome in zip(specs, outcomes):
+        for spec, outcome in zip(specs, outcomes, strict=True):
             if not outcome.ok:
                 _LOG.warning(
                     "Finalist %s failed to train on the full dataset: %s. "
@@ -803,7 +803,7 @@ def _train_finalists(
         trained_tasks = [_train_finalist_worker(spec, prepared.X) for spec in specs]
 
     candidates: dict[str, FinalistCandidate] = {}
-    for spec, trained in zip(specs, trained_tasks):
+    for spec, trained in zip(specs, trained_tasks, strict=True):
         if trained is None:
             continue
         _restore_trainer_repeat_vectors(trained)

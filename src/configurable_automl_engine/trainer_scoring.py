@@ -189,8 +189,8 @@ def score_on_validation_splits(
             n_repeats=n_repeats,
         )
         first_split = next(split_iterator, None)
-    except Exception as err:  # noqa: BLE001
-        raise TrainingError(f"Error calculating metrics on validation: {err}")
+    except Exception as err:
+        raise TrainingError(f"Error calculating metrics on validation: {err}") from err
 
     n_samples = X.shape[0] if hasattr(X, "shape") else len(X)
     effective_method = _effective_validation_method(
@@ -227,8 +227,8 @@ def score_on_validation_splits(
                 )
         except TrainingError:
             raise
-        except Exception as err:  # noqa: BLE001
-            raise TrainingError(f"Error calculating metrics on validation: {err}")
+        except Exception as err:
+            raise TrainingError(f"Error calculating metrics on validation: {err}") from err  # fmt: skip
 
     if len(outcomes) <= 1:
         outcome = outcomes[0] if outcomes else _empty_repeat_outcome(n_samples)
@@ -688,8 +688,8 @@ def _build_validation_scorers(
     cannot be built is skipped with a WARNING."""
     try:
         scorer = cast(Callable[..., Any], get_scorer_object(metric, global_y=y))
-    except Exception as err:  # noqa: BLE001
-        raise TrainingError(f"Error calculating metrics on validation: {err}")
+    except Exception as err:
+        raise TrainingError(f"Error calculating metrics on validation: {err}") from err
     add_scorers: dict[str, Callable[..., Any]] = {}
     for mname in additional_metrics:
         try:

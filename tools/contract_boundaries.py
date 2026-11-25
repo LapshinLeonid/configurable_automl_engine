@@ -627,7 +627,7 @@ def _bind_index_aliases(name: str, value: ast.AST, aliases: dict[str, str]) -> N
                 aliases[key] = resolved
         return
     if isinstance(value, ast.Dict):
-        for key_node, element in zip(value.keys, value.values):
+        for key_node, element in zip(value.keys, value.values, strict=True):
             if not isinstance(key_node, ast.Constant):
                 continue
             resolved = _assigned_alias_value(element, aliases)
@@ -670,7 +670,9 @@ def _bind_alias_target(
         if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(
             value.elts
         ):
-            for element_target, element_value in zip(target.elts, value.elts):
+            for element_target, element_value in zip(
+                target.elts, value.elts, strict=True
+            ):
                 _bind_alias_target(element_target, element_value, aliases)
         else:
             _remove_alias_target(target, aliases)
@@ -1345,7 +1347,7 @@ def _resolve_subscript_names(
             return _resolve_possible_names(elements[node.slice.value], aliases)
         return frozenset()
     if isinstance(node.value, ast.Dict):
-        for key, value in zip(node.value.keys, node.value.values):
+        for key, value in zip(node.value.keys, node.value.values, strict=True):
             if isinstance(key, ast.Constant) and key.value == node.slice.value:
                 return _resolve_possible_names(value, aliases)
         return frozenset()
@@ -1451,7 +1453,7 @@ def _literal_sequence_element(value: ast.AST) -> ast.AST | None:
         and isinstance(value.value, ast.Dict)
         and isinstance(value.slice, ast.Constant)
     ):
-        for key, element in zip(value.value.keys, value.value.values):
+        for key, element in zip(value.value.keys, value.value.values, strict=True):
             if isinstance(key, ast.Constant) and key.value == value.slice.value:
                 return element
     return None
@@ -1685,7 +1687,7 @@ def _bind_flow_index_aliases(
     elif isinstance(value, ast.Dict):
         elements = [
             (repr(key.value), element)
-            for key, element in zip(value.keys, value.values)
+            for key, element in zip(value.keys, value.values, strict=True)
             if isinstance(key, ast.Constant)
         ]
     elif isinstance(value, ast.Name):
@@ -1710,7 +1712,9 @@ def _assign_target(
         if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(
             value.elts
         ):
-            for element_target, element_value in zip(target.elts, value.elts):
+            for element_target, element_value in zip(
+                target.elts, value.elts, strict=True
+            ):
                 _assign_target(
                     element_target,
                     element_value,
@@ -1921,7 +1925,7 @@ def _apply_container_path_names(
     elif isinstance(value, ast.Dict):
         elements = [
             (repr(key.value), element)
-            for key, element in zip(value.keys, value.values)
+            for key, element in zip(value.keys, value.values, strict=True)
             if isinstance(key, ast.Constant)
         ]
     elif isinstance(value, ast.Name):
@@ -1946,7 +1950,9 @@ def _apply_binding_path(
         if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(
             value.elts
         ):
-            for element_target, element_value in zip(target.elts, value.elts):
+            for element_target, element_value in zip(
+                target.elts, value.elts, strict=True
+            ):
                 _apply_binding_path(element_target, element_value, aliases, names)
         else:
             _remove_path_names([target], names)
@@ -2214,9 +2220,13 @@ def _function_argument_paths(
     positional = [*stmt.args.posonlyargs, *stmt.args.args]
     defaults: dict[str, ast.AST] = {}
     default_start = len(positional) - len(stmt.args.defaults)
-    for argument, default in zip(positional[default_start:], stmt.args.defaults):
+    for argument, default in zip(
+        positional[default_start:], stmt.args.defaults, strict=True
+    ):
         defaults[argument.arg] = default
-    for argument, kw_default in zip(stmt.args.kwonlyargs, stmt.args.kw_defaults):
+    for argument, kw_default in zip(
+        stmt.args.kwonlyargs, stmt.args.kw_defaults, strict=True
+    ):
         if kw_default is not None:
             defaults[argument.arg] = kw_default
     arguments = [
@@ -2343,7 +2353,8 @@ def _call_argument_bindings(
         static = _import_aliases_from_alias_sets(call_aliases)
         static.update(identity_aliases)
         positional = [*definition.args.posonlyargs, *definition.args.args]
-        for argument, definition_parameter in zip(call.args, positional):
+        # A call may omit or add arguments; the loop stops at *args.
+        for argument, definition_parameter in zip(call.args, positional, strict=False):
             if isinstance(argument, ast.Starred):
                 break
             _record_argument_binding(
@@ -3365,7 +3376,7 @@ def _subscript_is_path(
             return _is_path_expression(elements[node.slice.value], aliases, path_names)
         return False
     if isinstance(node.value, ast.Dict):
-        for key, value in zip(node.value.keys, node.value.values):
+        for key, value in zip(node.value.keys, node.value.values, strict=True):
             if isinstance(key, ast.Constant) and key.value == node.slice.value:
                 return _is_path_expression(value, aliases, path_names)
         return False
@@ -3870,9 +3881,13 @@ def _method_parameter_paths(
     positional = [*method.args.posonlyargs, *method.args.args]
     defaults: dict[str, ast.AST] = {}
     default_start = len(positional) - len(method.args.defaults)
-    for argument, default in zip(positional[default_start:], method.args.defaults):
+    for argument, default in zip(
+        positional[default_start:], method.args.defaults, strict=True
+    ):
         defaults[argument.arg] = default
-    for argument, kw_default in zip(method.args.kwonlyargs, method.args.kw_defaults):
+    for argument, kw_default in zip(
+        method.args.kwonlyargs, method.args.kw_defaults, strict=True
+    ):
         if kw_default is not None:
             defaults[argument.arg] = kw_default
     parameters = [
@@ -4584,7 +4599,7 @@ def _class_container_elements(
     if isinstance(value, ast.Dict):
         return [
             (repr(key.value), element)
-            for key, element in zip(value.keys, value.values)
+            for key, element in zip(value.keys, value.values, strict=True)
             if isinstance(key, ast.Constant)
         ]
     return []
@@ -6595,7 +6610,7 @@ class _ElementAnalysis:
             return self._literal_elements(value.elts, scope, class_name)
         if isinstance(value, ast.Dict):
             elements: dict[str, str] = {}
-            for key, element in zip(value.keys, value.values):
+            for key, element in zip(value.keys, value.values, strict=True):
                 if not isinstance(key, ast.Constant):
                     continue
                 resolved = self.value_of(element, scope, class_name)
@@ -6807,7 +6822,9 @@ class _ElementAnalysis:
         if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(
             value.elts
         ):
-            for element_target, element_value in zip(target.elts, value.elts):
+            for element_target, element_value in zip(
+                target.elts, value.elts, strict=True
+            ):
                 self.bind_target(element_target, element_value, scope, class_name)
             return
         elements, _ = self.container_of(value, scope, class_name)
@@ -6919,7 +6936,9 @@ class _ElementAnalysis:
             and isinstance(value, (ast.Tuple, ast.List))
             and len(target.elts) == len(value.elts)
         ):
-            for element_target, element_value in zip(target.elts, value.elts):
+            for element_target, element_value in zip(
+                target.elts, value.elts, strict=True
+            ):
                 self._bind_loop_literal_target(
                     element_target, element_value, scope, class_name
                 )
@@ -8048,7 +8067,9 @@ def _method_default_expression(
         if 0 <= default_index < len(defaults):
             return defaults[default_index]
         return None
-    for parameter, default in zip(method.args.kwonlyargs, method.args.kw_defaults):
+    for parameter, default in zip(
+        method.args.kwonlyargs, method.args.kw_defaults, strict=True
+    ):
         if parameter.arg == name and default is not None:
             return default
     return None

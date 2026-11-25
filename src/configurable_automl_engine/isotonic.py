@@ -185,6 +185,6 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             # tuner), while TrainingError (a RuntimeError) is fatal — so
             # validation/selection errors must not be wrapped.
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # Unify the error message according to the tests
-            raise TrainingError(f"Data transformation error: {e}")
+            raise TrainingError(f"Data transformation error: {e}") from e
