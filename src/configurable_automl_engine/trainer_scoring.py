@@ -67,6 +67,34 @@ class _RepeatScoring:
     repeat_index: int
 
 
+@dataclass(frozen=True)
+class ScoringPlan:
+    """Inputs that define how repeated validation outcomes are aggregated."""
+
+    outcomes: list[_RepeatScoring]
+    X: Any
+    n_samples: int
+    method: str
+    metric: str
+    scorer: Callable[..., Any]
+    add_scorers: dict[str, Callable[..., Any]]
+    pool_primary: bool
+    pool_additive: dict[str, bool]
+    algorithm: str
+    split_aggregation: str
+
+
+@dataclass(frozen=True)
+class _RepeatAggregate:
+    """The contribution of one repeat to the multi-repeat aggregates."""
+
+    repeat_score: float
+    add_scores: dict[str, float]
+    oof_score: float
+    oof_vector: pd.Series | np.ndarray
+    n_valid_pairs: int
+
+
 def score_on_validation_splits(
     X: Any,
     y: Any,
@@ -245,17 +273,19 @@ def score_on_validation_splits(
             algorithm=algorithm,
         )
     return _multi_repeat_scores(
-        outcomes,
-        X,
-        n_samples,
-        method=effective_method,
-        metric=metric,
-        scorer=scorer,
-        add_scorers=add_scorers,
-        pool_primary=pool_primary,
-        pool_additive=pool_additive,
-        algorithm=algorithm,
-        split_aggregation=split_aggregation,
+        ScoringPlan(
+            outcomes=outcomes,
+            X=X,
+            n_samples=n_samples,
+            method=effective_method,
+            metric=metric,
+            scorer=scorer,
+            add_scorers=add_scorers,
+            pool_primary=pool_primary,
+            pool_additive=pool_additive,
+            algorithm=algorithm,
+            split_aggregation=split_aggregation,
+        )
     )
 
 
@@ -442,141 +472,57 @@ def _single_repeat_scores(
     )
 
 
-def _multi_repeat_scores(
-    outcomes: list[_RepeatScoring],
-    X: Any,
-    n_samples: int,
-    *,
-    method: str,
-    metric: str,
-    scorer: Callable[..., Any],
-    add_scorers: dict[str, Callable[..., Any]],
-    pool_primary: bool,
-    pool_additive: dict[str, bool],
-    algorithm: str,
-    split_aggregation: str,
-) -> ValidationScores:
-    """Aggregate the per-repeat estimates and OOF vectors."""
+def _multi_repeat_scores(plan: ScoringPlan) -> ValidationScores:
+    """Aggregate the per-repeat estimates and OOF vectors.
+
+    Args:
+        plan: The scoring inputs and the per-repeat outcomes.
+
+    Returns:
+        ValidationScores: The aggregated validation scores.
+
+    Raises:
+        TrainingError: If no repeat produced a valid primary-metric score.
+    """
+    outcomes = plan.outcomes
     if not any(outcome.fold_raw for outcome in outcomes):
-        detail = (
-            "; ".join(
-                dict.fromkeys(
-                    error for outcome in outcomes for error in outcome.fold_errors
-                )
-            )
-            or "unknown failure"
+        errors = dict.fromkeys(
+            error for outcome in outcomes for error in outcome.fold_errors
         )
+        detail = "; ".join(errors) or "unknown failure"
         raise TrainingError(f"Validation scoring failed for all folds: {detail}")
 
     repeat_scores: list[float] = []
-    add_repeat: dict[str, list[float]] = {m: [] for m in add_scorers}
+    add_repeat: dict[str, list[float]] = {m: [] for m in plan.add_scorers}
     oof_repeat_scores: list[float] = []
     oof_vectors: list[pd.Series | np.ndarray] = []
     n_valid_pairs = 0
 
     for outcome in outcomes:
-        if not outcome.fold_raw:
-            _LOG.warning(
-                "Repeat %d failed: no fold produced a valid score for the "
-                "primary metric; the repeat is excluded from the aggregate.",
-                outcome.repeat_index,
-            )
-        elif outcome.oof_failed:
-            _LOG.warning(
-                "Repeat %d has non-finite OOF predictions on a fold: the "
-                "whole repeat gets the worst score and is excluded from the "
-                "primary, additional and OOF aggregates.",
-                outcome.repeat_index,
-            )
         if not outcome.fold_raw or outcome.oof_failed:
-            repeat_scores.append(float("nan"))
-            for mname in add_scorers:
-                add_repeat[mname].append(float("nan"))
-            oof_repeat_scores.append(_WORST_OOF_SCORE)
-            oof_vectors.append(_align_oof_vector(outcome.oof_pred, X))
-            n_valid_pairs += int(
-                (np.isfinite(outcome.oof_pred) & np.isfinite(outcome.oof_y)).sum()
-            )
-            continue
-
-        raw_mean = _aggregate_raw_values(
-            scorer,
-            outcome.fold_raw,
-            pooled=pool_primary,
-            oof_y=outcome.oof_y,
-            oof_pred=outcome.oof_pred,
-            algorithm=algorithm,
-            phase_name=f"final_fit:{metric}",
-            failure_reason="the pooled value over the OOF buffer cannot be "
-            "computed (no raw scorer metric function or no valid "
-            "pairs)",
-            empty_reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
-        )
-        repeat_scores.append(to_user_value(metric, raw_mean))
-
-        for mname, raw_values in outcome.add_raw.items():
-            if not raw_values:
-                add_repeat[mname].append(float("nan"))
-                continue
-            raw_values_agg = _aggregate_raw_values(
-                add_scorers[mname],
-                raw_values,
-                pooled=pool_additive[mname],
-                oof_y=outcome.oof_y,
-                oof_pred=outcome.oof_pred,
-                algorithm=algorithm,
-                phase_name=f"final_fit:{mname}",
-                failure_reason=f"the pooled value for additional metric "
-                f"'{mname}' cannot be computed (no raw scorer metric "
-                f"function or no valid pairs)",
-                empty_reason=f"the OOF buffer contains no finite "
-                f"(y_true, y_pred) pairs for additional metric "
-                f"'{mname}'",
-            )
-            add_repeat[mname].append(to_user_value(mname, raw_values_agg))
-
-        vector, repeat_oof_score, _coverage = _finalize_oof(
-            outcome.oof_pred,
-            outcome.oof_y,
-            X,
-            n_samples,
-            method=method,
-            emit_warnings=False,
-        )
-        oof_vectors.append(vector)
-        n_valid_pairs += int(
-            (np.isfinite(outcome.oof_pred) & np.isfinite(outcome.oof_y)).sum()
-        )
-        if repeat_oof_score is None:
-            _LOG.warning(
-                "Repeat %d produced no computable RMSE_oof; it is excluded "
-                "from the aggregate.",
-                outcome.repeat_index,
-            )
-            oof_repeat_scores.append(_WORST_OOF_SCORE)
+            aggregate = _failed_repeat_aggregate(outcome, plan)
         else:
-            oof_repeat_scores.append(float(repeat_oof_score))
+            aggregate = _successful_repeat_aggregate(outcome, plan)
+        repeat_scores.append(aggregate.repeat_score)
+        for mname in plan.add_scorers:
+            add_repeat[mname].append(aggregate.add_scores[mname])
+        oof_repeat_scores.append(aggregate.oof_score)
+        oof_vectors.append(aggregate.oof_vector)
+        n_valid_pairs += aggregate.n_valid_pairs
 
-    val_score = aggregate_split_scores(repeat_scores, split_aggregation)
-    finite_repeat_scores = [s for s in repeat_scores if np.isfinite(s)]
-    if finite_repeat_scores:
-        score_mean = float(np.mean(finite_repeat_scores))
-        score_median = float(np.median(finite_repeat_scores))
-        score_std = float(np.std(finite_repeat_scores))
-    else:
-        score_mean = None
-        score_median = None
-        score_std = None
+    val_score = aggregate_split_scores(repeat_scores, plan.split_aggregation)
+    finite_scores = [s for s in repeat_scores if np.isfinite(s)]
+    score_mean = float(np.mean(finite_scores)) if finite_scores else None
+    score_median = float(np.median(finite_scores)) if finite_scores else None
+    score_std = float(np.std(finite_scores)) if finite_scores else None
 
     finite_oof_scores = [s for s in oof_repeat_scores if np.isfinite(s)]
-    if finite_oof_scores:
-        oof_score: float | None = float(
-            aggregate_split_scores(finite_oof_scores, split_aggregation)
-        )
-        oof_score_std: float | None = float(np.std(finite_oof_scores))
-    else:
-        oof_score = None
-        oof_score_std = None
+    oof_score = (
+        float(aggregate_split_scores(finite_oof_scores, plan.split_aggregation))
+        if finite_oof_scores
+        else None
+    )
+    oof_score_std = float(np.std(finite_oof_scores)) if finite_oof_scores else None
     finite_indices = [
         i for i, value in enumerate(oof_repeat_scores) if np.isfinite(value)
     ]
@@ -592,19 +538,19 @@ def _multi_repeat_scores(
         if not finite_values:
             continue
         additional_scores[mname] = float(
-            aggregate_split_scores(values, split_aggregation)
+            aggregate_split_scores(values, plan.split_aggregation)
         )
 
-    total_cells = n_samples * len(outcomes)
+    total_cells = plan.n_samples * len(outcomes)
     oof_coverage = float(n_valid_pairs / total_cells) if total_cells > 0 else 0.0
     _log_multi_repeat_oof(
         n_valid_pairs,
-        n_samples,
+        plan.n_samples,
         len(outcomes),
-        method=method,
+        method=plan.method,
         coverage=oof_coverage,
         oof_score=oof_score,
-        split_aggregation=split_aggregation,
+        split_aggregation=plan.split_aggregation,
     )
     return ValidationScores(
         val_score=float(val_score),
@@ -620,6 +566,129 @@ def _multi_repeat_scores(
         oof_score_std=oof_score_std,
         oof_predictions_by_repeat=oof_vectors,
     )
+
+
+def _failed_repeat_aggregate(
+    outcome: _RepeatScoring, plan: ScoringPlan
+) -> _RepeatAggregate:
+    """Build the aggregate of a repeat excluded from every aggregate.
+
+    Args:
+        outcome: The outcome of the failed repeat.
+        plan: The scoring inputs.
+
+    Returns:
+        _RepeatAggregate: NaN repeat/additional scores, the worst OOF score
+            and the aligned OOF vector.
+    """
+    if not outcome.fold_raw:
+        _LOG.warning(
+            "Repeat %d failed: no fold produced a valid score for the "
+            "primary metric; the repeat is excluded from the aggregate.",
+            outcome.repeat_index,
+        )
+    elif outcome.oof_failed:
+        _LOG.warning(
+            "Repeat %d has non-finite OOF predictions on a fold: the "
+            "whole repeat gets the worst score and is excluded from the "
+            "primary, additional and OOF aggregates.",
+            outcome.repeat_index,
+        )
+    return _RepeatAggregate(
+        repeat_score=float("nan"),
+        add_scores={mname: float("nan") for mname in plan.add_scorers},
+        oof_score=_WORST_OOF_SCORE,
+        oof_vector=_align_oof_vector(outcome.oof_pred, plan.X),
+        n_valid_pairs=_count_valid_pairs(outcome.oof_pred, outcome.oof_y),
+    )
+
+
+def _successful_repeat_aggregate(
+    outcome: _RepeatScoring, plan: ScoringPlan
+) -> _RepeatAggregate:
+    """Build the aggregate of a repeat whose folds were all scored.
+
+    Args:
+        outcome: The outcome of the successful repeat.
+        plan: The scoring inputs.
+
+    Returns:
+        _RepeatAggregate: The user-facing repeat score, the additional
+            scores, the OOF score and the aligned OOF vector.
+    """
+    raw_mean = _aggregate_raw_values(
+        plan.scorer,
+        outcome.fold_raw,
+        pooled=plan.pool_primary,
+        oof_y=outcome.oof_y,
+        oof_pred=outcome.oof_pred,
+        algorithm=plan.algorithm,
+        phase_name=f"final_fit:{plan.metric}",
+        failure_reason="the pooled value over the OOF buffer cannot be "
+        "computed (no raw scorer metric function or no valid "
+        "pairs)",
+        empty_reason="the OOF buffer contains no finite (y_true, y_pred) pairs",
+    )
+    repeat_score = to_user_value(plan.metric, raw_mean)
+
+    add_scores: dict[str, float] = {mname: float("nan") for mname in plan.add_scorers}
+    for mname, raw_values in outcome.add_raw.items():
+        if not raw_values:
+            continue
+        raw_values_agg = _aggregate_raw_values(
+            plan.add_scorers[mname],
+            raw_values,
+            pooled=plan.pool_additive[mname],
+            oof_y=outcome.oof_y,
+            oof_pred=outcome.oof_pred,
+            algorithm=plan.algorithm,
+            phase_name=f"final_fit:{mname}",
+            failure_reason=f"the pooled value for additional metric "
+            f"'{mname}' cannot be computed (no raw scorer metric "
+            f"function or no valid pairs)",
+            empty_reason=f"the OOF buffer contains no finite "
+            f"(y_true, y_pred) pairs for additional metric "
+            f"'{mname}'",
+        )
+        add_scores[mname] = to_user_value(mname, raw_values_agg)
+
+    vector, repeat_oof_score, _coverage = _finalize_oof(
+        outcome.oof_pred,
+        outcome.oof_y,
+        plan.X,
+        plan.n_samples,
+        method=plan.method,
+        emit_warnings=False,
+    )
+    if repeat_oof_score is None:
+        _LOG.warning(
+            "Repeat %d produced no computable RMSE_oof; it is excluded "
+            "from the aggregate.",
+            outcome.repeat_index,
+        )
+        oof_score = _WORST_OOF_SCORE
+    else:
+        oof_score = float(repeat_oof_score)
+    return _RepeatAggregate(
+        repeat_score=repeat_score,
+        add_scores=add_scores,
+        oof_score=oof_score,
+        oof_vector=vector,
+        n_valid_pairs=_count_valid_pairs(outcome.oof_pred, outcome.oof_y),
+    )
+
+
+def _count_valid_pairs(oof_pred: np.ndarray, oof_y: np.ndarray) -> int:
+    """Count the rows with finite OOF predictions and finite targets.
+
+    Args:
+        oof_pred: OOF prediction buffer.
+        oof_y: OOF target buffer.
+
+    Returns:
+        int: The number of finite ``(y_true, y_pred)`` pairs.
+    """
+    return int((np.isfinite(oof_pred) & np.isfinite(oof_y)).sum())
 
 
 def _log_multi_repeat_oof(
