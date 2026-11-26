@@ -192,6 +192,96 @@ def build_preprocessor(
             inconsistent, or ``hashing_n_components``/``target_encoding_smoothing``
             are invalid.
     """
+    _validate_encoding_options(
+        encoding=encoding,
+        high_cardinality_encoding=high_cardinality_encoding,
+        high_cardinality_threshold=high_cardinality_threshold,
+        hashing_n_components=hashing_n_components,
+        target_encoding_smoothing=target_encoding_smoothing,
+    )
+    _validate_imputation_strategy(imputation_strategy)
+
+    scaling_spec = _resolve_scaling_spec(scaling)
+    # Validation of the outlier spec happens through the model (method
+    # discriminator, quantile bounds, extra='forbid'); the string shorthand
+    # is normalized to its object form here. None/'none' — no step at all.
+    exclude_names = _validate_winsorizer_exclude(
+        winsorizer_exclude, feature_names, numerical_features
+    )
+    winsorizer = _build_winsorizer(outliers, outlier_algorithm, exclude_names)
+
+    _validate_feature_names(feature_names, categorical_features, numerical_features)
+
+    if not categorical_features and not numerical_features:
+        logger.warning(
+            "No features matched for preprocessing. Defaulting to passthrough."
+        )
+        return _passthrough_transformer(force_dense_output)
+
+    transformers: list[tuple[str, Any, ColumnNameSelector]] = []
+    if categorical_features:
+        # Name-based selector: for pd.DataFrame the columns are selected by
+        # name on each fit/transform (column order does not matter); for
+        # inputs without names (np.ndarray), a positional fallback by
+        # training order is used. The selector is picklable, so
+        # trainer.save()/pickle work.
+        cat_selector = ColumnNameSelector(feature_names, list(categorical_features))
+        transformers.append(
+            (
+                "cat",
+                _build_categorical_pipeline(
+                    encoding=encoding,
+                    high_cardinality_threshold=high_cardinality_threshold,
+                    high_cardinality_encoding=high_cardinality_encoding,
+                    hashing_n_components=hashing_n_components,
+                    target_encoding_smoothing=target_encoding_smoothing,
+                    target_encoding_fallback=target_encoding_fallback,
+                    random_state=random_state,
+                ),
+                cat_selector,
+            )
+        )
+    if numerical_features:
+        num_selector = ColumnNameSelector(feature_names, list(numerical_features))
+        transformers.append(
+            (
+                "num",
+                _build_numerical_pipeline(
+                    winsorizer=winsorizer,
+                    imputation_strategy=imputation_strategy,
+                    scaling_spec=scaling_spec,
+                    random_state=random_state,
+                    add_indicator=add_indicator,
+                ),
+                num_selector,
+            )
+        )
+
+    return _build_column_transformer(transformers, force_dense_output)
+
+
+def _validate_encoding_options(
+    encoding: EncodingStrategy,
+    high_cardinality_encoding: EncodingStrategy | None,
+    high_cardinality_threshold: int | None,
+    hashing_n_components: int,
+    target_encoding_smoothing: float,
+) -> None:
+    """Validate the categorical encoding options.
+
+    Args:
+        encoding: Categorical encoding strategy.
+        high_cardinality_encoding: Encoding strategy for high-cardinality
+            columns; must be set together with the threshold.
+        high_cardinality_threshold: Cardinality threshold (``>= 0``).
+        hashing_n_components: Number of binary columns for hashing
+            encoding (``>= 1``).
+        target_encoding_smoothing: Smoothing parameter of target encoding
+            (``>= 0``).
+
+    Raises:
+        ValueError: If any encoding option is invalid or inconsistent.
+    """
     if encoding not in _VALID_ENCODING_STRATEGIES:
         raise ValueError(
             f"Unknown encoding strategy: {encoding!r}. "
@@ -223,29 +313,61 @@ def build_preprocessor(
         raise ValueError(
             f"target_encoding_smoothing must be >= 0, got {target_encoding_smoothing}."
         )
+
+
+def _validate_imputation_strategy(imputation_strategy: ImputationStrategy) -> None:
+    """Validate the numerical imputation strategy.
+
+    Args:
+        imputation_strategy: The configured imputation strategy.
+
+    Raises:
+        ValueError: If the strategy is neither ``'mean'`` nor ``'median'``.
+    """
     if imputation_strategy not in ("mean", "median"):
         raise ValueError(
             f"Unknown imputation strategy: {imputation_strategy!r}. "
             "Expected one of ('mean', 'median')."
         )
-    # Validation of the scaling spec happens through the model (type
-    # discriminator, quantile_range bounds, extra='forbid'); the string
-    # shorthand is normalized to its object form here.
+
+
+def _resolve_scaling_spec(scaling: ScalingSpec) -> ObjectScalingSpec:
+    """Normalize and validate the scaling spec.
+
+    Validation happens through the model (type discriminator,
+    ``quantile_range`` bounds, ``extra='forbid'``); the string shorthand is
+    normalized to its object form here.
+
+    Args:
+        scaling: A string shorthand or a scaling spec object.
+
+    Returns:
+        The validated object form of the scaling specification.
+
+    Raises:
+        ValueError: If the scaling spec is invalid.
+    """
     try:
-        scaling_spec = coerce_scaling(scaling)
+        return coerce_scaling(scaling)
     except ValidationError as err:
         raise ValueError(f"Unknown scaling spec: {scaling!r}. {err}") from err
-    # Validation of the outlier spec happens through the model (method
-    # discriminator, quantile bounds, extra='forbid'); the string shorthand
-    # is normalized to its object form here. None/'none' — no step at all.
-    exclude_names = _validate_winsorizer_exclude(
-        winsorizer_exclude, feature_names, numerical_features
-    )
-    winsorizer = _build_winsorizer(outliers, outlier_algorithm, exclude_names)
 
-    # Validate that all requested column names are present in the training set
-    # (feature_names): this is an explicit error, because the name-based
-    # selector will not be able to resolve missing names.
+
+def _validate_feature_names(
+    feature_names: list[str],
+    categorical_features: list[str],
+    numerical_features: list[str],
+) -> None:
+    """Validate that all requested column names are present in the dataset.
+
+    Args:
+        feature_names: Full list of feature names in column order.
+        categorical_features: Names of the categorical columns.
+        numerical_features: Names of the numerical columns.
+
+    Raises:
+        ValueError: If a requested name is missing from ``feature_names``.
+    """
     specified_features = list(categorical_features) + list(numerical_features)
     missing_features = [col for col in specified_features if col not in feature_names]
     if missing_features:
@@ -254,48 +376,32 @@ def build_preprocessor(
             f"Expected columns: {feature_names}."
         )
 
-    # Name-based selectors: for pd.DataFrame the columns are selected by name on
-    # each fit/transform (column order does not matter); for inputs without
-    # names (np.ndarray), a positional fallback by training order is used.
-    # The selectors are picklable classes, so trainer.save()/pickle work.
-    cat_selector = ColumnNameSelector(feature_names, list(categorical_features))
-    num_selector = ColumnNameSelector(feature_names, list(numerical_features))
 
-    if not categorical_features and not numerical_features:
-        logger.warning(
-            "No features matched for preprocessing. Defaulting to passthrough."
-        )
-        return ColumnTransformer(
-            [("bypass", "passthrough", slice(None))],
-            remainder="drop",
-            sparse_threshold=0.0 if force_dense_output else 0.3,
-        )
+def _build_categorical_pipeline(
+    encoding: EncodingStrategy,
+    high_cardinality_threshold: int | None,
+    high_cardinality_encoding: EncodingStrategy | None,
+    hashing_n_components: int,
+    target_encoding_smoothing: float,
+    target_encoding_fallback: float | None,
+    random_state: int | None,
+) -> Pipeline:
+    """Build the categorical preprocessing stage.
 
-    # Numerical feature transformation pipeline: [winsorizer] -> imputation
-    # -> (optionally) a scaler. add_indicator=True adds a binary
-    # missing-value flag for each numerical feature that had missing values
-    # in the training set: the model gets the ability to tell apart "actually
-    # measured value" from "value restored by imputation". With a NoScaling
-    # spec the scaling step is absent — the data is passed to the model
-    # without it (for trees and ensembles). The winsorizer (when enabled via
-    # ``outliers``) comes strictly BEFORE the imputer: the clipping bounds
-    # must be learned from the raw training column, otherwise the mean
-    # imputation sees the outliers and the 0/1 indicator columns get clipped.
-    num_steps: list[tuple[str, Any]] = []
-    if winsorizer is not None:
-        num_steps.append(("winsorizer", winsorizer))
-    num_steps.append(
-        (
-            "imputer",
-            SimpleImputer(strategy=imputation_strategy, add_indicator=add_indicator),
-        )
-    )
-    scaler = _build_scaler(scaling_spec, random_state=random_state)
-    if scaler is not None:
-        num_steps.append(("scaler", scaler))
-    num_transformer = Pipeline(steps=num_steps)
+    Args:
+        encoding: Categorical encoding strategy.
+        high_cardinality_threshold: Cardinality threshold for the split.
+        high_cardinality_encoding: Encoding strategy for high-cardinality
+            columns.
+        hashing_n_components: Number of binary columns for hashing encoding.
+        target_encoding_smoothing: Smoothing parameter of target encoding.
+        target_encoding_fallback: Fallback for unknown target categories.
+        random_state: Seed for deterministic hashing encoding.
 
-    cat_transformer = Pipeline(
+    Returns:
+        The pipeline that converts categorical columns to an encoded matrix.
+    """
+    return Pipeline(
         steps=[
             # Convert categorical columns to a string object array. This makes the
             # pipeline robust to bool columns: SimpleImputer with
@@ -334,12 +440,76 @@ def build_preprocessor(
         ]
     )
 
-    transformers = []
-    if categorical_features:
-        transformers.append(("cat", cat_transformer, cat_selector))
-    if numerical_features:
-        transformers.append(("num", num_transformer, num_selector))
 
+def _build_numerical_pipeline(
+    winsorizer: Winsorizer | None,
+    imputation_strategy: ImputationStrategy,
+    scaling_spec: ObjectScalingSpec,
+    random_state: int | None,
+    add_indicator: bool,
+) -> Pipeline:
+    """Build the numerical preprocessing stage.
+
+    The pipeline order is ``[winsorizer] -> imputer -> [scaler]``. The
+    winsorizer (when enabled) comes strictly BEFORE the imputer: the
+    clipping bounds must be learned from the raw training column, otherwise
+    the mean imputation sees the outliers and the 0/1 indicator columns get
+    clipped.
+
+    Args:
+        winsorizer: The configured winsorizer or ``None`` when disabled.
+        imputation_strategy: ``'mean'`` or ``'median'`` imputation.
+        scaling_spec: The validated scaling specification.
+        random_state: Seed forwarded to the quantile transformer.
+        add_indicator: Whether to add binary missing-value indicators.
+
+    Returns:
+        The pipeline that winsorizes, imputes and scales numerical columns.
+    """
+    num_steps: list[tuple[str, Any]] = []
+    if winsorizer is not None:
+        num_steps.append(("winsorizer", winsorizer))
+    num_steps.append(
+        (
+            "imputer",
+            SimpleImputer(strategy=imputation_strategy, add_indicator=add_indicator),
+        )
+    )
+    scaler = _build_scaler(scaling_spec, random_state=random_state)
+    if scaler is not None:
+        num_steps.append(("scaler", scaler))
+    return Pipeline(steps=num_steps)
+
+
+def _passthrough_transformer(force_dense_output: bool) -> ColumnTransformer:
+    """Build the transformer used when no features matched.
+
+    Args:
+        force_dense_output: Whether to force a dense output matrix.
+
+    Returns:
+        A ``ColumnTransformer`` that passes the input through unchanged.
+    """
+    return ColumnTransformer(
+        [("bypass", "passthrough", slice(None))],
+        remainder="drop",
+        sparse_threshold=0.0 if force_dense_output else 0.3,
+    )
+
+
+def _build_column_transformer(
+    transformers: list[tuple[str, Any, ColumnNameSelector]],
+    force_dense_output: bool,
+) -> ColumnTransformer:
+    """Assemble the final ``ColumnTransformer``.
+
+    Args:
+        transformers: The per-stage ``(name, transformer, selector)`` tuples.
+        force_dense_output: Whether to force a dense output matrix.
+
+    Returns:
+        The assembled ``ColumnTransformer``.
+    """
     return ColumnTransformer(
         transformers=(transformers if transformers else [("pass", "passthrough", [0])]),
         remainder="drop",
