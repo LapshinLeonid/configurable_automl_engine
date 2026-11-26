@@ -1843,9 +1843,10 @@ def test_isotonic_optimize_ndarray_positional(toy_data):
     X = rng.rand(60, 5)
     y = X[:, 1] * 2.0 + rng.randn(60) * 0.05
 
-    # Enough trials for TPE to get past its random startup and find the
-    # informative column regardless of the sampling order of the space (the
-    # direct call uses the engine's order: ``increasing``, ``feature_index``).
+    # Pin the informative trial explicitly: whether TPE happens to sample the
+    # (``increasing=True``, ``feature_index=1``) pair during its random
+    # startup window depends on the Optuna version, so relying on the sampler
+    # would leave a noise column as the best trial on some versions.
     opt_res = hyperopt.optimize(
         "isotonic_regression",
         X,
@@ -1854,6 +1855,7 @@ def test_isotonic_optimize_ndarray_positional(toy_data):
         random_state=42,
         metric="r2",
         validation_strategy="train_test_split",
+        initial_params={"increasing": True, "feature_index": 1},
     )
     assert opt_res is not None
     assert np.isfinite(opt_res.score)
