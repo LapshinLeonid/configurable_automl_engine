@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
+from collections.abc import Callable
 from math import sqrt
 from typing import Any, TypeVar, cast
 
@@ -86,36 +87,158 @@ def _effective_size_train_test(n_total: int, test_size: float) -> int:
     return max(1 if n_total >= 2 else 0, effective_size)
 
 
+_LOW_CONFIDENCE_WARNING = (
+    "Low confidence: High variance expected (N is barely sufficient for P)."
+)
+
+_ValidationRule = Callable[[int, int], dict[str, Any] | None]
+
+
+def _loo_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+    """Return the LOO decision for critically small samples with a good N/P ratio."""
+    if n_samples <= 15 and n_samples >= 2 * n_features:
+        return {"method": "LOO"}
+    return None
+
+
+def _fixed_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+    """Return the fixed 3-4 fold decision for small samples (16 <= N <= 50)."""
+    if not 16 <= n_samples <= 50:
+        return None
+    k = 4 if n_samples >= 20 else 3
+    # Defensive guard: keep k within [1, N]. k > N is impossible for
+    # 16..50 today (k <= 4 < 16 <= N), but the clamp protects against
+    # future range edits, invalid callers and division by zero.
+    k = max(1, min(k, n_samples))
+    warning = (
+        _LOW_CONFIDENCE_WARNING
+        if n_samples < 2 * n_features
+        else "Small dataset: fixed k-fold CV (3-4 folds) to prevent LOO overfitting."
+    )
+    return {
+        "method": "kfold",
+        "k": k,
+        "average_test_size": n_samples // k,
+        "warning": warning,
+    }
+
+
+def _mid_size_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+    """Return the fixed 5-fold decision for mid-size samples with N >= 10*P."""
+    if 200 <= n_samples < 50000 and n_samples >= 10 * n_features:
+        return {
+            "method": "kfold",
+            "k": 5,
+            "average_test_size": round(n_samples / 5, 1),
+        }
+    return None
+
+
+def _standard_split_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+    """Return the standard hold-out decision for large samples (N >= 50000)."""
+    if n_samples < 50000 or n_samples < 10 * n_features:
+        return None
+    min_test = max(30, 2 * n_features)
+    if n_samples - min_test < 50:
+        return None
+    test_percent = min(30, max(1, ceil_div(100 * min_test, n_samples)))
+    n_test = ceil_div(test_percent * n_samples, 100)
+    return {
+        "method": "train_test_split",
+        "regime": "standard",
+        "test_percent": test_percent,
+        "test_size": n_test,
+        "train_size": n_samples - n_test,
+    }
+
+
+def _high_dimensional_split_decision(
+    n_samples: int, n_features: int
+) -> dict[str, Any] | None:
+    """Return the high-dimensional hold-out decision for 5P <= N < 10P."""
+    if n_samples < 50000 or not 5 * n_features <= n_samples < 10 * n_features:
+        return None
+    min_test = max(1000, 2 * n_features)
+    if 100 * min_test > 40 * n_samples:
+        return None
+    test_percent = min(40, max(1, ceil_div(100 * min_test, n_samples)))
+    n_test = ceil_div(test_percent * n_samples, 100)
+    return {
+        "method": "train_test_split",
+        "regime": "high_dimensional",
+        "test_percent": test_percent,
+        "test_size": n_test,
+        "train_size": n_samples - n_test,
+        "warning": (
+            "Low confidence: this regime trades train-set reliability "
+            "(N/P below the standard r_min=10) for compute savings vs k-fold."
+        ),
+    }
+
+
+def _continuous_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any]:
+    """Return the continuous k-fold decision used when no fixed rule matches."""
+    # Micro-samples are protected from k > N.
+    if n_samples <= 5:
+        k = n_samples
+    else:
+        # Compute budget constraint (cap folds to keep each fold large enough).
+        budget_k = max(5, min(10, round(sqrt(n_samples))))
+        # Statistical reliability constraint (min rows per class ~ max(20, 2*P)).
+        reliability_k = max(2, n_samples // max(20, 2 * n_features))
+        k = max(2, min(budget_k, reliability_k))
+
+    warning = _LOW_CONFIDENCE_WARNING if k == 2 or n_samples < 2 * n_features else None
+
+    # Relabel to LOO if k == N (preserving the warning).
+    if k == n_samples:
+        result: dict[str, Any] = {
+            "method": "LOO",
+            "note": "k-fold with k=N is equivalent to LOO",
+        }
+        if warning:
+            result["warning"] = warning
+        return result
+
+    result = {
+        "method": "kfold",
+        "k": k,
+        "average_test_size": round(n_samples / k, 1),
+    }
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+#: Ordered decision rules: the first rule returning a decision wins. Keeping
+#: the branches as data makes the order explicit and each rule independently
+#: testable.
+_VALIDATION_RULES: tuple[_ValidationRule, ...] = (
+    _loo_decision,
+    _fixed_kfold_decision,
+    _mid_size_kfold_decision,
+    _standard_split_decision,
+    _high_dimensional_split_decision,
+)
+
+
 def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     """Deterministically select a validation method for regression.
 
     The heuristic is fully deterministic given ``(N, P)`` so every caller
-    that resolves 'auto' arrives at the same decision. The decision branches
-    (applied in order):
+    that resolves 'auto' arrives at the same decision. The ordered rules are:
 
     1. **LOO** for critically small samples (N <= 15) with a good N/P ratio
        (N >= 2*P): leave-one-out is the only affordable way to get per-point
        estimates when there are too few rows for k-fold.
     2. **Fixed k-fold** for small samples (16 <= N <= 50): each fold tests the
        model on a slice of several distinct points (6-8 rows), which is more
-       reliable than LOO — LOO would measure the ability to repeat the global
-       trend instead of generalizing to new point slices. Uses k=4 for N >= 20
-       and k=3 otherwise. A low-confidence warning is attached when N < 2*P.
+       reliable than LOO. Uses k=4 for N >= 20 and k=3 otherwise. A
+       low-confidence warning is attached when N < 2*P.
     3. **Fixed 5-fold CV** for mid-size samples (200 <= N < 50000) with a good
-       N/P ratio (N >= 10*P): a single hold-out of max(30, 2*P) rows compares
-       models on too few points — on 30 rows the RMSE spread is
-       about +/-13% while the confidence corridor is delta=0.15, so the winner is
-       selected almost at random and the Sanity Gate OOF vector covers only
-       ~3% of the data. 5-fold CV scores every row exactly once (100% OOF
-       coverage) and stays affordable up to a few tens of thousands of rows.
+       N/P ratio (N >= 10*P): 5-fold CV scores every row exactly once.
     4. **Standard train-test split** for large samples (N >= 50000) with a
-       good N/P ratio: at this scale the smallest hold-out (max(30, 2*P)
-       rows, ~1-6% of the data) is already large enough for a reliable
-       comparison, while 5-fold CV would cost 5x compute for no benefit.
-       Note the deliberate discrete jump at N=50000: below the threshold 5-fold
-       CV scores 100% of rows; from the threshold on a single hold-out scores
-       ~1-6% — the hold-out floor scales with N, so the comparison stays
-       meaningful while the compute cost drops 5x.
+       good N/P ratio.
     5. **High-dimensional train-test split** for N >= 50000 when P is very
        large relative to N (5P <= N < 10P).
     6. **Continuous k-fold heuristic** for everything else; k == N is relabeled
@@ -144,135 +267,11 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
         raise ValueError(f"n_features (P) must be > 0, got {n_features}")
     if n_samples < 2:
         return {"method": "invalid", "reason": "N < 2: insufficient data"}
-
-    # 1. LOO for critically small samples (up to 15 rows) with a good N/P ratio.
-    if n_samples <= 15 and n_samples >= 2 * n_features:
-        return {"method": "LOO"}
-
-    # 2. Small samples 16 <= N <= 50: a fixed k-fold (3-4 folds) is more
-    # reliable than LOO. Each fold tests the model on a slice of several
-    # distinct points instead of a single one.
-    if 16 <= n_samples <= 50:
-        k = 4 if n_samples >= 20 else 3
-        # Defensive guard: keep k within [1, N]. k > N is impossible for
-        # 16..50 today (k <= 4 < 16 <= N), but the clamp protects against
-        # future range edits, invalid callers and division by zero.
-        k = max(1, min(k, n_samples))
-        fixed_kfold_warning = (
-            "Small dataset: fixed k-fold CV (3-4 folds) to prevent LOO overfitting."
-        )
-        # Uniform low-confidence flag with the other branches: N barely
-        # sufficient for P (N < 2*P) takes precedence over the generic note.
-        if n_samples < 2 * n_features:
-            fixed_kfold_warning = (
-                "Low confidence: High variance expected (N is barely sufficient for P)."
-            )
-        return {
-            "method": "kfold",
-            "k": k,
-            "average_test_size": n_samples // k,
-            "warning": fixed_kfold_warning,
-        }
-
-    # 3. Mid-size samples with a good N/P ratio (200 <= N < 50000, N >= 10*P):
-    # fixed 5-fold CV. A single hold-out of max(30, 2*P) rows would compare
-    # models on far too few points: on 30 rows the RMSE spread is about ±13%
-    # against a confidence corridor of δ=0.15, so the winner would be chosen
-    # almost at random, and the Sanity Gate OOF vector would cover only ~3%
-    # of the data. 5-fold CV scores every row exactly once (100% OOF coverage)
-    # and is affordable up to a few tens of thousands of rows.
-    if 200 <= n_samples < 50000 and n_samples >= 10 * n_features:
-        return {
-            "method": "kfold",
-            "k": 5,
-            "average_test_size": round(n_samples / 5, 1),
-        }
-
-    # 4. Standard train-test split for large samples (N >= 50000).
-    # At this scale the minimum test set — the larger of 30 rows or 2*P
-    # features (enough to estimate the target distribution) — is already a
-    # statistically reliable slice (~1-6% of the data), and 5-fold CV would
-    # cost 5x compute for no benefit. The test fraction is capped at 30%.
-    min_test_standard = max(30, 2 * n_features)
-    if (
-        n_samples >= 50000
-        and n_samples >= 10 * n_features
-        and n_samples - min_test_standard >= 50
-    ):
-        test_percent = min(30, max(1, ceil_div(100 * min_test_standard, n_samples)))
-        n_test = ceil_div(test_percent * n_samples, 100)
-        return {
-            "method": "train_test_split",
-            "regime": "standard",
-            "test_percent": test_percent,
-            "test_size": n_test,
-            "train_size": n_samples - n_test,
-        }
-
-    # 5. High-dimensional train-test split: when P is very large relative to N
-    # (5P <= N < 10P), k-fold becomes too costly, so a single split is preferred.
-    min_test_high_dimensional = max(1000, 2 * n_features)
-    if (
-        n_samples >= 50000
-        and n_samples >= 5 * n_features
-        and n_samples < 10 * n_features
-        and 100 * min_test_high_dimensional <= 40 * n_samples
-    ):
-        test_percent = min(
-            40, max(1, ceil_div(100 * min_test_high_dimensional, n_samples))
-        )
-        n_test = ceil_div(test_percent * n_samples, 100)
-        return {
-            "method": "train_test_split",
-            "regime": "high_dimensional",
-            "test_percent": test_percent,
-            "test_size": n_test,
-            "train_size": n_samples - n_test,
-            "warning": (
-                "Low confidence: this regime trades train-set reliability "
-                "(N/P below the standard r_min=10) for compute savings vs k-fold."
-            ),
-        }
-
-    # 6. K-Fold (continuous heuristic).
-    # Pre-check for micro-samples (protection against k > N).
-    if n_samples <= 5:
-        k = n_samples
-    else:
-        # Compute budget constraint (cap folds to keep each fold large enough).
-        budget_k = max(5, min(10, round(sqrt(n_samples))))
-        # Statistical reliability constraint (min rows per class ~ max(20, 2*P)).
-        reliability_k = max(2, n_samples // max(20, 2 * n_features))
-        # Take the minimum to satisfy both constraints.
-        k = max(2, min(budget_k, reliability_k))
-
-    # Unified confidence flag (Low confidence): N barely sufficient for P.
-    low_confidence_ratio = n_samples < 2 * n_features
-    warning = None
-    if k == 2 or low_confidence_ratio:
-        warning = (
-            "Low confidence: High variance expected (N is barely sufficient for P)."
-        )
-
-    # Relabel to LOO if k == N (preserving the warning).
-    if k == n_samples:
-        result: dict[str, Any] = {
-            "method": "LOO",
-            "note": "k-fold with k=N is equivalent to LOO",
-        }
-        if warning:
-            result["warning"] = warning
-        return result
-
-    result = {
-        "method": "kfold",
-        "k": k,
-        "average_test_size": round(n_samples / k, 1),
-    }
-    if warning:
-        result["warning"] = warning
-
-    return result
+    for rule in _VALIDATION_RULES:
+        decision = rule(n_samples, n_features)
+        if decision is not None:
+            return decision
+    return _continuous_kfold_decision(n_samples, n_features)
 
 
 def effective_train_size_from_decision(n_total: int, decision: dict[str, Any]) -> int:

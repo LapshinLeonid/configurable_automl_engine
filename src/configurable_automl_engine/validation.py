@@ -36,7 +36,7 @@ Implementation features:
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from typing import Any, Literal, overload
 
 import numpy as np
@@ -429,6 +429,8 @@ Split = tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
 SplitWithIndices = tuple[
     np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray
 ]
+Pair = tuple[np.ndarray, np.ndarray]
+PairSet = Iterable[Pair]
 
 
 @overload
@@ -514,15 +516,7 @@ def iter_splits(
         ValueError: If ``n_repeats`` is not a positive integer.
     """
     method_str = norm_val_method(method)
-
-    # 1. Input data validation
-    if isinstance(X, pd.DataFrame):
-        validate_df_not_empty(X)
-    elif len(X) == 0:
-        raise InvalidDataError("Input array X is empty.")
-    if y is not None and len(X) != len(y):
-        raise InvalidDataError(f"X and y length mismatch: {len(X)} != {len(y)}")
-    # 2. Obtain the final strategy (taking into account a possible fallback)
+    _validate_split_inputs(X, y)
     n_features = X.shape[1] if method_str == "auto" else None
     final_method, cv, decision = make_cv(
         len(X),
@@ -533,39 +527,83 @@ def iter_splits(
         n_features=n_features,
         n_repeats=n_repeats,
     )
-    # 2a. Resolve the repeats against the RESOLVED method: 'auto' can land on
-    # LOO (a micro-sample), and LOO folds are deterministic — repeating them
-    # would only multiply the computation by identical splits. The guard is
-    # applied here (the single point where the resolved method is known) so
-    # it covers every strategy resolution path, explicit or 'auto'.
     repeats = resolved_n_repeats(n_repeats, final_method)
-    # 2b. The n_samples sanity check: a repeat cycle of the
-    # k-fold strategy evaluates every row R * n_splits times — on a tiny
-    # sample this is both a wasted budget and a statistics-free estimate.
-    # The config rule cannot know n_samples, so the check lives at the
-    # single split point (a WARNING: the splits are still produced).
-    if repeats > 1 and final_method == "k_fold":
-        n_splits_expected = int(cv.get_n_splits(X)) if cv is not None else n_folds
-        if len(X) < repeats * n_splits_expected:
-            log.warning(
-                "n_samples=%d is smaller than n_folds * n_repeats (%d x %d = "
-                "%d) for the repeated k-fold validation: every row would be "
-                "validated more times than there are rows; the repeats do "
-                "not add independent evidence on this sample size.",
-                len(X),
-                n_splits_expected,
-                repeats,
-                repeats * n_splits_expected,
+    _warn_about_repeat_sample_size(X, final_method, cv, n_folds, repeats)
+    pair_sets = _resolve_pair_sets(
+        X,
+        final_method=final_method,
+        cv=cv,
+        decision=decision,
+        method_str=method_str,
+        test_size=test_size,
+        random_state=random_state,
+        repeats=repeats,
+    )
+    if pair_sets is None:
+        return
+    for repeat_idx, repeat_pairs in enumerate(pair_sets):
+        for train_idx, test_idx in repeat_pairs:
+            yield _make_split(
+                X,
+                y,
+                train_idx,
+                test_idx,
+                include_indices=include_indices,
+                repeats=repeats,
+                repeat_idx=repeat_idx,
             )
-    # 3. Generate the splits: one generator of (train_idx, test_idx) pair
-    # sets per repeat, one loop that yields the subsets. The repeat wrapper
-    # is built into this single point of extension: with repeats = 1 the
-    # seed is exactly ``random_state`` and the output is the plain
-    # single-split one (untagged tuples).
+
+
+def _validate_split_inputs(
+    X: np.ndarray | pd.DataFrame, y: np.ndarray | pd.Series | None
+) -> None:
+    """Validate that X is non-empty and X/y lengths match."""
+    if isinstance(X, pd.DataFrame):
+        validate_df_not_empty(X)
+    elif len(X) == 0:
+        raise InvalidDataError("Input array X is empty.")
+    if y is not None and len(X) != len(y):
+        raise InvalidDataError(f"X and y length mismatch: {len(X)} != {len(y)}")
+
+
+def _warn_about_repeat_sample_size(
+    X: np.ndarray | pd.DataFrame,
+    final_method: str,
+    cv: model_selection.BaseCrossValidator | None,
+    n_folds: int,
+    repeats: int,
+) -> None:
+    """Warn when repeated k-fold validates rows more often than they exist."""
+    if repeats <= 1 or final_method != "k_fold":
+        return
+    n_splits_expected = int(cv.get_n_splits(X)) if cv is not None else n_folds
+    if len(X) < repeats * n_splits_expected:
+        log.warning(
+            "n_samples=%d is smaller than n_folds * n_repeats (%d x %d = "
+            "%d) for the repeated k-fold validation: every row would be "
+            "validated more times than there are rows; the repeats do "
+            "not add independent evidence on this sample size.",
+            len(X),
+            n_splits_expected,
+            repeats,
+            repeats * n_splits_expected,
+        )
+
+
+def _resolve_pair_sets(
+    X: np.ndarray | pd.DataFrame,
+    *,
+    final_method: str,
+    cv: model_selection.BaseCrossValidator | None,
+    decision: dict[str, Any] | None,
+    method_str: str,
+    test_size: float,
+    random_state: int | None,
+    repeats: int,
+) -> list[PairSet] | None:
+    """Build the per-repeat index pair sets for the resolved strategy."""
     if final_method == "train_test_split":
-        # Each repeat is its own pair set (a single hold-out split per
-        # repeat, seed ``random_state + r``).
-        pair_sets = _holdout_pairs(
+        return _holdout_pairs(
             len(X),
             test_size=test_size,
             method_str=method_str,
@@ -573,52 +611,64 @@ def iter_splits(
             random_state=random_state,
             n_repeats=repeats,
         )
-    elif final_method in ("k_fold", "loo"):
-        if cv is None:
-            raise ValidationError(
-                f"Critical error: CV object is not"
-                f" initialized for strategy '{final_method}'"
-            )
-        # Combine the logic for all BaseCrossValidator objects (KFold,
-        # LeaveOneOut). Each repeat re-draws the folds with its deterministic
-        # seed ``repeated_seed(random_state, r)`` (wrapped into the sklearn
-        # seed range); the fold count (incl. the 'auto' fallback k) is taken
-        # from the base cv object so all repeats share the resolved
-        # structure. LOO has deterministic folds — one cv object (the
-        # repeats were already resolved away in ``resolved_n_repeats``).
-        n_splits = int(cv.get_n_splits(X))
-        pair_sets = []
-        for r in range(repeats):
-            seed = repeated_seed(random_state, r)
-            cv_r = (
-                KFold(n_splits=n_splits, shuffle=True, random_state=seed)
-                if final_method == "k_fold"
-                else cv
-            )
-            pair_sets.append(cv_r.split(X))
+    if final_method not in ("k_fold", "loo"):
+        return None
+    if cv is None:
+        raise ValidationError(
+            f"Critical error: CV object is not"
+            f" initialized for strategy '{final_method}'"
+        )
+    return _cv_pair_sets(X, cv, final_method, random_state, repeats)
+
+
+def _cv_pair_sets(
+    X: np.ndarray | pd.DataFrame,
+    cv: model_selection.BaseCrossValidator,
+    final_method: str,
+    random_state: int | None,
+    repeats: int,
+) -> list[PairSet]:
+    """Build one split generator per repeat for a sklearn CV object."""
+    n_splits = int(cv.get_n_splits(X))
+    pair_sets: list[PairSet] = []
+    for r in range(repeats):
+        seed = repeated_seed(random_state, r)
+        cv_r = (
+            KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            if final_method == "k_fold"
+            else cv
+        )
+        pair_sets.append(cv_r.split(X))
+    return pair_sets
+
+
+def _make_split(
+    X: np.ndarray | pd.DataFrame,
+    y: np.ndarray | pd.Series | None,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    *,
+    include_indices: bool,
+    repeats: int,
+    repeat_idx: int,
+) -> Split | SplitWithIndices:
+    """Materialize the train/validation subsets for one index pair."""
+    x_tr, x_te = _take(X, train_idx), _take(X, test_idx)
+    y_tr = None if y is None else _take(y, train_idx)
+    y_te = None if y is None else _take(y, test_idx)
+    if include_indices:
+        split: Split | SplitWithIndices = (
+            x_tr,
+            x_te,
+            y_tr,
+            y_te,
+            np.asarray(test_idx),
+        )
     else:
-        return
-    for repeat_idx, repeat_pairs in enumerate(pair_sets):
-        for train_idx, test_idx in repeat_pairs:
-            x_tr, x_te = _take(X, train_idx), _take(X, test_idx)
-            # y may be None: then y_train and y_val are None as well
-            y_tr = None if y is None else _take(y, train_idx)
-            y_te = None if y is None else _take(y, test_idx)
-            if include_indices:
-                split: Split | SplitWithIndices = (
-                    x_tr,
-                    x_te,
-                    y_tr,
-                    y_te,
-                    np.asarray(test_idx),
-                )
-            else:
-                split = (x_tr, x_te, y_tr, y_te)
-            # The repeat tag: attribute-only (the tuple shape is unchanged),
-            # so the unpacking consumers and the OOF channel keep their API.
-            if repeats > 1:
-                split = with_repeat_index(split, repeat_idx)
-            yield split
+        split = (x_tr, x_te, y_tr, y_te)
+    if repeats > 1:
+        split = with_repeat_index(split, repeat_idx)
+    return split
 
 
 def _take(obj: Any, idx: np.ndarray) -> Any:
@@ -645,7 +695,7 @@ def _holdout_pairs(
     decision: dict[str, Any] | None,
     random_state: int | None,
     n_repeats: int = 1,
-) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+) -> list[PairSet]:
     """Return the pair sets of the hold-out split(s).
 
     Each element of the returned list is the pair set of one repeat: a list
@@ -690,7 +740,7 @@ def _holdout_pairs(
         )
         # Uniform pair-set structure: one repeat = one set with one pair.
         return [[(train_idx, test_idx)]]
-    pair_sets: list[list[tuple[np.ndarray, np.ndarray]]] = []
+    pair_sets: list[PairSet] = []
     seen: list[tuple[bytes, bytes]] = []
     for r in range(n_repeats):
         train_idx, test_idx = train_test_split(
