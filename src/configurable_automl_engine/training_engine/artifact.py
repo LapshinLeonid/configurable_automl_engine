@@ -354,6 +354,78 @@ def _oof_score_in_user_metric(
     return _oof_score_with_std_in_user_metric(metric_user, trainer, y)[0]
 
 
+def _rmse_user_repeat_values(metric_user: str, oof_repeat_scores: Any) -> list[float]:
+    """Convert the finite RMSE repeat scores into user-semantic values."""
+    if not isinstance(oof_repeat_scores, (list, tuple)):
+        return []
+    return [
+        float(to_user_value(metric_user, -float(value)))
+        for value in oof_repeat_scores
+        if np.isfinite(value) and float(value) > WORST_SCORE_THRESHOLD
+    ]
+
+
+def _rmse_oof_score_with_std_in_user_metric(
+    metric_user: str,
+    oof_aggregate: Any,
+    oof_repeat_scores: Any,
+) -> tuple[float | None, float | None]:
+    """Build the RMSE-family OOF aggregate and its per-repeat spread."""
+    if oof_aggregate is None or not np.isfinite(oof_aggregate):
+        return None, None
+    user_repeats = _rmse_user_repeat_values(metric_user, oof_repeat_scores)
+    std = float(np.std(user_repeats)) if len(user_repeats) > 1 else None
+    return to_user_value(metric_user, -float(oof_aggregate)), std
+
+
+def _select_oof_repeat_vectors(
+    trainer: Any, oof_repeat_scores: Any
+) -> list[Any] | None:
+    """Select the per-repeat OOF vectors aligned with the finite repeat scores."""
+    repeat_vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
+    if isinstance(repeat_vectors, (list, tuple)) and len(repeat_vectors) > 1:
+        vectors: list[Any] = list(repeat_vectors)
+        if isinstance(oof_repeat_scores, (list, tuple)) and len(
+            oof_repeat_scores
+        ) == len(vectors):
+            vectors = [
+                vector
+                for vector, repeat_score in zip(vectors, oof_repeat_scores, strict=True)
+                if np.isfinite(repeat_score)
+            ]
+        return vectors
+    single_vector = getattr(trainer, "oof_predictions_", None)
+    if single_vector is None:
+        return None
+    return [single_vector]
+
+
+def _raw_and_user_oof_scores(
+    metric_user: str,
+    y: pd.Series,
+    vectors: list[Any],
+) -> tuple[list[float], list[float]] | None:
+    """Score every OOF vector with the pooled scorer in raw and user semantics."""
+    try:
+        oof_true = np.asarray(y, dtype=float).reshape(-1)
+        scorer = get_scorer_object(metric_user, global_y=oof_true)
+    except Exception as err:  # noqa: BLE001 — a bad metric must not crash the report
+        _LOG.warning(
+            "OOF score could not be computed for metric '%s': %s", metric_user, err
+        )
+        return None
+
+    raw_scores: list[float] = []
+    for vector in vectors:
+        raw = _pooled_raw_oof_metric(scorer, oof_true, vector)
+        if raw is not None and np.isfinite(raw):
+            raw_scores.append(raw)
+    if not raw_scores:
+        return None
+    user_scores = [float(to_user_value(metric_user, raw)) for raw in raw_scores]
+    return raw_scores, user_scores
+
+
 def _oof_score_with_std_in_user_metric(
     metric_user: str,
     trainer: Any,
@@ -390,60 +462,21 @@ def _oof_score_with_std_in_user_metric(
     oof_aggregate = getattr(trainer, "oof_score_", None)
     oof_repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
     if is_rmse:
-        if oof_aggregate is None or not np.isfinite(oof_aggregate):
-            return None, None
-        user_repeats = (
-            [
-                float(to_user_value(metric_user, -float(value)))
-                for value in oof_repeat_scores
-                if np.isfinite(value) and float(value) > WORST_SCORE_THRESHOLD
-            ]
-            if isinstance(oof_repeat_scores, (list, tuple))
-            else []
+        return _rmse_oof_score_with_std_in_user_metric(
+            metric_user, oof_aggregate, oof_repeat_scores
         )
-        std = float(np.std(user_repeats)) if len(user_repeats) > 1 else None
-        return to_user_value(metric_user, -float(oof_aggregate)), std
 
     if isinstance(oof_repeat_scores, (list, tuple)) and not any(
         np.isfinite(value) for value in oof_repeat_scores
     ):
         return None, None
-    repeat_vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
-    if isinstance(repeat_vectors, (list, tuple)) and len(repeat_vectors) > 1:
-        vectors: list[Any] = list(repeat_vectors)
-        if isinstance(oof_repeat_scores, (list, tuple)) and len(
-            oof_repeat_scores
-        ) == len(vectors):
-            vectors = [
-                vector
-                for vector, repeat_score in zip(vectors, oof_repeat_scores, strict=True)
-                if np.isfinite(repeat_score)
-            ]
-    else:
-        single_vector = getattr(trainer, "oof_predictions_", None)
-        if single_vector is None:
-            return None, None
-        vectors = [single_vector]
-
-    try:
-        oof_true = np.asarray(y, dtype=float).reshape(-1)
-        scorer = get_scorer_object(
-            metric_user, global_y=np.asarray(y, dtype=float).reshape(-1)
-        )
-    except Exception as err:  # noqa: BLE001 — a bad metric must not crash the report
-        _LOG.warning(
-            "OOF score could not be computed for metric '%s': %s", metric_user, err
-        )
+    vectors = _select_oof_repeat_vectors(trainer, oof_repeat_scores)
+    if vectors is None:
         return None, None
-
-    raw_scores: list[float] = []
-    for vector in vectors:
-        raw = _pooled_raw_oof_metric(scorer, oof_true, vector)
-        if raw is not None and np.isfinite(raw):
-            raw_scores.append(raw)
-    if not raw_scores:
+    computed = _raw_and_user_oof_scores(metric_user, y, vectors)
+    if computed is None:
         return None, None
-    user_scores = [float(to_user_value(metric_user, raw)) for raw in raw_scores]
+    raw_scores, user_scores = computed
     if len(vectors) > 1:
         raw = float(
             aggregate_split_scores(

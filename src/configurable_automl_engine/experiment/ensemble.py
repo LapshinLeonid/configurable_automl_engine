@@ -396,6 +396,76 @@ def _comparison_repeat_rmse(
     return ensemble_rmse, winner_rmse
 
 
+def _normalized_ensemble_weights(
+    weights: Mapping[str, float],
+) -> tuple[list[str], dict[str, float]] | None:
+    """Validate and normalize the member weights, or return ``None``."""
+    names = list(weights)
+    try:
+        weight_values = [float(weights[name]) for name in names]
+    except (TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) or value <= 0.0 for value in weight_values):
+        return None
+    total_weight = sum(weight_values)
+    if not math.isfinite(total_weight) or total_weight <= 0.0:
+        return None
+    normalized = {
+        name: weight / total_weight
+        for name, weight in zip(names, weight_values, strict=True)
+    }
+    return names, normalized
+
+
+def _comparison_repeat_scores(
+    *,
+    y: np.ndarray,
+    names: list[str],
+    normalized: Mapping[str, float],
+    member_predictions_by_repeat: Sequence[Mapping[str, Any]],
+    winner_predictions_by_repeat: Sequence[Any],
+) -> tuple[list[float], list[float]] | None:
+    """Compute the per-repeat ensemble and winner RMSE lists."""
+    ensemble_repeat_rmse: list[float] = []
+    winner_repeat_rmse: list[float] = []
+    for repeat_index, repeat_predictions in enumerate(member_predictions_by_repeat):
+        repeat_scores = _comparison_repeat_rmse(
+            y=y,
+            names=names,
+            normalized_weights=normalized,
+            repeat_predictions=repeat_predictions,
+            winner_vector=winner_predictions_by_repeat[repeat_index],
+        )
+        if repeat_scores is None:
+            return None
+        ensemble_repeat_rmse.append(repeat_scores[0])
+        winner_repeat_rmse.append(repeat_scores[1])
+    return ensemble_repeat_rmse, winner_repeat_rmse
+
+
+def _comparison_verdict(winner_rmse: float, ensemble_rmse: float) -> str:
+    """Return the comparison verdict from the two aggregated RMSE values."""
+    if winner_rmse < ensemble_rmse:
+        return "winner"
+    if ensemble_rmse < winner_rmse:
+        return "ensemble"
+    return "tie"
+
+
+def _count_used_repeats(
+    ensemble_repeat_rmse: Sequence[float],
+    winner_repeat_rmse: Sequence[float],
+) -> int:
+    """Count the repeats whose pair of RMSE values is finite."""
+    return sum(
+        1
+        for ensemble_value, winner_value in zip(
+            ensemble_repeat_rmse, winner_repeat_rmse, strict=True
+        )
+        if math.isfinite(ensemble_value) and math.isfinite(winner_value)
+    )
+
+
 def winner_vs_ensemble_comparison(
     *,
     y_true: Any,
@@ -448,39 +518,25 @@ def winner_vs_ensemble_comparison(
         return None
     if len(winner_predictions_by_repeat) != len(member_predictions_by_repeat):
         return None
-    names = list(weights)
-    try:
-        weight_values = [float(weights[name]) for name in names]
-    except (TypeError, ValueError):
+    normalized_members = _normalized_ensemble_weights(weights)
+    if normalized_members is None:
         return None
-    if any(not math.isfinite(value) or value <= 0.0 for value in weight_values):
-        return None
-    total_weight = sum(weight_values)
-    if not math.isfinite(total_weight) or total_weight <= 0.0:
-        return None
-    normalized = {
-        name: weight / total_weight
-        for name, weight in zip(names, weight_values, strict=True)
-    }
+    names, normalized = normalized_members
 
     y = _finite_vector(y_true)
     if y is None:
         return None
 
-    ensemble_repeat_rmse: list[float] = []
-    winner_repeat_rmse: list[float] = []
-    for repeat_index, repeat_predictions in enumerate(member_predictions_by_repeat):
-        repeat_scores = _comparison_repeat_rmse(
-            y=y,
-            names=names,
-            normalized_weights=normalized,
-            repeat_predictions=repeat_predictions,
-            winner_vector=winner_predictions_by_repeat[repeat_index],
-        )
-        if repeat_scores is None:
-            return None
-        ensemble_repeat_rmse.append(repeat_scores[0])
-        winner_repeat_rmse.append(repeat_scores[1])
+    repeat_scores = _comparison_repeat_scores(
+        y=y,
+        names=names,
+        normalized=normalized,
+        member_predictions_by_repeat=member_predictions_by_repeat,
+        winner_predictions_by_repeat=winner_predictions_by_repeat,
+    )
+    if repeat_scores is None:
+        return None
+    ensemble_repeat_rmse, winner_repeat_rmse = repeat_scores
 
     ensemble_rmse = float(
         aggregate_split_scores(ensemble_repeat_rmse, split_aggregation)
@@ -488,29 +544,16 @@ def winner_vs_ensemble_comparison(
     winner_rmse = float(aggregate_split_scores(winner_repeat_rmse, split_aggregation))
     if not math.isfinite(ensemble_rmse) or not math.isfinite(winner_rmse):
         return None
-    if winner_rmse < ensemble_rmse:
-        better = "winner"
-    elif ensemble_rmse < winner_rmse:
-        better = "ensemble"
-    else:
-        better = "tie"
-    n_repeats_used = sum(
-        1
-        for ensemble_value, winner_value in zip(
-            ensemble_repeat_rmse, winner_repeat_rmse, strict=True
-        )
-        if math.isfinite(ensemble_value) and math.isfinite(winner_value)
-    )
     return {
         "metric": "rmse",
         "n_repeats": len(member_predictions_by_repeat),
-        "n_repeats_used": n_repeats_used,
+        "n_repeats_used": _count_used_repeats(ensemble_repeat_rmse, winner_repeat_rmse),
         "split_aggregation": split_aggregation,
         "winner_algorithm": winner_algorithm,
         "winner_rmse": winner_rmse,
         "ensemble_rmse": ensemble_rmse,
         "delta_rmse": ensemble_rmse - winner_rmse,
-        "better": better,
+        "better": _comparison_verdict(winner_rmse, ensemble_rmse),
         "winner_better": winner_rmse < ensemble_rmse,
         "winner_repeat_rmse": [_finite_or_none(value) for value in winner_repeat_rmse],
         "ensemble_repeat_rmse": [
