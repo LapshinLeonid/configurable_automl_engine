@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -403,6 +404,32 @@ def test_feature_selection_auto_check_small_data(caplog) -> None:
         )
     assert result is False
     assert "auto-check skipped" in caplog.text
+
+
+def test_feature_selection_auto_check_returns_python_bool() -> None:
+    """A numpy comparison result is converted to a real Python ``bool``."""
+    X, y = _frame(n=40)
+    features = _features(X)
+
+    def numpy_scorer(model: Any, X_val: Any, y_val: Any) -> np.float64:
+        if "feature_selector" in model.named_steps:
+            return np.float64(0.75)
+        return np.float64(0.5)
+
+    with patch(
+        "configurable_automl_engine.trainer_feature_selection.get_scorer_object",
+        return_value=numpy_scorer,
+    ):
+        result = _run_feature_selection_auto_check(
+            features.X,
+            y,
+            _make_steps(_preprocessor(features), Ridge()),
+            metric="rmse",
+            random_state=0,
+        )
+
+    assert result is True
+    assert isinstance(result, bool)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

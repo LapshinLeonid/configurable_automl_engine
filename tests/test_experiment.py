@@ -11,6 +11,8 @@ Covered scenarios (positive / negative / boundary):
 - P4: a repeated ``run()`` produces a new ``run_id`` with a
   ``RuntimeWarning`` and keeps the previous run in the store history;
 - P5: a custom reporter chain replaces the default one;
+- P6: a degrading custom reporter's ``None`` artifact propagates through
+  the facade;
 - N1: calling the result accessors before ``run()`` → a clear state
   error (``ExperimentNotRunError``, a ``RuntimeError`` subclass);
 - N2: invalid config type / empty data / missing target → the legacy
@@ -55,6 +57,8 @@ from configurable_automl_engine.experiment.experiment import (
 from configurable_automl_engine.experiment.reporting import (
     JSONReporter,
     MarkdownReporter,
+    Reporter,
+    ReporterArtifact,
 )
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.experiment.store import ExperimentStore
@@ -267,6 +271,21 @@ def test_p5_custom_reporter_chain(tmp_path: Path) -> None:
     composite_artifacts = experiment.report(reporter=JSONReporter(json_path))
     assert composite_artifacts == json_path
     assert json_path.exists()
+
+
+def test_p6_custom_reporter_may_return_none(tmp_path: Path) -> None:
+    """P6: a documented degrading reporter returns ``None`` through the
+    facade instead of raising."""
+    experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
+    experiment.run()
+
+    class _DegradingReporter(Reporter[ReporterArtifact | None]):
+        """The MLflow-style "reported-failed" policy: ``None`` artifact."""
+
+        def report(self, result: ExperimentResult) -> ReporterArtifact | None:
+            return None
+
+    assert experiment.report(reporter=_DegradingReporter()) is None
 
 
 # ────────────────────────── negative scenarios ────────────────────────── #

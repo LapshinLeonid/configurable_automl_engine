@@ -15,7 +15,7 @@ takes explicit inputs and returns its result. The module may import
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -375,7 +375,7 @@ def _estimate_n_features_after_preprocessing(
         X,
         categorical_features=cats,
         numerical_features=nums,
-        encoding=cast(EncodingStrategy, encoding.encoding or "one_hot"),
+        encoding=encoding.encoding or "one_hot",
         high_cardinality_threshold=encoding.high_cardinality_threshold,
         high_cardinality_encoding=encoding.high_cardinality_encoding,
         hashing_n_components=int(encoding.hashing_n_components),

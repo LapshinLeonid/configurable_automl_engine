@@ -49,8 +49,8 @@ from automl_contracts.metrics import (
 )
 from automl_contracts.protocols import ScorerCallable
 from pydantic_core import PydanticCustomError
-from sklearn.metrics import get_scorer as sklearn_get_scorer
 from sklearn.metrics import (
+    get_scorer as sklearn_get_scorer,
     get_scorer_names,
     make_scorer,
     mean_squared_error,

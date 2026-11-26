@@ -62,7 +62,7 @@ import logging
 import uuid
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 import pandas as pd
 
@@ -94,6 +94,8 @@ from configurable_automl_engine.experiment.store import ExperimentStore
 
 if TYPE_CHECKING:
     from configurable_automl_engine.trainer import ModelTrainer
+
+_ArtifactT = TypeVar("_ArtifactT")
 
 __all__ = [
     "AutoMLExperiment",
@@ -492,10 +494,13 @@ class AutoMLExperiment:
 
         return EnsembleModel.load(section["artifact_path"])
 
-    def report(
-        self,
-        reporter: Reporter[Any] | None = None,
-    ) -> ReporterArtifact | tuple[ReporterArtifact, ...]:
+    @overload
+    def report(self, reporter: Reporter[_ArtifactT]) -> _ArtifactT: ...
+
+    @overload
+    def report(self, reporter: None = None) -> ReporterArtifact: ...
+
+    def report(self, reporter: Reporter[Any] | None = None) -> Any:
         """Run the reporter chain on the last run result.
 
         The default chain renders the Markdown report to stdout and
@@ -504,18 +509,20 @@ class AutoMLExperiment:
 
         Args:
             reporter: A custom reporter (or a ``CompositeReporter``)
-                replacing the default chain.
+                replacing the default chain. The reporter's artifact type
+                is preserved in the return type.
 
         Returns:
             The artifact(s) produced by the reporter chain: a ``str`` for
             the default chain (the rendered Markdown), a ``Path`` for a
-            file reporter, a tuple for a composite. The concrete type of
-            a custom reporter's artifact is defined by that reporter
-            (the base contract fixes only the shape family; see
-            ``experiment.reporting.base``): a reporter with a
-            documented degradation policy may return ``None`` — in
-            particular, ``MLflowReporter`` returns the MLflow run id
-            (``str``) or ``None`` when the tracking server failed (the
+            file reporter, a tuple for a composite, or ``None`` when a
+            custom reporter degrades instead of raising. The concrete
+            type of a custom reporter's artifact is defined by that
+            reporter and preserved by the overload (the base contract
+            fixes only the shape family; see ``experiment.reporting.base``):
+            in particular,
+            ``MLflowReporter`` returns the MLflow run id (``str``) or
+            ``None`` when the tracking server failed (the
             "reported-failed" policy).
 
         Raises:

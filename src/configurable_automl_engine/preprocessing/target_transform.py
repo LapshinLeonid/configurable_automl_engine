@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from scipy import stats
@@ -222,7 +222,7 @@ def validate_target_for_transform(
         )
 
 
-class TargetTransformer(TransformerMixin, BaseEstimator):
+class TargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
     """Transform the target ``y`` and invert with clipping to the train range.
 
     Module-level class (picklable). Parameters:
@@ -349,16 +349,20 @@ class TargetTransformer(TransformerMixin, BaseEstimator):
         """Apply the forward transformation to ``(n,)`` or ``(n, 1)`` input."""
         y_arr = y.reshape(-1, 1)
         if self.power_ is not None:
-            return np.asarray(self.power_.transform(y_arr))
+            transformed: np.ndarray = np.asarray(self.power_.transform(y_arr))
+            return transformed
         # log1p: no state (the forward direction has no domain checks here —
         # validate_target_for_transform guards it before training).
-        return np.log1p(y_arr)
+        logged: np.ndarray = np.log1p(y_arr)
+        return logged
 
     def _inverse(self, t: np.ndarray) -> np.ndarray:
         """Apply the inverse transformation to a ``(n, 1)`` array."""
         if self.power_ is not None:
-            return np.asarray(self.power_.inverse_transform(t))
-        return np.expm1(t)
+            restored: np.ndarray = np.asarray(self.power_.inverse_transform(t))
+            return restored
+        exponentiated: np.ndarray = np.expm1(t)
+        return exponentiated
 
 
 def _fit_power(y: np.ndarray, method: str) -> PowerTransformer:
@@ -400,7 +404,7 @@ def _fit_power(y: np.ndarray, method: str) -> PowerTransformer:
     return power
 
 
-class AutoTargetTransformer(TransformerMixin, BaseEstimator):
+class AutoTargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
     """Fold-local resolution of ``target_transform: 'auto'``.
 
     A scikit-learn-style wrapper that resolves the ``auto`` placeholder at
@@ -571,7 +575,11 @@ def fit_transform_target(y: Any, method: TargetTransform | str) -> np.ndarray:
         return np.asarray(y, dtype=float).reshape(-1)
     validate_target_for_transform(y, method_str)
     transformer = TargetTransformer(method=method_str)
-    return transformer.fit_transform(np.asarray(y, dtype=float).reshape(-1)).reshape(-1)
+    transformed = cast(
+        np.ndarray,
+        transformer.fit_transform(np.asarray(y, dtype=float).reshape(-1)),
+    )
+    return transformed.reshape(-1)
 
 
 def resolve_target_transform(

@@ -18,8 +18,8 @@ from typing import Any
 import numpy as np
 from optuna.trial import FrozenTrial
 
-from configurable_automl_engine.common.definitions import (  # noqa: F401
-    WORST_SCORE_THRESHOLD,
+from configurable_automl_engine.common.definitions import (
+    WORST_SCORE_THRESHOLD as WORST_SCORE_THRESHOLD,
 )
 
 

@@ -96,7 +96,7 @@ class _ForwardHandler(logging.handlers.QueueHandler):
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
         # QueueHandler.prepare merges args and the traceback into the
         # message, so the record pickles without the original objects.
-        prepared = super().prepare(record)
+        prepared: logging.LogRecord = super().prepare(record)
         setattr(prepared, _TARGET_ATTR, self._target)
         return prepared
 

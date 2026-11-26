@@ -805,7 +805,7 @@ def _effective_validation_method(
         # Splits were already materialized above — we get here only in an
         # impossible/degenerate case; fall back to the requested method.
         effective_method = method
-    return cast(str, effective_method)
+    return effective_method
 
 
 def _score_additional_metrics_on_fold(

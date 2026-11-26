@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging as _logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import optuna
@@ -134,7 +134,7 @@ def repeat_oof_buffer(
     """
     if oof_out is None or oof_out.ndim == 1:
         return oof_out
-    return oof_out[repeat_index]
+    return cast(np.ndarray, oof_out[repeat_index])
 
 
 def penalize_non_finite_repeat(value: float, repeat_index: int) -> float:
@@ -333,4 +333,4 @@ def successful_repeat_oof(
     """
     if oof is None or n_repeats <= 1 or len(mask) != n_repeats:
         return oof
-    return oof[np.asarray(mask, dtype=bool)]
+    return cast(np.ndarray, oof[np.asarray(mask, dtype=bool)])

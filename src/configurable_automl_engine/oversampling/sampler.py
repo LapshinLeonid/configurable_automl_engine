@@ -12,7 +12,7 @@ oversampling modules; none of them may import it.
 import logging
 import threading
 from collections import Counter
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pandas as pd
@@ -538,7 +538,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 n_neighbors=k_neighbors,
                 random_state=self.random_state,
             )
-        return sampler.fit_resample(X_df, target.y_fit)
+        return cast(tuple[Any, Any], sampler.fit_resample(X_df, target.y_fit))
 
     def _postprocess(
         self,

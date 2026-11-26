@@ -10,7 +10,9 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 
-from automl_contracts.definitions import AVAILABLE_ALGORITHMS  # noqa: F401
+from automl_contracts.definitions import (
+    AVAILABLE_ALGORITHMS as AVAILABLE_ALGORITHMS,
+)
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import (
     AdaBoostRegressor,

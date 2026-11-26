@@ -44,7 +44,7 @@ def reset_small_sample_warnings() -> None:
 __all__ = ["Winsorizer"]
 
 
-class Winsorizer(TransformerMixin, BaseEstimator):
+class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
     """Cap extreme values to the per-column bounds learned in ``fit``.
 
     The bounds are computed per column with ``np.nanquantile``, so missing
@@ -514,7 +514,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):
             NotFittedError: If the transformer has not been fitted yet.
         """
         arr = self._validate_X_for_transform(X)
-        clipped = np.clip(arr, self.lower_bounds_, self.upper_bounds_)
+        clipped: np.ndarray = np.clip(arr, self.lower_bounds_, self.upper_bounds_)
         # np.clip already keeps NaN, but do not rely on that: restore the
         # missing mask explicitly so NaN passes through for any dtype path.
         clipped[np.isnan(arr)] = np.nan
@@ -540,7 +540,8 @@ class Winsorizer(TransformerMixin, BaseEstimator):
         """
         # A value is counted when it differs from its clipped version and is
         # not NaN (NaN passes through unchanged).
-        return np.sum((X != clipped) & ~np.isnan(X), axis=0).astype(int)
+        counts: np.ndarray = np.sum((X != clipped) & ~np.isnan(X), axis=0).astype(int)
+        return counts
 
     def get_last_clip_counts(self, X: Any) -> dict[str, int]:
         """Per-column number of values that ``transform`` clips for ``X``.

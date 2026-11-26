@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 ARTIFACT_FORMAT_VERSION = 3
 
 
-def _frozen_slots_setstate(self, state: Any) -> None:
+def _frozen_slots_setstate(self: Any, state: Any) -> None:
     """Restore a frozen slots-dataclass state, tolerating shorter states.
 
     A pickle of a slots dataclass stores the field values as a list zipped
@@ -193,7 +193,7 @@ class PreparedFeatures:
         return replace(self, X=None)
 
 
-def _prepared_features_getstate(self) -> list[Any]:
+def _prepared_features_getstate(self: PreparedFeatures) -> list[Any]:
     """Serialize the features without the fit-time matrix.
 
     The matrix is not read after ``fit``; dropping it keeps the
@@ -207,7 +207,7 @@ def _prepared_features_getstate(self) -> list[Any]:
 # The dataclass decorator overwrites ``__setstate__`` (see the additive-fields
 # note above), so both hooks are re-asserted after it.
 PreparedFeatures.__setstate__ = _frozen_slots_setstate  # type: ignore[attr-defined]
-PreparedFeatures.__getstate__ = _prepared_features_getstate  # type: ignore[attr-defined,method-assign]
+PreparedFeatures.__getstate__ = _prepared_features_getstate  # type: ignore[method-assign,assignment]
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +285,7 @@ class ValidationScores:
         return replace(self, oof_predictions_by_repeat=list(vectors))
 
 
-def _validation_scores_getstate(self) -> list[Any]:
+def _validation_scores_getstate(self: ValidationScores) -> list[Any]:
     """Serialize the scores without the per-repeat OOF vectors.
 
     The vectors are a diagnostic and are also used by the report path to
@@ -307,7 +307,7 @@ def _validation_scores_getstate(self) -> list[Any]:
 # The additive fields above are appended with defaults; re-assert the custom
 # state restoration after the decorator (see ``_frozen_slots_setstate``).
 ValidationScores.__setstate__ = _frozen_slots_setstate  # type: ignore[attr-defined]
-ValidationScores.__getstate__ = _validation_scores_getstate  # type: ignore[attr-defined,method-assign]
+ValidationScores.__getstate__ = _validation_scores_getstate  # type: ignore[method-assign,assignment]
 
 
 class TrainerViewMixin:

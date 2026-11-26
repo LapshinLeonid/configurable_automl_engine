@@ -217,7 +217,7 @@ def _run_feature_selection_auto_check(
         # that a larger "raw" value is better — neg_ metrics are already
         # inverted for maximization. No heuristic based on the metric name
         # is used here, so the direction does not break for neg_* metrics.
-        active = raw_reduced > raw_full
+        active = bool(raw_reduced > raw_full)
         # Log values in user-facing semantics (positive for errors), while
         # the decision is made on the "raw" values. The direction explicitly
         # accompanies the values ("min better" for errors) — the optimizer

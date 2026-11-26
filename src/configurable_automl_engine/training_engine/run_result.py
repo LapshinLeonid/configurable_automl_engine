@@ -262,7 +262,7 @@ def build_failed_experiment_result(
         metric_sklearn=metric_sklearn,
         metric_direction=MetricDirection(user_direction(metric_user)),
         runs=(
-            _build_algorithm_runs(cfg=cfg, prepared=prepared, ctx=ctx)  # type: ignore[arg-type]
+            _build_algorithm_runs(cfg=cfg, prepared=prepared, ctx=ctx)
             if ctx is not None and prepared is not None
             else []
         ),

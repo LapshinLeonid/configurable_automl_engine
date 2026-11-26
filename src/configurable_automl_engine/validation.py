@@ -83,7 +83,7 @@ REPEAT_INDEX_ATTR = "repeat_index"
 SKLEARN_SEED_MODULUS = 2**32
 
 
-class RepeatedSplit(tuple):
+class RepeatedSplit(tuple[Any, ...]):
     """A split tuple tagged with its repeat index (attribute-only tag).
 
     A lightweight ``tuple`` subclass: the elements and the unpacking are

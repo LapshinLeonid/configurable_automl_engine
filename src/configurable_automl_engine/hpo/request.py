@@ -16,13 +16,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from automl_contracts.config.general import SplitAggregation
+from automl_contracts.config.general import SplitAggregation as SplitAggregation
 
 from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.settings import (
-    EncodingSettings,
+    EncodingSettings as EncodingSettings,
     InputPolicies,
-    OversamplingSettings,
+    OversamplingSettings as OversamplingSettings,
 )
 from configurable_automl_engine.hpo.complexity_guard import ComplexityGuardConfig
 

@@ -18,7 +18,7 @@ models. The module must not import the other preprocessing modules.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from scipy.stats import norm
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["_FoldSafeQuantileTransformer"]
 
 
-class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
+class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
     """QuantileTransformer that clips ``n_quantiles`` to the fold size.
 
     ``fit`` sets ``n_quantiles = min(n_quantiles, n_rows)`` before the
@@ -195,4 +195,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):
             The output feature names, identical to the input ones.
         """
         check_is_fitted(self, "_transformer_")
-        return self._transformer_.get_feature_names_out(input_features)
+        return cast(
+            np.ndarray,
+            self._transformer_.get_feature_names_out(input_features),
+        )

@@ -221,7 +221,8 @@ def _decode_regression_y(
             # not expose sample_indices_ (defensive; the current
             # imbalanced-learn RandomOverSampler always sets it).
             return _decode_continuous_y(y_res, y_original, y_fit, bin_mids)
-        return np.asarray(y_original, dtype=float)[np.asarray(indices)]
+        restored: np.ndarray = np.asarray(y_original, dtype=float)[np.asarray(indices)]
+        return restored
     y_arr = np.asarray(y_res)
     if len(y_arr) < len(y_original):
         raise ValueError(

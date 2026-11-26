@@ -89,18 +89,21 @@ def resolve_expected_valid_mask(
         InvalidPredictionError: If any expected row has a non-finite
             prediction (with ``expected`` given).
     """
+    mask: np.ndarray
     if expected is None:
-        return np.isfinite(yt) & np.isfinite(yp)
-    exp = np.asarray(expected, dtype=bool)
-    if not np.isfinite(yp[exp]).all():
-        raise InvalidPredictionError(
-            "Model returned non-finite predictions for validation samples "
-            f"({int((~np.isfinite(yp[exp])).sum())} of {int(exp.sum())} "
-            "expected rows)"
-        )
-    # Rows outside the expected set (e.g. the train part of a hold-out)
-    # are excluded from the estimate even when their values are finite.
-    return exp & np.isfinite(yt) & np.isfinite(yp)
+        mask = np.isfinite(yt) & np.isfinite(yp)
+    else:
+        exp = np.asarray(expected, dtype=bool)
+        if not np.isfinite(yp[exp]).all():
+            raise InvalidPredictionError(
+                "Model returned non-finite predictions for validation samples "
+                f"({int((~np.isfinite(yp[exp])).sum())} of {int(exp.sum())} "
+                "expected rows)"
+            )
+        # Rows outside the expected set (e.g. the train part of a hold-out)
+        # are excluded from the estimate even when their values are finite.
+        mask = exp & np.isfinite(yt) & np.isfinite(yp)
+    return mask
 
 
 def pooled_scorer_value(

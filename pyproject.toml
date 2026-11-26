@@ -106,6 +106,17 @@ extend-exclude = ["src/configurable_automl_engine/_version.py"]
 [tool.ruff.lint]
 extend-select = ["C901", "B904", "B905", "RUF100"]
 
+[tool.ruff.lint.per-file-ignores]
+# ``X as X`` marks an explicit re-export for mypy (strict mode disables
+# implicit re-exports), while the import path stays the documented one.
+"src/configurable_automl_engine/models.py" = ["PLC0414"]
+"src/configurable_automl_engine/hpo/request.py" = ["PLC0414"]
+"src/configurable_automl_engine/hpo/types.py" = ["PLC0414"]
+"src/configurable_automl_engine/training_engine/config_parser.py" = ["PLC0414"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 
@@ -115,6 +126,7 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.mypy]
+strict = true
 
 [[tool.mypy.overrides]]
 module = [

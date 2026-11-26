@@ -59,8 +59,8 @@ from configurable_automl_engine.training_engine.config.ensemble import (
     EnsembleCfg,
 )
 from configurable_automl_engine.training_engine.config.general import (
-    AUTO_HOLDOUT_FRACTION,  # noqa: F401
-    AUTO_HOLDOUT_MIN_ROWS,  # noqa: F401
+    AUTO_HOLDOUT_FRACTION as AUTO_HOLDOUT_FRACTION,
+    AUTO_HOLDOUT_MIN_ROWS as AUTO_HOLDOUT_MIN_ROWS,
     ComparisonMetric,  # noqa: F401
     DatetimePolicy,  # noqa: F401
     GeneralCfg,  # noqa: F401
@@ -85,7 +85,7 @@ from configurable_automl_engine.training_engine.config.sanity_gate import (
     CorridorMode,
     GeneralizationGapMode,
     SanityGateCfg,
-    SanityGateMode,  # noqa: F401
+    SanityGateMode as SanityGateMode,
 )
 
 __all__ = [
