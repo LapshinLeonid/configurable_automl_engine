@@ -1,18 +1,14 @@
-"""Experiment result models, run history, leaderboard, reporters, the
-object facade and the model explainability helpers.
+"""Experiment result models, run history, leaderboard and reporters.
 
 The public import paths are :mod:`configurable_automl_engine.experiment.result`
 and this package: ``ExperimentResult``, ``AlgorithmRun``, the statuses, the
 run history (``ExperimentStore``), the algorithm ranking table
 (``Leaderboard``), the reporter framework (``Reporter``, ``JSONReporter``,
-``MarkdownReporter``, ``CompositeReporter``), the optional MLflow adapter
-(``MLflowReporter`` — imports ``mlflow`` lazily, only at report time), the
-model explainability helpers (``explain_permutation_importance``,
-``explain_shap`` — imports ``shap`` lazily, only at explanation time) and
-the object facade of an experiment run (``AutoMLExperiment``).
+``MarkdownReporter``, ``CompositeReporter``) and the optional MLflow adapter
+(``MLflowReporter`` — imports ``mlflow`` lazily, only at report time).
 The models are pure data: the module imports nothing from the engine
 layers, so reporters can consume results without importing the training
-engine (the facade imports the engine lazily, inside its ``run()``).
+engine.
 """
 
 from configurable_automl_engine.common.definitions import (
@@ -29,20 +25,6 @@ from configurable_automl_engine.experiment.ensemble import (
     resolve_metric_direction,
     select_top_k,
     winner_vs_ensemble_comparison,
-)
-from configurable_automl_engine.experiment.experiment import (
-    AutoMLExperiment,
-    ExperimentNotRunError,
-)
-from configurable_automl_engine.experiment.explain import (
-    ExplainNotAvailableError,
-    FeatureImportance,
-    PermutationImportanceResult,
-    ShapFeatureImportance,
-    aggregate_to_original_features,
-    explain_permutation_importance,
-    explain_shap,
-    render_importance_markdown,
 )
 from configurable_automl_engine.experiment.export import (
     ExportError,
@@ -81,19 +63,15 @@ __all__ = [
     "EMPTY_LEADERBOARD_MESSAGE",
     "FAILED_SUMMARY_MESSAGE",
     "AlgorithmRun",
-    "AutoMLExperiment",
     "CompositeReporter",
     "DuplicateRunError",
     "EnsembleMember",
     "EnsembleModel",
     "EnsembleModelError",
-    "ExperimentNotRunError",
     "ExperimentResult",
     "ExperimentStore",
     "ExperimentStoreError",
-    "ExplainNotAvailableError",
     "ExportError",
-    "FeatureImportance",
     "JSONReporter",
     "Leaderboard",
     "LeaderboardEntry",
@@ -101,21 +79,15 @@ __all__ = [
     "MLflowReporterError",
     "MarkdownReporter",
     "MetricDirection",
-    "PermutationImportanceResult",
     "Reporter",
     "ReporterArtifact",
     "RunPhaseAction",
     "RunStatus",
     "RunStepStatus",
     "RunSummary",
-    "ShapFeatureImportance",
-    "aggregate_to_original_features",
     "build_leaderboard",
     "compute_weights",
-    "explain_permutation_importance",
-    "explain_shap",
     "export_experiment",
-    "render_importance_markdown",
     "resolve_metric_direction",
     "select_top_k",
     "winner_vs_ensemble_comparison",

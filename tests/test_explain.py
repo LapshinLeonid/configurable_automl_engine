@@ -1,4 +1,4 @@
-"""Tests of the model explainability component (``experiment.explain``)
+"""Tests of the model explainability component (``configurable_automl_engine.explain``)
 and of the facade method ``AutoMLExperiment.explain``.
 
 Covered scenarios (positive / negative / boundary):
@@ -44,21 +44,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from configurable_automl_engine.experiment import (
-    AutoMLExperiment,
+from configurable_automl_engine import AutoMLExperiment
+from configurable_automl_engine.explain import (
     ExplainNotAvailableError,
-    ExperimentNotRunError,
-    aggregate_to_original_features,
-)
-from configurable_automl_engine.experiment.explain import (
     FeatureImportance,
     PermutationImportanceResult,
+    aggregate_to_original_features,
     explain_permutation_importance,
     explain_shap,
     render_importance_markdown,
 )
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.trainer import ModelTrainer
+from configurable_automl_engine.training_engine.experiment_facade import (
+    ExperimentNotRunError,
+)
 from configurable_automl_engine.training_engine.result_registry import (
     clear_experiment_result,
 )
@@ -565,7 +565,7 @@ def test_b6_numpy_target_sampling_stays_aligned(tmp_path: Any) -> None:
 def test_b7_oversampling_pipeline_transform_prefix() -> None:
     """B7: an oversampling pipeline — the SHAP transform prefix stops
     before the sampler step (a sampler has no ``transform``)."""
-    from configurable_automl_engine.experiment.explain import _transform_prefix
+    from configurable_automl_engine.explain import _transform_prefix
 
     rows = 60
     X = pd.DataFrame({"a": np.arange(rows, dtype=float)})
@@ -593,7 +593,7 @@ def test_b7_feature_selection_names_resolved_through_selector() -> None:
     real preprocessor names through the fitted selector's ``get_support``
     mapping — the aggregated view attributes the contributions to the
     original columns (no all-zero collapse, no positional ``x0``)."""
-    from configurable_automl_engine.experiment.explain import (
+    from configurable_automl_engine.explain import (
         _selected_component_names,
         _transform_prefix,
     )
@@ -802,7 +802,7 @@ def test_b7_dummy_shap_with_selector_model_width(tmp_path: Any) -> None:
     the dummy explainer receives the RAW model step and a matrix of the
     model's own input width — no adapter, no double reduction; the
     component names are resolved through the selector's ``get_support``."""
-    from configurable_automl_engine.experiment.explain import _transform_prefix
+    from configurable_automl_engine.explain import _transform_prefix
 
     experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
     experiment.run()
@@ -1011,7 +1011,9 @@ def test_p5_explain_storage_failure_does_not_mask_result(
 ) -> None:
     """P5: a storage failure is logged as a warning and does not mask
     the explain outcome (the importance is still returned)."""
-    from configurable_automl_engine.experiment import experiment as exp_module
+    from configurable_automl_engine.training_engine import (
+        experiment_facade as exp_module,
+    )
 
     experiment = AutoMLExperiment(_config_dict(tmp_path), _small_df())
     experiment.run()

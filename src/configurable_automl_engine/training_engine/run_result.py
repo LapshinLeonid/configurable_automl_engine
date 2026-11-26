@@ -56,6 +56,7 @@ from configurable_automl_engine.experiment.result import (
 from configurable_automl_engine.training_engine.config_parser import Config
 
 from .finalists import is_valid_winner_score
+from .result_registry import mark_result_owner, result_owned_by
 from .state import PhaseContext, PhaseResult, PreparedData
 
 _LOG = logging.getLogger(__name__)
@@ -66,39 +67,6 @@ __all__ = [
     "mark_result_owner",
     "result_owned_by",
 ]
-
-
-def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
-    """Mark ``result`` as produced for the caller identified by ``token``.
-
-    The ``ExperimentResult`` model has a closed field set (extra =
-    ``"forbid"``), so the ownership token is attached as an attribute —
-    it never reaches ``model_dump`` / ``to_json`` / the JSONL history and
-    needs no model change.
-
-    The token lets an orchestrator (the ``AutoMLExperiment`` facade)
-    recognize *its own* run result when reading the result registry: the
-    registry keeps the result of the last ``train_best_model`` call in the
-    process and does not reset it between calls, so a consumer that cannot
-    snapshot it before the run (or runs concurrently in another thread)
-    would otherwise pick up a stranger's result. The registry stamps the
-    token before publishing the result; the facade passes its private
-    token into ``train_best_model`` and matches it afterwards through
-    ``result_registry.get_experiment_result_owned_by``.
-
-    Args:
-        result: The assembled result model to stamp (mutated in place).
-        token: The caller's private run token (an opaque UUID).
-    """
-    object.__setattr__(result, "_owner_token", token)
-
-
-def result_owned_by(result: ExperimentResult, token: uuid.UUID) -> bool:
-    """Whether ``result`` was stamped with ``token`` (see
-    :func:`mark_result_owner`). A result without an owner stamp (built by
-    hand or by a caller that does not mark ownership) belongs to nobody.
-    """
-    return getattr(result, "_owner_token", None) == token
 
 
 def build_experiment_result(

@@ -51,6 +51,7 @@ from configurable_automl_engine.training_engine.config_parser import (
 
 from .artifact import persist_artifact
 from .data_prep import load_config, prepare_dataset
+from .ensemble_step import build_ensemble_from_context
 from .finalists import is_valid_winner_score
 from .hpo_phases import (
     _algorithms_as_dict,
@@ -905,10 +906,6 @@ def _build_and_attach_ensemble(
     winner artifact (``<model stem>_ensemble.<ext>``) so the facade and the
     consumers can reload it; the artifact path is recorded in the section.
     """
-    from configurable_automl_engine.training_engine.ensemble_step import (
-        build_ensemble_from_context,
-    )
-
     built = build_ensemble_from_context(cfg=cfg, prepared=prepared, ctx=ctx)
     if built is None:
         return

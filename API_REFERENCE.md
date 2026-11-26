@@ -1687,7 +1687,7 @@ contract replacement.
 | `configurable_automl_engine.outliers_presets` | `automl_contracts.preprocessing` for `NoOutliers`, `QuantileOutliers`, `IqrOutliers`, `ObjectOutlierSpec`, `StringOutlierSpec`, `OutlierSpec`, `NO_OUTLIERS`, `coerce_outliers`, `format_outliers` | — |
 | `configurable_automl_engine.hpo.default_spaces` | `automl_contracts.search_space` for `SearchSpaceEntry`, `BaseDistribution`, `CategoricalSpace`, `NumericSpace`, `FloatSpace`, `IntSpace` | `DEFAULT_SPACES`, `align_*`, `compute_svr_epsilon_bounds`, `clip_search_space`, `normalize_hyperparameter_entry`, `infer_param_numeric_type` |
 | `configurable_automl_engine.experiment.result` | `automl_contracts.result` for `AlgorithmRun`, `ExperimentResult`, `MetricDirection`, `RunPhaseAction`, `RunStatus`, `RunStepStatus` | `ScoreValue`, `ScoreValueOrNone` |
-| `configurable_automl_engine.experiment` | `automl_contracts.result` for the result DTOs and enums | `AutoMLExperiment`, reporters, `ExperimentStore`, `Leaderboard`, `export_experiment`, explain helpers |
+| `configurable_automl_engine.experiment` | `automl_contracts.result` for the result DTOs and enums | reporters, `ExperimentStore`, `Leaderboard`, `export_experiment` |
 | `configurable_automl_engine.models` | `automl_contracts.definitions` or the root for `AVAILABLE_ALGORITHMS` | `create_model` and the HPO runtime helpers |
 | `configurable_automl_engine.common.metrics` | `automl_contracts.metrics` for `AVAILABLE_METRICS`, `ALIAS_TO_SKLEARN`, `BUILTIN_METRIC_DIRECTIONS` and `to_sklearn_name` (internal helper; old path kept); `automl_contracts.custom_metrics` for `ERR_CUSTOM_NAME_INVALID` | `ERR_CUSTOM_NAME_COLLISION`, `reserved_metric_names`, `user_direction`, `is_error_metric`, `is_greater_better`, `get_scorer_object`, `oof_rmse`, `to_user_value` and the other runtime metric helpers |
 | `configurable_automl_engine.common.custom_metrics` | `automl_contracts.custom_metrics` for `CustomMetricSpec`, `CustomMetricKind`, `ERR_CUSTOM_NAME_INVALID` | `validate_custom_metrics`, `validate_custom_metric_spec`, `natural_greater_is_better`, `build_custom_scorer` and the runtime scorer cache |
@@ -1699,7 +1699,8 @@ contract replacement.
 | `configurable_automl_engine.training_engine.thread_pool` | No contract replacement | `run_parallel`, `run_parallel_outcomes` |
 | `configurable_automl_engine.training_engine.component` | No contract replacement | `train_best_model`, `execute_phases`, the deprecated read-only `last_experiment_result` alias |
 | `configurable_automl_engine.training_engine.result_registry` | No contract replacement | `publish_experiment_result`, `get_last_experiment_result`, `get_experiment_result_owned_by`, `clear_experiment_result` |
-| `configurable_automl_engine.experiment.explain` | No contract replacement | `explain_permutation_importance`, `explain_shap`, `aggregate_to_original_features`, `render_importance_markdown` |
+| `configurable_automl_engine.training_engine.experiment_facade` | No contract replacement | `AutoMLExperiment`, `ExperimentNotRunError` |
+| `configurable_automl_engine.explain` | No contract replacement | `explain_permutation_importance`, `explain_shap`, `aggregate_to_original_features`, `render_importance_markdown` |
 | `configurable_automl_engine.experiment.store` | No contract replacement | `ExperimentStore`, `RunSummary`, `DuplicateRunError`, `ExperimentStoreError` |
 | `configurable_automl_engine.oversampling` | No contract replacement | `DataOversampler`, `oversample` and the public package names |
 
@@ -2184,7 +2185,7 @@ with mlflow.start_run(run_name="my-experiment"):
 
 ## `explain()` — interpretability of the best model
 
-`from configurable_automl_engine.experiment.explain import explain_permutation_importance, explain_shap, aggregate_to_original_features, render_importance_markdown`. Facade method: `AutoMLExperiment.explain(...)` after `run()`.
+`from configurable_automl_engine.explain import explain_permutation_importance, explain_shap, aggregate_to_original_features, render_importance_markdown`. Facade method: `AutoMLExperiment.explain(...)` after `run()`.
 
 Interpretation of the winner pipeline. Two computations, one per call:
 

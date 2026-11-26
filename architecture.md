@@ -26,7 +26,7 @@ alike — and there are no import cycles:
 | Layer | Modules |
 |---|---|
 | 3 — orchestration | `training_engine/` (config schema, phases, selection, artifact saving, `run_parallel`) |
-| 2 — engines | `hpo/`, `tuner.py`; `trainer.py`, `trainer_*.py`. HPO and the trainer modules do not import each other; `tuner.py` is the façade over `hpo` |
+| 2 — engines | `hpo/`, `tuner.py`; `trainer.py`, `trainer_*.py`; `explain.py`. HPO and the trainer modules do not import each other; `tuner.py` is the façade over `hpo` |
 | 1 — ML building blocks | `models`, `outliers_presets`, `preprocessing_presets`, `preprocessing`, `oversampling`, `validation`, `feature_selection`, `isotonic`, `experiment` |
 | 0 — shared utilities | `common/` (and the generated `_version`) |
 
@@ -157,10 +157,8 @@ repeat counts as one split.
 │       │   ├── trial_pipeline.py           # Preprocessing plan and trial pipeline assembly
 │       │   ├── trial_stats.py              # Aggregation of the trial states of the current HPO phase (TrialStats)
 │       │   └── types.py                    # Exceptions, OptimizeResult, worst-score constants
-│       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters, object facade
+│       ├── experiment                      # Layer 1: experiment result model, run history, leaderboard, reporters
 │       │   ├── ensemble.py                 # Experimental top-K ensemble core: select_top_k, compute_weights, resolve_metric_direction (the shared public resolver), EnsembleModel (save/load, report section); EnsembleModelError is the module's base error
-│       │   ├── experiment.py               # AutoMLExperiment: the object facade (run / leaderboard / best_model / ensemble_model / report / export / explain); explain() stores its JSON-safe payload on the run result (the last call wins)
-│       │   ├── explain.py                  # Winner explainability: permutation importance, optional SHAP, Markdown rendering
 │       │   ├── export.py                   # export_experiment: the artifact bundle of a run into a directory (atomic two-phase swap, <run_id>_* names; the model AND ensemble artifact copies, the stored explain payload, metadata with the artifact source paths)
 │       │   ├── leaderboard.py              # Leaderboard: the algorithm ranking table built from an ExperimentResult
 │       │   ├── reporting                   # Reporters: pure consumers of ExperimentResult (no engine, no mlflow imports)
@@ -186,6 +184,7 @@ repeat counts as one split.
 │       │   ├── config_runtime.py           # Runtime validation of a structurally valid config: installed packages, estimator signatures, custom metrics, platform limits
 │       │   ├── data_prep.py                # Config loading, X/y preparation, hold-out, validation strategy
 │       │   ├── ensemble_step.py            # The experimental top-K ensemble step: runs after the terminal select, never aborts the run; reuses experiment.ensemble.resolve_metric_direction (the single shared direction resolver)
+│       │   ├── experiment_facade.py        # AutoMLExperiment: the object facade (run / leaderboard / best_model / ensemble_model / report / export / explain); explain() stores its JSON-safe payload on the run result (the last call wins)
 │       │   ├── finalists.py                # Winner selection, finalists pool, training of the finalists
 │       │   ├── hpo_phases.py               # HPO phase execution: the HPO request and the workers
 │       │   ├── parallel_deadlines.py       # run_parallel: pure deadline policy (task timeout, queue budget)
@@ -224,6 +223,7 @@ repeat counts as one split.
 │       │   └── target_transform.py         # TargetTransformer (log1p / boxcox / yeo-johnson), AutoTargetTransformer (fold-local 'auto'), wrap_with_target_transform, the 'auto' resolution from the target skewness
 │       ├── outliers_presets.py             # Layer 1: OutlierSpec specs (none / quantile / iqr), re-exported by preprocessing_presets (a sibling, not a member of the preprocessing package: the package __init__ imports the builder which imports preprocessing_presets — a member module would create an import cycle)
 │       ├── preprocessing_presets.py        # Layer 1: per-algorithm preprocessing presets (imputation, scaling, outliers; precedence: class preset < general < algorithm)
+│       ├── explain.py                      # Layer 2: winner explainability: permutation importance, optional SHAP, Markdown rendering
 │       ├── trainer.py                      # Layer 2: ModelTrainer: training, validation and saving of a single model
 │       ├── trainer_artifact.py             # Layer 2: saved-artifact metadata and load-time version checks
 │       ├── trainer_data.py                 # Layer 2: ModelTrainer input data: X/y, diagnostics, preprocessor, alignment

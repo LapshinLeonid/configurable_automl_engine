@@ -5,19 +5,14 @@ building blocks → ``common``. The rules are the ``[tool.importlinter]``
 contracts in ``pyproject.toml`` (run in CI by ``lint-imports``):
 
 - the ``layers`` contract (top-level, function-level and ``TYPE_CHECKING``
-  imports alike; the object facade ``experiment.experiment`` orchestrates
-  the training engine via documented lazy imports — the ``ignore_imports``
-  entries in ``pyproject.toml``);
+  imports alike, with no exceptions);
 - ``hpo`` and the trainer modules are independent of each other;
 - no import cycles between sibling modules.
 
 These tests run the same contracts on the package and show that a
 deliberately added upward import breaks them. A separate AST check keeps
-package imports out of function bodies: the only ones allowed are the lazy
-``train_best_model`` proxy in ``training_engine/__init__.py`` and the
-lazy engine calls of the ``AutoMLExperiment`` facade (``run()`` and the
-last-result lookup — the facade module itself stays importable without
-the engine, so the pure result consumers never touch the engine layers).
+package imports out of function bodies: the only exception is the lazy
+``train_best_model`` proxy in ``training_engine/__init__.py``.
 """
 
 from __future__ import annotations
@@ -41,38 +36,6 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 #: module).
 ALLOWED_FUNCTION_IMPORTS = {
     ("training_engine/__init__.py", f"{PACKAGE}.training_engine.component"),
-    # The object facade: the engine is imported lazily inside run() and the
-    # result registry inside _adopt_result(), so the facade module stays
-    # importable without the engine.
-    ("experiment/experiment.py", f"{PACKAGE}.training_engine"),
-    (
-        "experiment/experiment.py",
-        f"{PACKAGE}.training_engine.result_registry",
-    ),
-    ("experiment/experiment.py", f"{PACKAGE}.trainer"),
-    # The experimental ensemble loader (``ensemble_model()``): the pure
-    # ensemble core is imported lazily so the facade module keeps its
-    # import-light contract.
-    (
-        "experiment/experiment.py",
-        f"{PACKAGE}.experiment.ensemble",
-    ),
-    # The experimental ensemble step (``_build_and_attach_ensemble``): the
-    # step imports the finalists trainer (a heavy chain) lazily — the
-    # ensemble is an optional output, the import must not slow the
-    # ensemble-less runs.
-    (
-        "training_engine/component.py",
-        f"{PACKAGE}.training_engine.ensemble_step",
-    ),
-    # The export component is a sibling of the
-    # facade inside the experiment package: it is imported lazily
-    # inside export() to keep the facade module import-light (the same
-    # pattern as the lazy engine calls above).
-    (
-        "experiment/experiment.py",
-        f"{PACKAGE}.experiment.export",
-    ),
 }
 
 
@@ -221,6 +184,27 @@ def test_no_function_level_package_imports() -> None:
         if (path.relative_to(PACKAGE_ROOT).as_posix(), target)
         not in ALLOWED_FUNCTION_IMPORTS
     ]
+    assert not offenders, offenders
+
+
+def test_no_nested_absolute_package_imports() -> None:
+    """No function body imports the package by its absolute name."""
+    offenders: list[str] = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if isinstance(node, ast.ImportFrom) and node.level == 0:
+                    module = node.module or ""
+                else:
+                    continue
+                if module == PACKAGE or module.startswith(f"{PACKAGE}."):
+                    offenders.append(
+                        f"{path.relative_to(PACKAGE_ROOT).as_posix()}:"
+                        f"{node.lineno} imports {module}"
+                    )
     assert not offenders, offenders
 
 

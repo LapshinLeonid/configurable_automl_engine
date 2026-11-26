@@ -36,7 +36,8 @@ from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     to_user_value,
 )
-from configurable_automl_engine.experiment import AutoMLExperiment, ExperimentResult
+from configurable_automl_engine import AutoMLExperiment
+from configurable_automl_engine.experiment import ExperimentResult
 from configurable_automl_engine.experiment.reporting import MarkdownReporter
 from configurable_automl_engine.trainer_scoring import score_on_validation_splits
 from configurable_automl_engine.training_engine import artifact as artifact_module

@@ -20,8 +20,6 @@ import uuid
 
 from configurable_automl_engine.experiment.result import ExperimentResult
 
-from .run_result import mark_result_owner, result_owned_by
-
 __all__ = [
     "clear_experiment_result",
     "get_experiment_result_owned_by",
@@ -68,6 +66,37 @@ class _ResultRegistry:
 
 
 _REGISTRY = _ResultRegistry()
+
+
+def mark_result_owner(result: ExperimentResult, token: uuid.UUID) -> None:
+    """Mark ``result`` as produced for the caller identified by ``token``.
+
+    The ``ExperimentResult`` model has a closed field set (extra =
+    ``"forbid"``), so the ownership token is attached as an attribute —
+    it never reaches ``model_dump`` / ``to_json`` / the JSONL history and
+    needs no model change.
+
+    Args:
+        result: The assembled result model to stamp (mutated in place).
+        token: The caller's private run token (an opaque UUID).
+    """
+    object.__setattr__(result, "_owner_token", token)
+
+
+def result_owned_by(result: ExperimentResult, token: uuid.UUID) -> bool:
+    """Whether ``result`` was stamped with ``token``.
+
+    A result without an owner stamp (built by hand or by a caller that does
+    not mark ownership) belongs to nobody.
+
+    Args:
+        result: The result to inspect.
+        token: The caller's private run token.
+
+    Returns:
+        bool: ``True`` when the result carries the token.
+    """
+    return getattr(result, "_owner_token", None) == token
 
 
 def publish_experiment_result(

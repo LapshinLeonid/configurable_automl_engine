@@ -569,7 +569,7 @@ def test_facade_export_delegates_after_run(tmp_path: Path) -> None:
     produces the same bundle the component does.
     """
     from configurable_automl_engine import AutoMLExperiment
-    from configurable_automl_engine.experiment.experiment import (
+    from configurable_automl_engine.training_engine.experiment_facade import (
         ExperimentNotRunError,
     )
 

@@ -50,10 +50,6 @@ import pytest
 
 from configurable_automl_engine import AutoMLExperiment, train_best_model
 from configurable_automl_engine.common.definitions import RunStatus
-from configurable_automl_engine.experiment.experiment import (
-    DEFAULT_REPORT_JSON_NAME,
-    ExperimentNotRunError,
-)
 from configurable_automl_engine.experiment.reporting import (
     JSONReporter,
     MarkdownReporter,
@@ -63,6 +59,10 @@ from configurable_automl_engine.experiment.reporting import (
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.experiment.store import ExperimentStore
 from configurable_automl_engine.training_engine.config_parser import Config
+from configurable_automl_engine.training_engine.experiment_facade import (
+    DEFAULT_REPORT_JSON_NAME,
+    ExperimentNotRunError,
+)
 from configurable_automl_engine.training_engine.result_registry import (
     clear_experiment_result,
     get_last_experiment_result,

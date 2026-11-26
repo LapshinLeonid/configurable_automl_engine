@@ -1,7 +1,6 @@
 """``AutoMLExperiment`` — the object facade of the engine.
-component).
 
-The facade is the central entity of the experiment layer: it wraps the
+The facade is the central entity of the orchestration layer: it wraps the
 instrumented training loop (``training_engine.train_best_model``),
 registers the assembled :class:`~configurable_automl_engine.experiment.result.ExperimentResult`
 in an :class:`~configurable_automl_engine.experiment.store.ExperimentStore`
@@ -52,7 +51,7 @@ Documented contract:
 ``explain()`` explains the winner: the permutation importance of the
 original feature columns (always available) or the SHAP contributions
 (the optional ``[shap]`` extra; see
-:mod:`configurable_automl_engine.experiment.explain`).
+:mod:`configurable_automl_engine.explain`).
 """
 
 from __future__ import annotations
@@ -62,23 +61,15 @@ import logging
 import uuid
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import Any, TypeVar, overload
 
 import pandas as pd
 
 from configurable_automl_engine.common.datetime_features import (
     expand_datetime_columns,
 )
-from configurable_automl_engine.experiment.explain import (
-    DEFAULT_N_REPEATS,
-    DEFAULT_SAMPLE_ROWS,
-    ExplainNotAvailableError,
-    PermutationImportanceResult,
-    ShapFeatureImportance,
-    explain_permutation_importance,
-    explain_shap,
-    render_importance_markdown,
-)
+from configurable_automl_engine.experiment.ensemble import EnsembleModel
+from configurable_automl_engine.experiment.export import export_experiment
 from configurable_automl_engine.experiment.leaderboard import (
     Leaderboard,
     build_leaderboard,
@@ -91,9 +82,21 @@ from configurable_automl_engine.experiment.reporting import (
 )
 from configurable_automl_engine.experiment.result import ExperimentResult
 from configurable_automl_engine.experiment.store import ExperimentStore
-
-if TYPE_CHECKING:
-    from configurable_automl_engine.trainer import ModelTrainer
+from configurable_automl_engine.explain import (
+    DEFAULT_N_REPEATS,
+    DEFAULT_SAMPLE_ROWS,
+    ExplainNotAvailableError,
+    PermutationImportanceResult,
+    ShapFeatureImportance,
+    explain_permutation_importance,
+    explain_shap,
+    render_importance_markdown,
+)
+from configurable_automl_engine.trainer import ModelTrainer
+from configurable_automl_engine.training_engine import train_best_model
+from configurable_automl_engine.training_engine.result_registry import (
+    get_experiment_result_owned_by,
+)
 
 _ArtifactT = TypeVar("_ArtifactT")
 
@@ -315,10 +318,6 @@ class AutoMLExperiment:
         # Snapshot the data at run() time (see the module docstring for
         # the exact copy semantics).
         data = copy.copy(self._data)
-        # The engine layers are imported lazily inside run(): the facade
-        # module must stay importable without the training engine (the
-        # layered-imports contract and the pure result consumers).
-        from configurable_automl_engine.training_engine import train_best_model
 
         try:
             train_best_model(
@@ -355,10 +354,6 @@ class AutoMLExperiment:
         registration are logged and do not mask the run outcome (the
         run's own error propagates from the engine call).
         """
-        from configurable_automl_engine.training_engine.result_registry import (
-            get_experiment_result_owned_by,
-        )
-
         run_token = self._run_token
         if run_token is None:
             return
@@ -458,8 +453,6 @@ class AutoMLExperiment:
                 f"{result.status.value}); best_model() cannot load a "
                 "trainer."
             )
-        from configurable_automl_engine.trainer import ModelTrainer
-
         return ModelTrainer.load(model_path)
 
     def ensemble_model(self) -> Any:
@@ -490,8 +483,6 @@ class AutoMLExperiment:
                 "(enable general.ensemble in the configuration; the winner "
                 "model is available via best_model())."
             )
-        from configurable_automl_engine.experiment.ensemble import EnsembleModel
-
         return EnsembleModel.load(section["artifact_path"])
 
     @overload
@@ -566,7 +557,6 @@ class AutoMLExperiment:
             ExperimentNotRunError: The experiment has not been run yet.
         """
         result = self._require_result()
-        from configurable_automl_engine.experiment.export import export_experiment
 
         return export_experiment(result, directory)
 
