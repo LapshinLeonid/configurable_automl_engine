@@ -15,9 +15,10 @@ lives in the ``hpo`` package.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any, cast
+from typing import cast
 
 from optuna.trial import FrozenTrial, Trial
+from sklearn.compose import ColumnTransformer
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import (
@@ -25,6 +26,11 @@ from configurable_automl_engine.common.definitions import (
     ValidationStrategy,
 )
 from configurable_automl_engine.common.metrics import validate_custom_metrics
+from configurable_automl_engine.common.types import (
+    Frame,
+    ParamsInput,
+    TargetInput,
+)
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
 )
@@ -69,8 +75,8 @@ __all__ = [
 # ═════════════════════ PUBLIC: optimize() ═══════════════════════════════════
 def optimize(
     algo_name: str,
-    X: Any,
-    y: Any,
+    X: Frame,
+    y: TargetInput,
     *,
     data_oversampling: bool = False,
     data_oversampling_multiplier: float = 1.0,
@@ -79,7 +85,7 @@ def optimize(
     data_oversampling_add_noise: bool = False,
     data_oversampling_noise_level: float = 0.01,
     metric: str = "r2",
-    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, object]] | None = None,
     # accepted alias; ``validation_strategy`` takes precedence
     val_method: ValidationStrategy | str = "auto",
     # alias sent by training_engine.component
@@ -91,25 +97,25 @@ def optimize(
     random_state: int | None = 42,
     sampler_seed: int | None = None,
     train_test_split_test_size: float = 0.2,
-    space_overrides: dict[str, Callable[[Trial], dict[str, Any]]] | None = None,
-    initial_params: dict[str, Any] | None = None,
+    space_overrides: dict[str, Callable[[Trial], ParamsInput]] | None = None,
+    initial_params: ParamsInput | None = None,
     previous_trials: list[FrozenTrial] | None = None,
-    preprocessor: Any | None = None,
+    preprocessor: ColumnTransformer | None = None,
     categorical_features: list[str] | None = None,
     numerical_features: list[str] | None = None,
     encoding: EncodingStrategy | None = None,
-    preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
+    preprocessing_override: PreprocessingOverride | ParamsInput | None = None,
     winsorizer_exclude: list[str] | None = None,
     target_transform: TargetTransform | str = TargetTransform.none,
     target_transform_skew_threshold: float | None = None,
-    pruning: dict[str, Any] | None = None,
+    pruning: ParamsInput | None = None,
     high_cardinality_threshold: int | None = 50,
     high_cardinality_encoding: EncodingStrategy | None = "frequency",
     hashing_n_components: int = 16,
     target_encoding_smoothing: float = 20.0,
     target_encoding_fallback: float | None = None,
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
-    complexity_guard_cfg: ComplexityGuardConfig | dict[str, Any] | None = None,
+    feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None = None,
+    complexity_guard_cfg: ComplexityGuardConfig | ParamsInput | None = None,
     user_hyperparameter_keys: list[str] | None = None,
     limit_hyperparameters: bool = False,
     fit_best_model: bool = True,
@@ -405,7 +411,7 @@ def optimize(
         ),
         limit_hyperparameters=limit_hyperparameters,
         complexity_guard=as_complexity_guard_config(complexity_guard_cfg),
-        initial_params=initial_params,
+        initial_params=None if initial_params is None else dict(initial_params),
         previous_trials=previous_trials,
         preprocessor=preprocessor,
         categorical_features=categorical_features,
@@ -418,7 +424,11 @@ def optimize(
             target_encoding_smoothing=target_encoding_smoothing,
             target_encoding_fallback=target_encoding_fallback,
         ),
-        preprocessing_override=preprocessing_override,
+        preprocessing_override=(
+            dict(preprocessing_override)
+            if isinstance(preprocessing_override, Mapping)
+            else preprocessing_override
+        ),
         winsorizer_exclude=(
             None if winsorizer_exclude is None else list(winsorizer_exclude)
         ),
@@ -435,7 +445,11 @@ def optimize(
             ),
         ),
         target_transform_skew_threshold=target_transform_skew_threshold,
-        feature_selection_cfg=feature_selection_cfg,
+        feature_selection_cfg=(
+            dict(feature_selection_cfg)
+            if isinstance(feature_selection_cfg, Mapping)
+            else feature_selection_cfg
+        ),
         oversampling=OversamplingSettings(
             enable=data_oversampling,
             multiplier=data_oversampling_multiplier,
@@ -444,7 +458,7 @@ def optimize(
             add_noise=data_oversampling_add_noise,
             noise_level=data_oversampling_noise_level,
         ),
-        pruning=pruning,
+        pruning=None if pruning is None else dict(pruning),
         policies=InputPolicies(
             inf_policy=inf_policy,
             datetime_policy=datetime_policy,

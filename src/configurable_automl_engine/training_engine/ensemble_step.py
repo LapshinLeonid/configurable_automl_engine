@@ -27,12 +27,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
 
 import pandas as pd
 
 from configurable_automl_engine.common.definitions import MetricDirection
 from configurable_automl_engine.common.metrics import to_user_value, user_direction
+from configurable_automl_engine.common.types import DataFrame, JSONDict, Series, Target
 from configurable_automl_engine.experiment.ensemble import (
     EnsembleMember,
     EnsembleModel,
@@ -41,8 +41,10 @@ from configurable_automl_engine.experiment.ensemble import (
     select_top_k,
     winner_vs_ensemble_comparison,
 )
+from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.validation import resolved_n_repeats
 
+from .config_parser import Config
 from .finalists import _fit_finalist
 from .hpo_phases import _algorithms_as_dict
 from .state import PhaseContext, PreparedData
@@ -54,7 +56,7 @@ __all__ = ["build_ensemble_from_context", "top_k_from_leaderboard"]
 
 def _full_training_data(
     prepared: PreparedData,
-) -> tuple[pd.DataFrame, pd.Series, bool]:
+) -> tuple[DataFrame, Series, bool]:
     """Return the final-training data and whether an outer hold-out exists.
 
     With ``general.holdout_fraction`` set, ``prepared.X``/``prepared.y`` carry
@@ -162,7 +164,9 @@ def top_k_from_leaderboard(
     return selected, user_scores
 
 
-def _trainer_oof_by_repeat(trainer: Any, n_repeats: int) -> list[Any] | None:
+def _trainer_oof_by_repeat(
+    trainer: ModelTrainer, n_repeats: int
+) -> list[Target] | None:
     """Return one OOF prediction vector per repeat (or ``None``).
 
     With one repeat the representative ``oof_predictions_`` vector is
@@ -184,13 +188,13 @@ def _build_winner_comparison(
     *,
     prepared: PreparedData,
     selected: list[str],
-    predictors: Mapping[str, Any],
+    predictors: Mapping[str, ModelTrainer],
     weights: Mapping[str, float],
     winner_algo: str | None,
-    winner_trainer: Any | None,
+    winner_trainer: ModelTrainer | None,
     n_repeats: int,
     split_aggregation: str,
-) -> dict[str, Any] | None:
+) -> JSONDict | None:
     """Build the winner-vs-ensemble comparison from the member OOF vectors.
 
     The ensemble prediction of every repeat is the weighted average of the
@@ -203,7 +207,9 @@ def _build_winner_comparison(
     if winner_algo is None:
         _LOG.info("Ensemble comparison skipped: the run has no terminal winner")
         return None
-    member_predictions_by_repeat: list[dict[str, Any]] = [{} for _ in range(n_repeats)]
+    member_predictions_by_repeat: list[dict[str, Target]] = [
+        {} for _ in range(n_repeats)
+    ]
     for name in selected:
         vectors = _trainer_oof_by_repeat(predictors[name], n_repeats)
         if vectors is None:
@@ -216,7 +222,7 @@ def _build_winner_comparison(
         for repeat_index, vector in enumerate(vectors):
             member_predictions_by_repeat[repeat_index][name] = vector
 
-    winner_vectors: list[Any] | None = None
+    winner_vectors: list[Target] | None = None
     for trainer in (winner_trainer, predictors.get(winner_algo)):
         if trainer is None:
             continue
@@ -241,10 +247,10 @@ def _build_winner_comparison(
 
 def build_ensemble_from_context(
     *,
-    cfg: Any,
+    cfg: Config,
     prepared: PreparedData,
     ctx: PhaseContext,
-) -> tuple[EnsembleModel, dict[str, Any]] | None:
+) -> tuple[EnsembleModel, JSONDict] | None:
     """Build the weighted-average ensemble of the top-K leaderboard models.
 
     The step is best-effort: any failure (a member failed to retrain, no
@@ -265,7 +271,7 @@ def build_ensemble_from_context(
             terminal winner).
 
     Returns:
-        tuple[EnsembleModel, dict[str, Any]] | None: The built ensemble
+        tuple[EnsembleModel, JSONDict] | None: The built ensemble
             and its report section (without the artifact path — the
             caller saves the model and adds it), or ``None`` when the
             ensemble could not be built (the failure is logged).
@@ -318,8 +324,8 @@ def build_ensemble_from_context(
             len(full_X),
         )
     algos = _algorithms_as_dict(cfg.algorithms)
-    predictors: dict[str, Any] = {}
-    evaluation_predictors: dict[str, Any] = {}
+    predictors: dict[str, ModelTrainer] = {}
+    evaluation_predictors: dict[str, ModelTrainer] = {}
     scores: dict[str, float] = {}
     for name in selected:
         if name not in ctx.leaderboard_snapshot:

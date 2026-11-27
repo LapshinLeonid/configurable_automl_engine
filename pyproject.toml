@@ -138,6 +138,55 @@ module = [
 ]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = [
+    "configurable_automl_engine.common.custom_metrics",
+    "configurable_automl_engine.common.metrics",
+    "configurable_automl_engine.common.scorer_primitives",
+    "configurable_automl_engine.common.validation_utils",
+    "configurable_automl_engine.experiment.*",
+    "configurable_automl_engine.explain",
+    "configurable_automl_engine.feature_selection",
+    "configurable_automl_engine.hpo.fold_eval",
+    "configurable_automl_engine.hpo.plans",
+    "configurable_automl_engine.models",
+    "configurable_automl_engine.preprocessing.target_transform",
+    "configurable_automl_engine.trainer",
+    "configurable_automl_engine.trainer_data",
+    "configurable_automl_engine.trainer_params",
+    "configurable_automl_engine.trainer_quick",
+    "configurable_automl_engine.trainer_state",
+    "configurable_automl_engine.tuner",
+    "configurable_automl_engine.training_engine.artifact",
+    "configurable_automl_engine.training_engine.ensemble_step",
+    "configurable_automl_engine.training_engine.experiment_facade",
+    "configurable_automl_engine.training_engine.parallel_transport",
+    "configurable_automl_engine.training_engine.sanity_circuits",
+    "configurable_automl_engine.training_engine.sanity_result",
+    "configurable_automl_engine.training_engine.state",
+    "configurable_automl_engine.training_engine.thread_pool",
+    "configurable_automl_engine.validation",
+]
+disallow_any_explicit = true
+
+[[tool.mypy.overrides]]
+# The aliases module keeps two shapes deliberately open: ``Series`` is
+# ``pd.Series[Any]`` because a DataFrame column can hold any dtype, and the
+# raw metric registry is a heterogeneous ``Callable[..., float]``. Both are
+# confined to this module so the rest of the package stays explicit-Any free.
+module = ["configurable_automl_engine.common.types"]
+disallow_any_explicit = false
+
+[[tool.mypy.overrides]]
+# ``disallow_any_explicit`` flags every ``pydantic.BaseModel`` subclass in the
+# store module (pydantic's own ``__init__(**data: Any)``), not an ``Any`` in
+# the module source: with pydantic 2.14.4 and mypy 2.4.1,
+# ``mypy --no-incremental --disallow-any-explicit
+# src/configurable_automl_engine/experiment/store.py`` reports
+# ``RunSummary`` (``Explicit "Any" is not allowed``).
+module = ["configurable_automl_engine.experiment.store"]
+disallow_any_explicit = false
+
 [tool.importlinter]
 root_package = "configurable_automl_engine"
 exclude_type_checking_imports = false

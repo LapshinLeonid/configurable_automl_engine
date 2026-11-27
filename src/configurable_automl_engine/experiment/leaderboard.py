@@ -57,7 +57,6 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
 
 from configurable_automl_engine.common.definitions import (
     MetricDirection,
@@ -65,6 +64,7 @@ from configurable_automl_engine.common.definitions import (
     RunStatus,
     RunStepStatus,
 )
+from configurable_automl_engine.common.types import Params
 from configurable_automl_engine.experiment.result import (
     AlgorithmRun,
     ExperimentResult,
@@ -174,7 +174,7 @@ def _format_score(score: float) -> str:
     return f"{score:.3f}"
 
 
-def _register_algorithm_names(container: Any, order: dict[str, int]) -> None:
+def _register_algorithm_names(container: object, order: dict[str, int]) -> None:
     """Register the algorithm names of one config container into ``order``.
 
     The ``algorithms`` section of a phase (or of the top-level config) may
@@ -288,7 +288,7 @@ class LeaderboardEntry:
     trials: int
     phase: str
     phase_action: RunPhaseAction
-    params: dict[str, Any]
+    params: Params
     validation_strategy: str
     n_folds: int
     training_time_seconds: float | None

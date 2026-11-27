@@ -15,13 +15,21 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import MISSING, dataclass, field, fields, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.types import (
+    Array,
+    BoolArray,
+    Frame,
+    Params,
+    Series,
+    Target,
+)
 
 if TYPE_CHECKING:
-    import numpy as np
-    import pandas as pd
+    from _typeshed import DataclassInstance
+    from sklearn.compose import ColumnTransformer
 
     from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
     from configurable_automl_engine.common.definitions import SerializationFormat
@@ -49,7 +57,7 @@ if TYPE_CHECKING:
 ARTIFACT_FORMAT_VERSION = 3
 
 
-def _frozen_slots_setstate(self: Any, state: Any) -> None:
+def _frozen_slots_setstate(self: DataclassInstance, state: object) -> None:
     """Restore a frozen slots-dataclass state, tolerating shorter states.
 
     A pickle of a slots dataclass stores the field values as a list zipped
@@ -93,7 +101,7 @@ class TrainerSettings:
     """
 
     algorithm: str
-    hyperparams: dict[str, Any]
+    hyperparams: Params
     metric: str
     random_state: int | None
     serialization_format: SerializationFormat
@@ -150,10 +158,10 @@ class TrainingData:
             otherwise).
     """
 
-    X: Any = field(compare=False)
-    y: Any = field(compare=False)
+    X: Frame | Series = field(compare=False)
+    y: Target = field(compare=False)
     feature_names: list[str] | None
-    detected_dtypes: Any = field(compare=False)
+    detected_dtypes: Series | None = field(compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +181,13 @@ class PreparedFeatures:
         detected_dtypes: The dtypes of the input frame (``None`` for arrays).
     """
 
-    X: Any = field(compare=False)
+    X: Frame | Series | None = field(compare=False)
     feature_names: list[str]
     categorical_features: list[str]
     numerical_features: list[str]
     dropped_features: list[str]
     datetime_expansion: dict[str, list[str]]
-    detected_dtypes: Any = field(compare=False)
+    detected_dtypes: Series | None = field(compare=False)
 
     def without_matrix(self) -> PreparedFeatures:
         """Return the features with the fit-time matrix released.
@@ -193,7 +201,7 @@ class PreparedFeatures:
         return replace(self, X=None)
 
 
-def _prepared_features_getstate(self: PreparedFeatures) -> list[Any]:
+def _prepared_features_getstate(self: PreparedFeatures) -> list[object]:
     """Serialize the features without the fit-time matrix.
 
     The matrix is not read after ``fit``; dropping it keeps the
@@ -214,7 +222,7 @@ PreparedFeatures.__getstate__ = _prepared_features_getstate  # type: ignore[meth
 class TrainerPreprocessor:
     """The (unfitted) preprocessor of the trainer and its resolved preset."""
 
-    preprocessor: Any = field(compare=False)
+    preprocessor: ColumnTransformer = field(compare=False)
     preset: PreprocessingPreset
 
 
@@ -253,7 +261,7 @@ class ValidationScores:
 
     val_score: float
     additional_scores: dict[str, float]
-    oof_predictions: pd.Series | np.ndarray | None = field(compare=False)
+    oof_predictions: Series | Array | None = field(compare=False)
     oof_score: float | None
     oof_coverage: float | None
     repeat_scores: list[float] | None = None
@@ -262,11 +270,11 @@ class ValidationScores:
     score_std: float | None = None
     oof_repeat_scores: list[float] | None = None
     oof_score_std: float | None = None
-    oof_predictions_by_repeat: list[pd.Series | np.ndarray] | None = field(
+    oof_predictions_by_repeat: list[Series | Array] | None = field(
         default=None, compare=False
     )
 
-    def with_oof_repeat_vectors(self, vectors: Iterable[Any]) -> ValidationScores:
+    def with_oof_repeat_vectors(self, vectors: Iterable[Target]) -> ValidationScores:
         """Return a copy carrying the per-repeat OOF vectors if absent.
 
         The vectors are dropped from the serialized state on purpose; the
@@ -285,7 +293,7 @@ class ValidationScores:
         return replace(self, oof_predictions_by_repeat=list(vectors))
 
 
-def _validation_scores_getstate(self: ValidationScores) -> list[Any]:
+def _validation_scores_getstate(self: ValidationScores) -> list[object]:
     """Serialize the scores without the per-repeat OOF vectors.
 
     The vectors are a diagnostic and are also used by the report path to
@@ -342,7 +350,7 @@ class TrainerViewMixin:
         return {} if self._scores is None else self._scores.additional_scores
 
     @property
-    def oof_predictions_(self) -> pd.Series | np.ndarray | None:
+    def oof_predictions_(self) -> Series | Array | None:
         """The out-of-fold prediction vector (``None`` before fit())."""
         return None if self._scores is None else self._scores.oof_predictions
 
@@ -387,7 +395,7 @@ class TrainerViewMixin:
         return None if self._scores is None else self._scores.oof_score_std
 
     @property
-    def oof_predictions_by_repeat_(self) -> list[pd.Series | np.ndarray] | None:
+    def oof_predictions_by_repeat_(self) -> list[Series | Array] | None:
         """The OOF prediction vector of every repeat (``None`` for one)."""
         return None if self._scores is None else self._scores.oof_predictions_by_repeat
 
@@ -403,4 +411,4 @@ class FeatureSelectionResult:
     """
 
     active: bool = False
-    mask: np.ndarray | None = field(default=None, compare=False)
+    mask: BoolArray | None = field(default=None, compare=False)

@@ -35,9 +35,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 import numpy as np
 from automl_contracts.custom_metrics import ERR_CUSTOM_NAME_INVALID
@@ -74,11 +74,17 @@ from configurable_automl_engine.common.scorer_primitives import (
     rmse,
 )
 from configurable_automl_engine.common.sklearn_compat import scorer_sign
+from configurable_automl_engine.common.types import (
+    Array,
+    MetricFn,
+    Scorer,
+    Target,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def oof_rmse(y_true: Any, y_pred: Any, *, expected: Any | None = None) -> float:
+def oof_rmse(y_true: Target, y_pred: Target, *, expected: Array | None = None) -> float:
     """Compute RMSE over the whole aligned OOF vector.
 
     Unlike averaging by folds, the metric is computed over the entire
@@ -245,7 +251,7 @@ class NRMSEZeroRangeError(ValueError):
     """Raised when y_true has zero range inside a CV-split."""
 
 
-def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -> float:
+def _global_nrmse(y_true: Array, y_pred: Array, target_range: float) -> float:
     """Compute the global normalized RMSE
     using a fixed range.
     Calculation logic:
@@ -266,7 +272,7 @@ def _global_nrmse(y_true: np.ndarray, y_pred: np.ndarray, target_range: float) -
     return rmse / target_range
 
 
-def get_global_nrmse_scorer(global_y: np.ndarray) -> ScorerCallable:
+def get_global_nrmse_scorer(global_y: Array) -> ScorerCallable:
     """Create a Scikit-Learn compatible scorer object for the global NRMSE.
     Creation logic:
     1. The minimum and maximum values are computed
@@ -280,7 +286,7 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> ScorerCallable:
         global_y: Full target variable vector
         for computing the global range.
     Returns:
-        Any: A Scorer object for use in GridSearchCV or cross_validate.
+        ScorerCallable: A Scorer object for use in GridSearchCV or cross_validate.
     """
     y_max = np.max(global_y)
     y_min = np.min(global_y)
@@ -296,7 +302,7 @@ def get_global_nrmse_scorer(global_y: np.ndarray) -> ScorerCallable:
 # --------------------------------------------------------------------------- #
 #  Private registry of "raw" metrics (without sign inversion etc.)
 # --------------------------------------------------------------------------- #
-_METRICS: dict[str, Callable[..., Any]] = {
+_METRICS: dict[str, MetricFn] = {
     # "lower → better"
     "rmse": rmse,
     "nrmse": nrmse,
@@ -311,7 +317,7 @@ _METRICS: dict[str, Callable[..., Any]] = {
 # --------------------------------------------------------------------------- #
 #  Public helpers — may be useful externally
 # --------------------------------------------------------------------------- #
-def get_metric(name: str) -> Callable[..., Any]:
+def get_metric(name: str) -> MetricFn:
     """Get the "raw" metric computation function from the internal registry.
     Lookup logic:
     1. The metric name is lowercased to avoid lookup errors.
@@ -320,7 +326,7 @@ def get_metric(name: str) -> Callable[..., Any]:
     Args:
         name: Metric name (e.g. 'rmse' or 'nrmse').
     Returns:
-        Callable[..., Any]: A function accepting (y_true, y_pred) and returning a float.
+        MetricFn: A function accepting (y_true, y_pred) and returning a float.
     """
     custom = lookup_custom_metric(name)
     if custom is not None:
@@ -331,7 +337,7 @@ def get_metric(name: str) -> Callable[..., Any]:
     return _METRICS[lname]
 
 
-def _resolve_scorer(name: str) -> Callable[..., Any]:
+def _resolve_scorer(name: str) -> Scorer:
     """Resolve a metric name into an actual scorer object.
 
     Resolution logic:
@@ -343,12 +349,12 @@ def _resolve_scorer(name: str) -> Callable[..., Any]:
     over both."""
     custom = lookup_custom_metric(name)
     if custom is not None:
-        return cast(Callable[..., Any], build_custom_scorer(custom))
+        return build_custom_scorer(custom)
     lname = name.lower()
     if lname in SCORER_OBJECTS:
         return SCORER_OBJECTS[lname][0]
     try:
-        return cast(Callable[..., Any], sklearn_get_scorer(lname))
+        return cast(Scorer, sklearn_get_scorer(lname))
     except ValueError as err:
         raise ValueError(
             f"Metric '{name}' not implemented. Use one of the registered "
@@ -538,9 +544,7 @@ def to_user_value(name: str, raw_value: float) -> float:
     return value
 
 
-def get_scorer_object(
-    name: str, global_y: np.ndarray | None = None
-) -> Callable[..., Any] | str:
+def get_scorer_object(name: str, global_y: Array | None = None) -> Scorer | str:
     """Get a scorer object ready for use in sklearn tools.
     Lookup logic:
     1. Handle 'global_nrmse': requires `global_y` to be present
@@ -556,7 +560,7 @@ def get_scorer_object(
     """
     custom = lookup_custom_metric(name)
     if custom is not None:
-        return cast(Callable[..., Any], build_custom_scorer(custom))
+        return build_custom_scorer(custom)
     lname = name.lower()
 
     # Special handling for the global NRMSE
@@ -574,7 +578,7 @@ def get_scorer_object(
     # Otherwise return the name as is
     # (sklearn will find the built-in metric itself)
     scorer = sklearn_get_scorer(lname)
-    return cast("Callable[..., Any] | str", scorer)
+    return cast(Scorer | str, scorer)
 
 
 # --------------------------------------------------------------------------- #
@@ -606,7 +610,7 @@ def reserved_metric_names() -> frozenset[str]:
     )
 
 
-def check_custom_metric_name(name: Any) -> None:
+def check_custom_metric_name(name: object) -> None:
     """Check that ``name`` can name a custom metric.
 
     Raises:
@@ -630,7 +634,7 @@ def check_custom_metric_name(name: Any) -> None:
 
 
 def validate_custom_metrics(
-    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, object]] | None,
 ) -> dict[str, CustomMetricSpec]:
     """Validate custom metric declarations keyed by their metric name.
 

@@ -25,6 +25,7 @@ import numpy as np
 import optuna
 from optuna.trial import Trial
 
+from configurable_automl_engine.common.types import Params
 from configurable_automl_engine.hpo.complexity_guard import (
     ComplexityGuardConfig,
     apply_complexity_guard,
@@ -131,7 +132,7 @@ def build_search_space(
         return remap_legacy_param_names(algo_name, user_overrides)
 
     resolved = resolve_algorithm_name(algo_name)
-    space = DEFAULT_SPACES.get(resolved, {}).copy()
+    space: Params = dict(DEFAULT_SPACES.get(resolved, {}))
     if user_overrides:
         # Apply LEGACY_PARAM_MAPPINGS to the user overrides BEFORE the merge so
         # that an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
@@ -789,7 +790,7 @@ def _warn_if_optimum_at_boundary(
     if not search.space_dict:
         return
     for name, entry in search.space_dict.items():
-        if not hasattr(entry, "dist_type"):
+        if not isinstance(entry, SearchSpaceEntry):
             continue
         dist_type = entry.dist_type
         if dist_type not in ("int", "float", "float_log"):

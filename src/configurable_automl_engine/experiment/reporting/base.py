@@ -41,8 +41,9 @@ Contract:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Generic, TypeAlias, TypeVar, cast
 
 from configurable_automl_engine.experiment.result import ExperimentResult
 
@@ -121,13 +122,11 @@ class CompositeReporter(Reporter[tuple[ReporterArtifact, ...]]):
             allowed (the composite is a no-op returning an empty tuple).
     """
 
-    def __init__(
-        self, reporters: list[Reporter[Any]] | tuple[Reporter[Any], ...]
-    ) -> None:
-        self._reporters: tuple[Reporter[Any], ...] = tuple(reporters)
+    def __init__(self, reporters: Sequence[Reporter[object]]) -> None:
+        self._reporters: tuple[Reporter[object], ...] = tuple(reporters)
 
     @property
-    def reporters(self) -> tuple[Reporter[Any], ...]:
+    def reporters(self) -> tuple[Reporter[object], ...]:
         """The registered reporters, in invocation order."""
         return self._reporters
 
@@ -148,4 +147,7 @@ class CompositeReporter(Reporter[tuple[ReporterArtifact, ...]]):
                 fast); artifacts of the already-run reporters stay
                 produced.
         """
-        return tuple(reporter.report(result) for reporter in self._reporters)
+        return tuple(
+            cast(ReporterArtifact, reporter.report(result))
+            for reporter in self._reporters
+        )

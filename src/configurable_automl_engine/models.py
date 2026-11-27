@@ -8,7 +8,7 @@ import inspect
 import logging
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Any
+from typing import cast
 
 from automl_contracts.definitions import (
     AVAILABLE_ALGORITHMS as AVAILABLE_ALGORITHMS,
@@ -24,6 +24,7 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import (
     RBF,
     ConstantKernel,
+    Kernel,
     Matern,
     RationalQuadratic,
     WhiteKernel,
@@ -44,6 +45,7 @@ from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 
 from configurable_automl_engine.common.dependency_utils import is_installed
+from configurable_automl_engine.common.types import Params
 
 Algorithm = str
 
@@ -63,7 +65,7 @@ MODEL_RANDOM_STATE = 42
 # ----------------------------------------------------------------------------- #
 
 
-def _get_factory() -> dict[str, Any]:
+def _get_factory() -> dict[str, type | None]:
     factory = {
         "elasticnet": ElasticNet,
         "sgdregressor": SGDRegressor,
@@ -119,14 +121,14 @@ GPR_KERNEL_TYPES: tuple[str, ...] = ("rbf", "matern", "rational_quadratic")
 _DEFAULT_BOUNDS = (1e-3, 1e3)
 
 
-def _make_gpr_kernel(kernel_type: str) -> Any:
+def _make_gpr_kernel(kernel_type: str) -> Kernel:
     """Build the GPR kernel for a given kernel family name.
 
     Every kernel is composed as ``amplitude * base_kernel + white_noise``:
     an explicit output-scale amplitude, a base kernel with an adjusted
     length scale, and an explicit noise component. The default kernel is
     ``ConstantKernel(1.0) * RBF(1.0) + WhiteKernel(1e-5)``."""
-    base: Any
+    base: Kernel
     if kernel_type == "matern":
         base = Matern(
             length_scale=1.0,
@@ -401,8 +403,8 @@ def _get_constructor_param_info(cls: type) -> tuple[frozenset[str], bool]:
 def clean_hyperparameters(
     algo_key: str,
     estimator_cls: type,
-    hyperparams: dict[str, Any],
-) -> dict[str, Any]:
+    hyperparams: Params,
+) -> Params:
     """Filter and remap hyperparameters to match the estimator constructor.
 
     1. **Remap** the names listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g.
@@ -421,7 +423,7 @@ def clean_hyperparameters(
     """
     accepted_params, accepts_var_kwargs = _get_constructor_param_info(estimator_cls)
     mappings = LEGACY_PARAM_MAPPINGS.get(algo_key, {})
-    cleaned: dict[str, Any] = {}
+    cleaned: Params = {}
 
     for key, value in hyperparams.items():
         # 1. Remap the mapped keys
@@ -443,9 +445,7 @@ def clean_hyperparameters(
     return cleaned
 
 
-def remap_legacy_param_names(
-    algo_key: str, hyperparams: dict[str, Any]
-) -> dict[str, Any]:
+def remap_legacy_param_names(algo_key: str, hyperparams: Params) -> Params:
     """Remap the names from ``LEGACY_PARAM_MAPPINGS``, once before the Optuna loop.
 
     Renames the keys listed in :data:`LEGACY_PARAM_MAPPINGS` (e.g. ``n_iter`` →
@@ -474,7 +474,7 @@ def remap_legacy_param_names(
     if not mappings:
         return dict(hyperparams)
 
-    remapped: dict[str, Any] = {}
+    remapped: Params = {}
     for key, value in hyperparams.items():
         if key in mappings:
             new_key = mappings[key]
@@ -631,7 +631,7 @@ def resolve_algorithm_name(algorithm: str) -> str:
     return algorithm.lower()
 
 
-def _gpr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+def _gpr_defaults(hyperparams: Params) -> Params:
     """Apply the GaussianProcessRegressor defaults.
 
     A proper default kernel (amplitude × RBF + white noise), target
@@ -648,7 +648,7 @@ def _gpr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
     Args:
         hyperparams: The hyperparameters (modified in place).
     """
-    kernel_type = hyperparams.pop("kernel_type", "rbf")
+    kernel_type = cast(str, hyperparams.pop("kernel_type", "rbf"))
     if "kernel" not in hyperparams:
         hyperparams["kernel"] = _make_gpr_kernel(kernel_type)
     hyperparams.setdefault("normalize_y", True)
@@ -656,7 +656,7 @@ def _gpr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
     return hyperparams
 
 
-def _svr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+def _svr_defaults(hyperparams: Params) -> Params:
     """Apply the SVR defaults.
 
     If ``max_iter`` is not set, a cap (10,000 iterations) is added so that
@@ -669,7 +669,7 @@ def _svr_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
     return hyperparams
 
 
-def _isotonic_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
+def _isotonic_defaults(hyperparams: Params) -> Params:
     """Apply and validate the IsotonicRegression ``out_of_bounds`` default.
 
     IsotonicRegression defaults to ``out_of_bounds='nan'``: validation points
@@ -700,14 +700,14 @@ def _isotonic_defaults(hyperparams: dict[str, Any]) -> dict[str, Any]:
 
 #: Algorithm-specific defaults applied by :func:`create_model`: each function
 #: takes the hyperparameter dict and returns it with the defaults filled in.
-_ALGORITHM_DEFAULTS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+_ALGORITHM_DEFAULTS: dict[str, Callable[[Params], Params]] = {
     "gaussian_process_regression": _gpr_defaults,
     "svr": _svr_defaults,
     "isotonic_regression": _isotonic_defaults,
 }
 
 
-def _resolve_estimator_class(algorithm: Any) -> tuple[str, type]:
+def _resolve_estimator_class(algorithm: object) -> tuple[str, type]:
     """Resolve the algorithm name into its key and estimator class."""
     if not isinstance(algorithm, str):
         raise TypeError(f"Algorithm must be a string, got: {type(algorithm).__name__}")
@@ -727,7 +727,7 @@ def _resolve_estimator_class(algorithm: Any) -> tuple[str, type]:
     return algo_key, estimator_cls
 
 
-def _reject_unknown_hyperparameters(algo_key: str, hyperparams: dict[str, Any]) -> None:
+def _reject_unknown_hyperparameters(algo_key: str, hyperparams: Params) -> None:
     """Reject hyperparameter names the estimator does not accept.
 
     Unknown names are rejected exactly as in the config validation
@@ -748,7 +748,7 @@ def _reject_unknown_hyperparameters(algo_key: str, hyperparams: dict[str, Any]) 
 
 
 def _inject_random_state(
-    algo_key: str, estimator_cls: type, hyperparams: dict[str, Any]
+    algo_key: str, estimator_cls: type, hyperparams: Params
 ) -> None:
     """Seed stochastic estimators deterministically (in place).
 
@@ -782,7 +782,7 @@ def _inject_random_state(
 
 
 def create_model(
-    algorithm: Algorithm = "elasticnet", **hyperparams: Any
+    algorithm: Algorithm = "elasticnet", **hyperparams: object
 ) -> RegressorMixin:
     """
     Returns an instance of the selected regressor.

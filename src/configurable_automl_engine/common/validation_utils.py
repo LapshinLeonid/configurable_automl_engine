@@ -11,20 +11,42 @@ from __future__ import annotations
 import logging
 import math
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sized
 from math import sqrt
-from typing import Any, TypeVar, cast
+from typing import TypedDict, TypeVar, cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 
 from configurable_automl_engine.common.datetime_features import (
     _apply_datetime_policy,
     _format_column_list,
 )
 from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.types import Array, DataFrame, Frame, Series
 
-_InfInput = TypeVar("_InfInput", bound=pd.DataFrame | np.ndarray)
+_InfInput = TypeVar("_InfInput", bound=Frame)
+
+
+class ValidationDecision(TypedDict, total=False):
+    """The resolved 'auto' validation decision.
+
+    Every key is optional because only the keys relevant to the selected
+    ``method`` are populated.
+    """
+
+    method: str
+    k: int
+    average_test_size: float
+    warning: str
+    note: str
+    regime: str
+    test_percent: int
+    test_size: int
+    train_size: int
+    reason: str
+
 
 #: Fraction of unique values (nunique / n) above which an object/string column
 #: is considered ID-like and flagged with a WARNING.
@@ -91,17 +113,17 @@ _LOW_CONFIDENCE_WARNING = (
     "Low confidence: High variance expected (N is barely sufficient for P)."
 )
 
-_ValidationRule = Callable[[int, int], dict[str, Any] | None]
+_ValidationRule = Callable[[int, int], ValidationDecision | None]
 
 
-def _loo_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+def _loo_decision(n_samples: int, n_features: int) -> ValidationDecision | None:
     """Return the LOO decision for critically small samples with a good N/P ratio."""
     if n_samples <= 15 and n_samples >= 2 * n_features:
         return {"method": "LOO"}
     return None
 
 
-def _fixed_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+def _fixed_kfold_decision(n_samples: int, n_features: int) -> ValidationDecision | None:
     """Return the fixed 3-4 fold decision for small samples (16 <= N <= 50)."""
     if not 16 <= n_samples <= 50:
         return None
@@ -123,7 +145,9 @@ def _fixed_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] | N
     }
 
 
-def _mid_size_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+def _mid_size_kfold_decision(
+    n_samples: int, n_features: int
+) -> ValidationDecision | None:
     """Return the fixed 5-fold decision for mid-size samples with N >= 10*P."""
     if 200 <= n_samples < 50000 and n_samples >= 10 * n_features:
         return {
@@ -134,7 +158,9 @@ def _mid_size_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any] 
     return None
 
 
-def _standard_split_decision(n_samples: int, n_features: int) -> dict[str, Any] | None:
+def _standard_split_decision(
+    n_samples: int, n_features: int
+) -> ValidationDecision | None:
     """Return the standard hold-out decision for large samples (N >= 50000)."""
     if n_samples < 50000 or n_samples < 10 * n_features:
         return None
@@ -154,7 +180,7 @@ def _standard_split_decision(n_samples: int, n_features: int) -> dict[str, Any] 
 
 def _high_dimensional_split_decision(
     n_samples: int, n_features: int
-) -> dict[str, Any] | None:
+) -> ValidationDecision | None:
     """Return the high-dimensional hold-out decision for 5P <= N < 10P."""
     if n_samples < 50000 or not 5 * n_features <= n_samples < 10 * n_features:
         return None
@@ -176,7 +202,7 @@ def _high_dimensional_split_decision(
     }
 
 
-def _continuous_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any]:
+def _continuous_kfold_decision(n_samples: int, n_features: int) -> ValidationDecision:
     """Return the continuous k-fold decision used when no fixed rule matches."""
     # Micro-samples are protected from k > N.
     if n_samples <= 5:
@@ -192,7 +218,7 @@ def _continuous_kfold_decision(n_samples: int, n_features: int) -> dict[str, Any
 
     # Relabel to LOO if k == N (preserving the warning).
     if k == n_samples:
-        result: dict[str, Any] = {
+        result: ValidationDecision = {
             "method": "LOO",
             "note": "k-fold with k=N is equivalent to LOO",
         }
@@ -222,7 +248,7 @@ _VALIDATION_RULES: tuple[_ValidationRule, ...] = (
 )
 
 
-def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
+def choose_validation_method(n_samples: int, n_features: int) -> ValidationDecision:
     """Deterministically select a validation method for regression.
 
     The heuristic is fully deterministic given ``(N, P)`` so every caller
@@ -274,7 +300,9 @@ def choose_validation_method(n_samples: int, n_features: int) -> dict[str, Any]:
     return _continuous_kfold_decision(n_samples, n_features)
 
 
-def effective_train_size_from_decision(n_total: int, decision: dict[str, Any]) -> int:
+def effective_train_size_from_decision(
+    n_total: int, decision: ValidationDecision
+) -> int:
     """Return the effective train size implied by a resolved 'auto' decision.
 
     Maps a decision dict produced by :func:`choose_validation_method` to the
@@ -306,18 +334,18 @@ def effective_train_size_from_decision(n_total: int, decision: dict[str, Any]) -
     return max(0, n_total - 1)
 
 
-def validate_df_not_empty(df: pd.DataFrame) -> None:
+def validate_df_not_empty(df: DataFrame) -> None:
     """
     Checks if the input is a non-empty pandas DataFrame.
     Raises TypeError if not a DataFrame, and ValueError if empty.
     """
-    if not isinstance(df, pd.DataFrame):
+    if not isinstance(df, DataFrame):
         raise TypeError(f"Input data must be a pandas.DataFrame, got {type(df)}")
     if df.empty:
         raise ValueError("Input dataframe is empty")
 
 
-def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
+def check_target_exists(df: DataFrame, target_col: str) -> None:
     """
     Verifies that the target column exists in the DataFrame.
     """
@@ -328,7 +356,7 @@ def check_target_exists(df: pd.DataFrame, target_col: str) -> None:
         )
 
 
-def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Series]:
+def prepare_X_y(df: DataFrame, target_col: str) -> tuple[DataFrame, Series]:
     """
     Splits the DataFrame into features (X) and target (y).
 
@@ -342,7 +370,7 @@ def prepare_X_y(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, pd.Ser
     return X, y
 
 
-def check_target_numeric(y: Any) -> None:
+def check_target_numeric(y: object) -> None:
     """
     Verify that the target vector is numeric and free of NaN/±inf.
 
@@ -359,15 +387,16 @@ def check_target_numeric(y: Any) -> None:
         ValueError: If the target is non-numeric or contains NaN/±inf.
     """
     try:
-        y_float = np.asarray(y, dtype=float).reshape(-1)
+        y_float = np.asarray(cast(ArrayLike, y), dtype=float).reshape(-1)
     except (TypeError, ValueError) as err:
         raise ValueError(
             f"Target column '{getattr(y, 'name', 'y')}' must be numeric"
         ) from err
-    if y_float.size != len(y):
+    if y_float.size != len(cast(Sized, y)):
         raise ValueError(
             f"Target column '{getattr(y, 'name', 'y')}' must be a single "
-            f"column of numbers; got {y_float.size} values for {len(y)} rows"
+            f"column of numbers; got {y_float.size} values for "
+            f"{len(cast(Sized, y))} rows"
         )
     if not np.all(np.isfinite(y_float)):
         n_non_finite = int(np.sum(~np.isfinite(y_float)))
@@ -377,7 +406,7 @@ def check_target_numeric(y: Any) -> None:
         )
 
 
-def check_target_constant(y: Any) -> None:
+def check_target_constant(y: object) -> None:
     """Verify that the target vector is not constant.
 
     A constant target (a single unique value) makes training meaningless:
@@ -397,7 +426,7 @@ def check_target_constant(y: Any) -> None:
         ValueError: If the target contains a single unique value.
     """
     try:
-        y_float = np.asarray(y, dtype=float).reshape(-1)
+        y_float = np.asarray(cast(ArrayLike, y), dtype=float).reshape(-1)
     except (TypeError, ValueError) as err:
         raise ValueError(
             f"Target column '{getattr(y, 'name', 'y')}' must be numeric"
@@ -410,7 +439,7 @@ def check_target_constant(y: Any) -> None:
     # loses precision for large integers (> 2**53), so distinct int64 values
     # could collapse into one float. The float path is only a fallback for
     # inputs without a usable native dtype.
-    y_native = np.asarray(y).reshape(-1)
+    y_native = np.asarray(cast(ArrayLike, y)).reshape(-1)
     y_unique = y_native if y_native.dtype.kind in "iub" else y_float
     if np.unique(y_unique).size <= 1:
         raise ValueError(
@@ -455,9 +484,10 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
             f"Unknown inf_policy: {inf_policy!r}. Expected 'as_missing' or 'error'."
         )
 
-    numeric_cols: list[Any] = []
+    numeric_cols: list[str] = []
     labels: list[str]
-    if isinstance(X, pd.DataFrame):
+    numeric_data: Array
+    if isinstance(X, DataFrame):
         numeric_cols = X.select_dtypes(include=["number"]).columns.tolist()
         if not numeric_cols:
             return X
@@ -494,7 +524,7 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
         "preprocessor.",
         detail,
     )
-    if isinstance(X, pd.DataFrame):
+    if isinstance(X, DataFrame):
         out = X.copy()
         out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
         return cast(_InfInput, out)
@@ -504,13 +534,13 @@ def apply_inf_policy(X: _InfInput, inf_policy: str = "as_missing") -> _InfInput:
 
 
 def validate_features(
-    X: pd.DataFrame,
+    X: DataFrame,
     *,
     inf_policy: str = "as_missing",
     datetime_policy: str = "expand",
     drop_id_like_columns: bool = False,
     warn_id_like: bool = True,
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[DataFrame, list[str]]:
     """Validate the feature matrix and optionally repair it.
 
     Runs all input-data diagnostics required for a meaningful regression
@@ -586,7 +616,7 @@ def validate_features(
     return out, generated
 
 
-def _reject_duplicate_columns(X: pd.DataFrame) -> None:
+def _reject_duplicate_columns(X: DataFrame) -> None:
     """Raise ``ValueError`` listing the duplicated column names of ``X``."""
     duplicate_cols = sorted(
         {col for col, count in Counter(X.columns).items() if count > 1}
@@ -601,7 +631,7 @@ def _reject_duplicate_columns(X: pd.DataFrame) -> None:
         )
 
 
-def _is_id_like(series: pd.Series, n_rows: int) -> bool:
+def _is_id_like(series: Series, n_rows: int) -> bool:
     """Whether a column matches the row-identifier heuristic.
 
     Args:
@@ -616,7 +646,7 @@ def _is_id_like(series: pd.Series, n_rows: int) -> bool:
     return False
 
 
-def _find_id_like_columns(X: pd.DataFrame) -> list[str]:
+def _find_id_like_columns(X: DataFrame) -> list[str]:
     """Return the ID-like columns of ``X`` (see :func:`_is_id_like`).
 
     Returns:
@@ -629,8 +659,8 @@ def _find_id_like_columns(X: pd.DataFrame) -> list[str]:
 
 
 def _handle_id_like_columns(
-    X: pd.DataFrame, id_like: list[str], *, drop: bool, warn: bool
-) -> pd.DataFrame:
+    X: DataFrame, id_like: list[str], *, drop: bool, warn: bool
+) -> DataFrame:
     """Report and optionally drop the ID-like columns."""
     if not id_like:
         return X

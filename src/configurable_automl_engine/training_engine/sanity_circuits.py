@@ -80,12 +80,18 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import cast
 
 import numpy as np
-import pandas as pd
 from sklearn.metrics import mean_squared_error
 
+from configurable_automl_engine.common.types import (
+    Array,
+    BoolArray,
+    DataFrame,
+    Frame,
+    Predictor,
+)
 from configurable_automl_engine.training_engine.sanity_result import _to_float_vector
 
 
@@ -132,7 +138,7 @@ def _diversity_fails(
     return diversity < threshold
 
 
-def _r2_oof(y: np.ndarray, y_pred: np.ndarray) -> float:
+def _r2_oof(y: Array, y_pred: Array) -> float:
     """Out-of-fold R² of the predictions (constant-model baseline).
 
     ``1 - Var(y - pred) / Var(y)`` — the fraction of variance explained.
@@ -185,7 +191,7 @@ def _rounding_decimals(std_y: float) -> int:
     return int(min(max(2 - order, _MIN_DECIMALS), _MAX_DECIMALS))
 
 
-def _core_estimator(model: Any) -> Any:
+def _core_estimator(model: object) -> object:
     """Unwrap sklearn/imblearn pipelines down to the final estimator.
 
     Objects exposing a ``regressor_`` attribute (fitted
@@ -201,8 +207,8 @@ def _core_estimator(model: Any) -> Any:
         if id(model) in seen:
             break
         seen.add(id(model))
-        if hasattr(model, "named_steps"):
-            steps = model.named_steps
+        steps = getattr(model, "named_steps", None)
+        if steps is not None:
             try:
                 values = list(steps.values())
             except AttributeError:
@@ -211,11 +217,14 @@ def _core_estimator(model: Any) -> Any:
                 break
             model = values[-1]
         else:
-            model = model.regressor_
+            wrapper = getattr(model, "regressor_", None)
+            if wrapper is None:
+                break
+            model = wrapper
     return model
 
 
-def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> Any:
+def _copy_with_permuted_column(X: Frame, col: int, rng: np.random.Generator) -> Frame:
     """Return a copy of ``X`` with the values of column ``col`` shuffled.
 
     Preserves the input type (a DataFrame stays a DataFrame with the same
@@ -230,16 +239,17 @@ def _copy_with_permuted_column(X: Any, col: int, rng: np.random.Generator) -> An
         rng: randomness generator (deterministic for a fixed seed).
     """
     perm = rng.permutation(X.shape[0])
-    if isinstance(X, pd.DataFrame):
-        X2: Any = X.copy()
+    if isinstance(X, DataFrame):
+        X2 = X.copy()
         col_name = X2.columns[col]
         X2[col_name] = X2[col_name].to_numpy()[perm]
         return X2
-    if hasattr(X, "toarray"):  # scipy sparse → dense copy (subsample only)
-        X = X.toarray()
-    X2 = np.array(X, copy=True)
-    X2[:, col] = X2[perm, col]
-    return X2
+    toarray = getattr(X, "toarray", None)
+    if toarray is not None:  # scipy sparse → dense copy (subsample only)
+        X = cast(Frame, toarray())
+    array = np.array(X, copy=True)
+    array[:, col] = array[perm, col]
+    return array
 
 
 class _PermutationAbort(Exception):
@@ -286,9 +296,9 @@ class DeadFeatureSettings:
 #  Circuit A — Diversity Ratio (on OOF predictions)
 # ──────────────────────────────────────────────────────────────────────── #
 def check_diversity(
-    y: np.ndarray,
-    y_pred_oof: np.ndarray,
-    valid: np.ndarray,
+    y: Array,
+    y_pred_oof: Array,
+    valid: BoolArray,
     *,
     adaptive: bool,
     min_prediction_diversity: float,
@@ -358,9 +368,9 @@ def check_diversity(
 #  Circuit B — Unique Ratio (rounding from std(y))
 # ──────────────────────────────────────────────────────────────────────── #
 def check_unique(
-    y: np.ndarray,
-    y_pred_oof: np.ndarray,
-    valid: np.ndarray,
+    y: Array,
+    y_pred_oof: Array,
+    valid: BoolArray,
     *,
     min_unique_count: int,
     min_unique_ratio: float,
@@ -437,9 +447,9 @@ def check_unique(
 # ──────────────────────────────────────────────────────────────────────── #
 def check_dead_features(
     *,
-    model: Any,
-    X: Any | None,
-    y: np.ndarray,
+    model: Predictor | None,
+    X: Frame | None,
+    y: Array,
     diversity_failed: bool,
     settings: DeadFeatureSettings,
 ) -> tuple[int, list[str], list[str]]:
@@ -493,7 +503,7 @@ def check_dead_features(
 
 
 def _check_dead_features_linear(
-    coef: Any, diversity_failed: bool, settings: DeadFeatureSettings
+    coef: object, diversity_failed: bool, settings: DeadFeatureSettings
 ) -> tuple[int, list[str], list[str]]:
     """Linear path: zero-coefficient share is a signal + a combination."""
     coef_arr = np.asarray(coef, dtype=float).ravel()
@@ -532,9 +542,9 @@ def _check_dead_features_linear(
 
 def _check_dead_features_permutation(
     *,
-    model: Any,
-    X: Any,
-    y: np.ndarray,
+    model: Predictor,
+    X: Frame,
+    y: Array,
     diversity_failed: bool,
     settings: DeadFeatureSettings,
 ) -> tuple[int, list[str], list[str]]:
@@ -565,9 +575,9 @@ def _check_dead_features_permutation(
 
 def _permutation_impl(
     *,
-    model: Any,
-    X: Any,
-    y: np.ndarray,
+    model: Predictor,
+    X: Frame,
+    y: Array,
     diversity_failed: bool,
     settings: DeadFeatureSettings,
 ) -> tuple[int, list[str], list[str]]:
@@ -597,8 +607,8 @@ def _permutation_impl(
 
 
 def _permutation_subsample(
-    X: Any, y: np.ndarray, rng: np.random.Generator, settings: DeadFeatureSettings
-) -> tuple[Any, np.ndarray, np.ndarray]:
+    X: Frame, y: Array, rng: np.random.Generator, settings: DeadFeatureSettings
+) -> tuple[Frame, Array, Array]:
     """Draw the row subsample, then the (sorted) column subsample.
 
     Raises:
@@ -610,7 +620,7 @@ def _permutation_subsample(
     if n_rows > settings.permutation_max_rows:
         row_idx = rng.choice(n_rows, size=settings.permutation_max_rows, replace=False)
     try:
-        X_sub = X.iloc[row_idx] if isinstance(X, pd.DataFrame) else X[row_idx]
+        X_sub = X.iloc[row_idx] if isinstance(X, DataFrame) else X[row_idx]
     except Exception as err:  # converted into a reason by the caller
         raise _PermutationAbort(
             f"Circuit C (dead features): row subsampling of X failed: {err}"
@@ -631,8 +641,8 @@ def _permutation_subsample(
 
 
 def _base_prediction(
-    model: Any, X_sub: Any, y_sub: np.ndarray
-) -> tuple[np.ndarray, float]:
+    model: Predictor, X_sub: Frame, y_sub: Array
+) -> tuple[BoolArray, float]:
     """Predict on the subsample once (cached base for every column)."""
     try:
         base_pred = np.asarray(model.predict(X_sub), dtype=float).reshape(-1)
@@ -657,12 +667,12 @@ def _base_prediction(
 
 
 def _is_dead_column(
-    model: Any,
-    X_sub: Any,
-    y_sub: np.ndarray,
+    model: Predictor,
+    X_sub: Frame,
+    y_sub: Array,
     col: int,
     rng: np.random.Generator,
-    base_valid: np.ndarray,
+    base_valid: BoolArray,
     base_mse: float,
     settings: DeadFeatureSettings,
 ) -> bool:
@@ -698,12 +708,12 @@ def _is_dead_column(
 
 
 def _column_delta(
-    model: Any,
-    X_sub: Any,
-    y_sub: np.ndarray,
+    model: Predictor,
+    X_sub: Frame,
+    y_sub: Array,
     col: int,
     rng: np.random.Generator,
-    base_valid: np.ndarray,
+    base_valid: BoolArray,
     base_mse: float,
 ) -> float | None:
     """ΔMSE of one permutation repeat of column ``col``."""
@@ -775,9 +785,9 @@ def _dead_features_verdict(
 #  Circuit D — Generalization Gap
 # ──────────────────────────────────────────────────────────────────────── #
 def check_generalization_gap(
-    y: np.ndarray,
-    y_pred_oof: np.ndarray,
-    y_pred_full: Any | None,
+    y: Array,
+    y_pred_oof: Array,
+    y_pred_full: object | None,
     *,
     max_generalization_gap: float,
 ) -> tuple[float, list[str], list[str]]:
@@ -811,9 +821,9 @@ def check_generalization_gap(
 
 
 def check_generalization_gap_repeats(
-    y: np.ndarray,
-    y_pred_oof_by_repeat: Sequence[np.ndarray],
-    y_pred_full: Any | None,
+    y: Array,
+    y_pred_oof_by_repeat: Sequence[Array],
+    y_pred_full: object | None,
     *,
     max_generalization_gap: float,
 ) -> tuple[float, list[str], list[str]]:
@@ -918,9 +928,9 @@ def check_generalization_gap_repeats(
 
 
 def _generalization_gap_once(
-    y: np.ndarray,
-    y_pred_oof: np.ndarray,
-    y_pred_full: Any | None,
+    y: Array,
+    y_pred_oof: Array,
+    y_pred_full: object | None,
     *,
     max_generalization_gap: float,
 ) -> tuple[float, list[str], list[str]]:

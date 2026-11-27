@@ -56,9 +56,10 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from configurable_automl_engine.common.definitions import (
     WORST_SCORE_THRESHOLD,
@@ -70,6 +71,12 @@ from configurable_automl_engine.common.serialization_utils import (
     load_artifact,
     resolve_load_formats,
     save_artifact,
+)
+from configurable_automl_engine.common.types import (
+    Array,
+    Frame,
+    JSONDict,
+    Predictor,
 )
 from configurable_automl_engine.validation import aggregate_split_scores
 
@@ -112,7 +119,7 @@ class EnsembleModelError(Exception):
     """
 
 
-def validate_ensemble_score(score: Any) -> float:
+def validate_ensemble_score(score: object) -> float:
     """Validate one member score and return it as a plain ``float``.
 
     The same invariant the engine applies to winner scores
@@ -143,7 +150,7 @@ def validate_ensemble_score(score: Any) -> float:
             f"Ensemble member score must be a real number, got "
             f"{type(score).__name__}: {score!r}"
         )
-    value = float(score)
+    value = float(cast(float, score))
     if not math.isfinite(value):
         raise ValueError(f"Ensemble member score must be finite, got {value!r}")
     if value <= WORST_SCORE_THRESHOLD:
@@ -206,7 +213,7 @@ def _resolve_direction(direction: MetricDirection | str) -> MetricDirection:
 
 
 def compute_weights(
-    scores: Mapping[str, Any],
+    scores: Mapping[str, float],
     direction: MetricDirection | str,
     *,
     method: str = "score_weighted",
@@ -282,7 +289,7 @@ def compute_weights(
 
 
 def select_top_k(
-    scores: Mapping[str, Any],
+    scores: Mapping[str, float],
     k: int,
     direction: MetricDirection | str,
 ) -> list[str]:
@@ -336,12 +343,12 @@ def select_top_k(
     return ranked[: min(k, n)]
 
 
-def _finite_vector(value: Any) -> np.ndarray | None:
+def _finite_vector(value: object) -> NDArray[np.float64] | None:
     """Convert an OOF prediction vector to a flat float array (or ``None``)."""
     if value is None:
         return None
     try:
-        return np.asarray(value, dtype=float).reshape(-1)
+        return np.asarray(cast(ArrayLike, value), dtype=float).reshape(-1)
     except (TypeError, ValueError):
         return None
 
@@ -353,11 +360,11 @@ def _finite_or_none(value: float) -> float | None:
 
 def _comparison_repeat_rmse(
     *,
-    y: np.ndarray,
+    y: Array,
     names: list[str],
     normalized_weights: Mapping[str, float],
-    repeat_predictions: Mapping[str, Any],
-    winner_vector: Any,
+    repeat_predictions: Mapping[str, object],
+    winner_vector: object,
 ) -> tuple[float, float] | None:
     """One repeat's ensemble and winner RMSE on the same finite rows.
 
@@ -367,7 +374,7 @@ def _comparison_repeat_rmse(
     """
     if any(name not in repeat_predictions for name in names):
         return None
-    member_vectors: list[np.ndarray] = []
+    member_vectors: list[NDArray[np.float64]] = []
     for name in names:
         vector = _finite_vector(repeat_predictions[name])
         if vector is None or vector.shape != y.shape:
@@ -388,7 +395,7 @@ def _comparison_repeat_rmse(
     if not np.any(mask):
         return float("nan"), float("nan")
     y_valid = y[mask]
-    ensemble_prediction = np.zeros_like(y_valid)
+    ensemble_prediction: NDArray[np.float64] = np.zeros_like(y_valid, dtype=float)
     for name, vector in zip(names, member_vectors, strict=True):
         ensemble_prediction += normalized_weights[name] * vector[mask]
     ensemble_rmse = float(np.sqrt(np.mean((y_valid - ensemble_prediction) ** 2)))
@@ -419,11 +426,11 @@ def _normalized_ensemble_weights(
 
 def _comparison_repeat_scores(
     *,
-    y: np.ndarray,
+    y: Array,
     names: list[str],
     normalized: Mapping[str, float],
-    member_predictions_by_repeat: Sequence[Mapping[str, Any]],
-    winner_predictions_by_repeat: Sequence[Any],
+    member_predictions_by_repeat: Sequence[Mapping[str, object]],
+    winner_predictions_by_repeat: Sequence[object],
 ) -> tuple[list[float], list[float]] | None:
     """Compute the per-repeat ensemble and winner RMSE lists."""
     ensemble_repeat_rmse: list[float] = []
@@ -468,13 +475,13 @@ def _count_used_repeats(
 
 def winner_vs_ensemble_comparison(
     *,
-    y_true: Any,
-    member_predictions_by_repeat: Sequence[Mapping[str, Any]],
-    winner_predictions_by_repeat: Sequence[Any],
+    y_true: object,
+    member_predictions_by_repeat: Sequence[Mapping[str, object]],
+    winner_predictions_by_repeat: Sequence[object],
     weights: Mapping[str, float],
     winner_algorithm: str,
     split_aggregation: str = "median",
-) -> dict[str, Any] | None:
+) -> JSONDict | None:
     """Compare the weighted ensemble against the winner on identical OOF rows.
 
     The comparison is a pure function of the OOF prediction vectors: every
@@ -507,7 +514,7 @@ def winner_vs_ensemble_comparison(
             RMSE values are combined.
 
     Returns:
-        dict[str, Any] | None: The JSON-safe comparison payload, or ``None``
+        JSONDict | None: The JSON-safe comparison payload, or ``None``
             when the comparison cannot be computed. The payload carries the
             metric name, the input/used repeat counts, the aggregation
             policy, the winner name, both aggregated RMSE values, their
@@ -613,7 +620,7 @@ class EnsembleModel:
         metric_user: str,
         metric_direction: MetricDirection | str,
         members: Sequence[EnsembleMember],
-        predictors: Mapping[str, Any],
+        predictors: Mapping[str, Predictor],
     ) -> None:
         if not members:
             raise ValueError(
@@ -665,13 +672,13 @@ class EnsembleModel:
         )
         # Live fitted predictors of the members (the documented memory
         # cost: K models are held simultaneously).
-        self.predictors: dict[str, Any] = dict(predictors)
+        self.predictors: dict[str, Predictor] = dict(predictors)
 
     def __len__(self) -> int:
         """The number of members (the effective ensemble size ``K``)."""
         return len(self.members)
 
-    def predict(self, X: Any) -> np.ndarray:
+    def predict(self, X: Frame) -> Array:
         """Predict with the weighted average of the member predictions.
 
         Args:
@@ -686,7 +693,7 @@ class EnsembleModel:
             ValueError: The members produced differently shaped
                 predictions for the same input.
         """
-        result: np.ndarray | None = None
+        result: NDArray[np.float64] | None = None
         for member in self.members:
             pred = np.asarray(
                 self.predictors[member.name].predict(X), dtype=float
@@ -712,8 +719,8 @@ class EnsembleModel:
         artifact_path: str | Path | None = None,
         k_requested: int | None = None,
         weight_method: str | None = None,
-        comparison: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
+        comparison: Mapping[str, object] | None = None,
+    ) -> JSONDict:
         """Build the JSON-safe report section of the ensemble.
 
         The section is the value of ``ExperimentResult.ensemble``: the
@@ -734,9 +741,9 @@ class EnsembleModel:
                 comparison is not available for this run.
 
         Returns:
-            dict[str, Any]: The JSON-serializable report section.
+            JSONDict: The JSON-serializable report section.
         """
-        section: dict[str, Any] = {
+        section: JSONDict = {
             "enabled": True,
             "strategy": "weighted_average",
             "weight_method": weight_method,

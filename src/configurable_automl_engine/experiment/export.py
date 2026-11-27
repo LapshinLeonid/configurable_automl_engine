@@ -94,8 +94,8 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
 
+from configurable_automl_engine.common.types import JSONDict
 from configurable_automl_engine.experiment.leaderboard import build_leaderboard
 from configurable_automl_engine.experiment.reporting import (
     JSONReporter,
@@ -199,7 +199,7 @@ def metadata_filename(result: ExperimentResult) -> str:
     return f"{_run_prefix(result)}_metadata.json"
 
 
-def _leaderboard_payload(result: ExperimentResult) -> tuple[dict[str, Any], str]:
+def _leaderboard_payload(result: ExperimentResult) -> tuple[JSONDict, str]:
     """The leaderboard payload and table text of ``result``.
 
     The payload keeps the rendered table text plus the structured
@@ -210,11 +210,11 @@ def _leaderboard_payload(result: ExperimentResult) -> tuple[dict[str, Any], str]
     own contract and is not deduplicated here.
 
     Returns:
-        tuple[dict[str, Any], str]: The JSON-safe leaderboard payload
+        tuple[JSONDict, str]: The JSON-safe leaderboard payload
             and the rendered table text.
     """
     board = build_leaderboard(result)
-    payload = {
+    payload: JSONDict = {
         "metric_user": board.metric_user,
         "metric_direction": board.metric_direction.value,
         "table": board.to_table(),
@@ -238,7 +238,7 @@ def _leaderboard_payload(result: ExperimentResult) -> tuple[dict[str, Any], str]
 
 def _metadata_payload(
     result: ExperimentResult, exported_files: dict[str, str]
-) -> dict[str, Any]:
+) -> JSONDict:
     """The run metadata payload: identity, status, timings, file map.
 
     ``model_source_path`` / ``ensemble_source_path`` record the original

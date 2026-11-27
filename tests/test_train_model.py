@@ -1,5 +1,6 @@
 import dataclasses
 import re
+from types import MappingProxyType
 
 import pytest
 import numpy as np
@@ -1445,6 +1446,19 @@ def test_trainer_override_has_priority_over_automatic_selection():
     ).fit(X, y)
     num2 = _num_transformer_of(trainer2)
     assert "scaler" not in [s[0] for s in num2.steps]
+
+
+def test_trainer_accepts_read_only_mapping_configs():
+    """Read-only mappings are copied instead of being rejected."""
+    trainer = ModelTrainer(
+        algorithm="ridge",
+        hyperparams={"alpha": 0.1},
+        preprocessing_override=MappingProxyType({"scaling": "standard"}),
+        feature_selection_cfg=MappingProxyType({"mode": "disabled"}),
+    )
+
+    assert trainer.settings.preprocessing_override is not None
+    assert trainer.feature_selection_cfg.mode == "disabled"
 
 
 def test_trainer_override_invalid_value_rejected_at_init():

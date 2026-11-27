@@ -11,7 +11,7 @@ module must not import ``configurable_automl_engine.trainer``.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any, cast
+from typing import cast
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.errors import TrainingError
@@ -26,6 +26,7 @@ from configurable_automl_engine.validation import (
 
 from .common.definitions import SerializationFormat, TargetTransform, ValidationStrategy
 from .common.settings import EncodingSettings, InputPolicies, OversamplingSettings
+from .common.types import Params, ParamsInput
 from .feature_selection import FeatureSelectionCfg
 from .trainer_feature_selection import _validate_feature_selection_cfg
 from .trainer_state import TrainerSettings
@@ -33,28 +34,32 @@ from .trainer_state import TrainerSettings
 _ENCODING_STRATEGIES = ("one_hot", "ordinal", "target", "frequency", "hashing")
 
 
-def _validate_algorithm(algorithm: Any) -> str:
+def _validate_algorithm(algorithm: object) -> str:
     """Validate the algorithm name and return it lowercased."""
     if not isinstance(algorithm, str):
         raise TrainingError(f"Invalid algorithm: {algorithm!r}")
     return algorithm.lower()
 
 
-def _validate_hyperparams(hyperparams: Any) -> dict[str, Any]:
-    """Validate the hyperparameters (``None`` → an empty dict)."""
-    if hyperparams is not None:
-        if not isinstance(hyperparams, dict):
-            raise TrainingError("hyperparams must be a dictionary")
-        return hyperparams
-    return {}
+def _validate_hyperparams(hyperparams: object) -> Params:
+    """Validate the hyperparameters and copy them into a mutable dict.
+
+    ``None`` becomes an empty dict. A read-only mapping is accepted and
+    copied, so the caller's container is never mutated by the engine.
+    """
+    if hyperparams is None:
+        return {}
+    if not isinstance(hyperparams, Mapping):
+        raise TrainingError("hyperparams must be a dictionary")
+    return dict(hyperparams)
 
 
 def _validate_input_policies(
     *,
     inf_policy: str,
     datetime_policy: str,
-    drop_id_like_columns: Any,
-    warn_id_like: Any,
+    drop_id_like_columns: object,
+    warn_id_like: object,
 ) -> None:
     """Validate the input-data diagnostics policies."""
     if inf_policy not in ("as_missing", "error"):
@@ -146,7 +151,7 @@ def _normalize_additional_metrics(
 
 
 def _validate_preprocessing_override(
-    override: PreprocessingOverride | dict[str, Any] | None,
+    override: PreprocessingOverride | ParamsInput | None,
 ) -> PreprocessingOverride | None:
     """Validate and normalize a user-provided preprocessing preset override."""
     if override is None:
@@ -154,8 +159,8 @@ def _validate_preprocessing_override(
     if isinstance(override, PreprocessingOverride):
         return override
     try:
-        if isinstance(override, dict):
-            return PreprocessingOverride.model_validate(override)
+        if isinstance(override, Mapping):
+            return PreprocessingOverride.model_validate(dict(override))
     except Exception as e:
         raise TrainingError(f"Invalid preprocessing_override: {e}") from e
     raise TrainingError(
@@ -164,7 +169,7 @@ def _validate_preprocessing_override(
     )
 
 
-def _validate_feature_selection_active(value: Any) -> bool | None:
+def _validate_feature_selection_active(value: object) -> bool | None:
     """Validate the explicit feature selection flag.
 
     The type is strictly bool | None: the string "false" from the
@@ -181,7 +186,7 @@ def _validate_feature_selection_active(value: Any) -> bool | None:
 
 
 def _validate_validation_strategy(
-    validation_strategy: ValidationStrategy | str, n_folds: Any
+    validation_strategy: ValidationStrategy | str, n_folds: object
 ) -> str:
     """Validate the validation strategy and the fold count.
 
@@ -204,24 +209,24 @@ def _validate_validation_strategy(
     return normalized_strategy
 
 
-def _validate_n_repeats(n_repeats: Any) -> int:
+def _validate_n_repeats(n_repeats: object) -> int:
     """Validate the number of repeated validation splits."""
     if isinstance(n_repeats, bool) or not isinstance(n_repeats, int) or n_repeats < 1:
         raise TrainingError(f"n_repeats must be a positive integer, got {n_repeats!r}")
     return n_repeats
 
 
-def _validate_split_aggregation(split_aggregation: Any) -> str:
+def _validate_split_aggregation(split_aggregation: object) -> str:
     """Validate the per-repeat score aggregation policy."""
     if split_aggregation not in SUPPORTED_SPLIT_AGGREGATIONS:
         raise TrainingError(
             "split_aggregation must be one of "
             f"{SUPPORTED_SPLIT_AGGREGATIONS}, got {split_aggregation!r}"
         )
-    return cast(str, split_aggregation)
+    return split_aggregation
 
 
-def _validate_test_size(test_size: Any) -> Any:
+def _validate_test_size(test_size: object) -> float | int:
     """Validate the hold-out size.
 
     test_size accepts a fraction in (0, 1) or an integer number of rows (as
@@ -256,7 +261,9 @@ def _validate_oversampling(
         raise TrainingError("data_oversampling_noise_level must be > 0")
 
 
-def _validate_feature_lists(categorical_features: Any, numerical_features: Any) -> None:
+def _validate_feature_lists(
+    categorical_features: object, numerical_features: object
+) -> None:
     """Validate the explicit categorical/numerical column lists."""
     for attr_name, features in [
         ("categorical_features", categorical_features),
@@ -272,7 +279,7 @@ def _validate_feature_lists(categorical_features: Any, numerical_features: Any) 
 
 
 def _validate_custom_metrics(
-    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, object]] | None,
 ) -> dict[str, CustomMetricSpec]:
     """Validate the custom metric declarations (a ``TrainingError`` on failure)."""
     try:
@@ -301,7 +308,7 @@ def _validate_skew_threshold(value: float | None) -> None:
 
 
 def _validate_target_transform(
-    value: Any, *, allow_auto: bool = False
+    value: object, *, allow_auto: bool = False
 ) -> TargetTransform:
     """Validate the target transformation and normalize it to the enum.
 
@@ -345,8 +352,8 @@ def _validate_target_transform(
 
 def build_trainer_settings(
     *,
-    algorithm: Any,
-    hyperparams: Any,
+    algorithm: object,
+    hyperparams: object,
     metric: str,
     random_state: int | None,
     serialization_format: SerializationFormat,
@@ -360,9 +367,9 @@ def build_trainer_settings(
     target_encoding_smoothing: float,
     target_encoding_fallback: float | None,
     additional_metrics: Iterable[str] | None,
-    preprocessing_override: PreprocessingOverride | dict[str, Any] | None,
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None,
-    feature_selection_active: Any,
+    preprocessing_override: PreprocessingOverride | ParamsInput | None,
+    feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None,
+    feature_selection_active: object,
     validation_strategy: ValidationStrategy | str,
     n_folds: int,
     test_size: float,
@@ -371,7 +378,7 @@ def build_trainer_settings(
     warn_id_like: bool,
     target_transform: TargetTransform | str = TargetTransform.none,
     target_transform_skew_threshold: float | None = None,
-    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]] | None = None,
+    custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, object]] | None = None,
     allow_auto_target_transform: bool = False,
     n_repeats: int = 1,
     split_aggregation: str = "median",

@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -218,12 +219,13 @@ def test_p2_result_registered_in_store(tmp_path: Path) -> None:
 
 
 def test_p3_all_config_forms(tmp_path: Path) -> None:
-    """P3: Config object / dict / str path / Path — all four keep working."""
+    """P3: Config object / dict / mapping / str path / Path all keep working."""
     df = _small_df()
     results = []
     for form in (
         Config.model_validate(_config_dict(tmp_path)),
         _config_dict(tmp_path),
+        MappingProxyType(_config_dict(tmp_path)),
         str(_yaml_config(tmp_path)),
         _yaml_config(tmp_path),
     ):

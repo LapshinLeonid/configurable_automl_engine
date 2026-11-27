@@ -16,7 +16,7 @@ import logging
 import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -28,12 +28,16 @@ from configurable_automl_engine.common.metrics import (
     to_user_value,
     user_direction,
 )
+from configurable_automl_engine.common.types import Params
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
     CorridorMode,
     ValidationStrategy,
 )
+
+if TYPE_CHECKING:
+    from configurable_automl_engine.trainer import ModelTrainer
 
 from ..tuner import WORST_SCORE_THRESHOLD
 from .artifact import _build_trainer
@@ -516,8 +520,8 @@ def _fit_finalist(
 
 def _to_candidate(
     algo_name: str,
-    trainer: Any,
-    params: dict[str, Any],
+    trainer: ModelTrainer,
+    params: Params,
     cv_score: float,
     X: pd.DataFrame,
     y: pd.Series,

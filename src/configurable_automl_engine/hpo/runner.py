@@ -535,7 +535,7 @@ class _OptimizeRunner:
             apply_fs=_resolve_apply_fs(
                 trial, self.validation.fs_mode, self.validation.is_isotonic
             ),
-            feature_index=params.get("feature_index"),
+            feature_index=cast(int | None, params.get("feature_index")),
         )
 
         fatal_failure = False
@@ -765,7 +765,7 @@ class _OptimizeRunner:
         best_model = self.assemble_estimator(
             create_model(self.algo, **params),
             apply_fs=self.best.apply_fs,
-            feature_index=self.best.model_params.get("feature_index"),
+            feature_index=cast(int | None, self.best.model_params.get("feature_index")),
         )
         best_model.fit(self.X, self.y)
 

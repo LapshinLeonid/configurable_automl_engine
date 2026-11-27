@@ -31,8 +31,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from configurable_automl_engine.experiment.reporting.base import (
     Reporter,
@@ -114,7 +114,7 @@ class JSONReporter(Reporter[ReporterArtifact]):
         return self._path
 
     @staticmethod
-    def _offending_fields(payload: dict[str, Any]) -> str:
+    def _offending_fields(payload: Mapping[str, object]) -> str:
         """The top-level fields of ``payload`` that fail to serialize.
 
         A serialization error does not carry the field path, so the

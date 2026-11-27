@@ -9,10 +9,9 @@ keeps the sklearn transformer implementation.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any, cast
+from typing import Protocol, cast
 
 import numpy as np
-import pandas as pd
 from automl_contracts.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMethod,
@@ -31,6 +30,16 @@ from sklearn.feature_selection import (
 from sklearn.utils.sparsefuncs import mean_variance_axis
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
+from configurable_automl_engine.common.types import (
+    Array,
+    BoolArray,
+    DataFrame,
+    Frame,
+    NamesArray,
+    SparseMatrix,
+    Target,
+)
+
 __all__ = [
     "FeatureSelectionCfg",
     "FeatureSelectionMethod",
@@ -47,6 +56,42 @@ _VALID_METHODS: tuple[str, ...] = (
 
 # Methods that require the target y during fit().
 _TARGET_METHODS: tuple[str, ...] = ("importance", "percentile", "mutual_info")
+
+
+class _FittableSelector(Protocol):
+    """Minimal interface of the sklearn base selectors used here."""
+
+    def fit(self, X: object, y: object = None) -> object:
+        """Fit the selector on ``X`` and ``y``."""
+        ...  # pragma: no cover - protocol definition
+
+    def get_support(self) -> BoolArray:
+        """Return the boolean mask of the selected features."""
+        ...  # pragma: no cover - protocol definition
+
+
+class _ImportanceSelector(Protocol):
+    """A fitted selector exposing the wrapped estimator."""
+
+    estimator_: object
+
+
+class _ScoresSelector(Protocol):
+    """A fitted selector exposing per-feature scores."""
+
+    scores_: Array
+
+
+class _VariancesSelector(Protocol):
+    """A fitted selector exposing per-feature variances."""
+
+    variances_: Array
+
+
+class _ImportanceEstimator(Protocol):
+    """A fitted estimator exposing feature importances."""
+
+    feature_importances_: Array
 
 
 class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
@@ -104,8 +149,9 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         self.variance_threshold = variance_threshold
         self.n_estimators = n_estimators
         self.random_state = random_state
+        self.base_selector_: _FittableSelector | None = None
 
-    def fit(self, X: Any, y: Any = None) -> FeatureSelector:
+    def fit(self, X: Frame | SparseMatrix, y: Target | None = None) -> FeatureSelector:
         """Fit the selector on the training data.
 
         Args:
@@ -152,7 +198,9 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
 
         self.n_features_in_ = X_arr.shape[1]
         if hasattr(X, "columns"):
-            self.feature_names_in_ = np.asarray(list(X.columns), dtype=object)
+            self.feature_names_in_ = np.asarray(
+                list(cast(DataFrame, X).columns), dtype=object
+            )
         elif hasattr(self, "feature_names_in_"):
             # Drop stale names when re-fitting on column-less input.
             del self.feature_names_in_
@@ -170,7 +218,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         # mutual_info_regression fails with a cryptic error on continuous
         # values — raise a clear message beforehand.
         if self.method == "mutual_info" and sp.issparse(X_arr):
-            _validate_sparse_mutual_info(X_arr)
+            _validate_sparse_mutual_info(cast(SparseMatrix, X_arr))
 
         if self.method == "variance":
             support, k_selected = self._fit_variance(X_arr, n_features)
@@ -182,7 +230,9 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         self.n_selected_ = k_selected
         return self
 
-    def _fit_variance(self, X_arr: Any, n_features: int) -> tuple[np.ndarray, int]:
+    def _fit_variance(
+        self, X_arr: Array | SparseMatrix, n_features: int
+    ) -> tuple[Array, int]:
         """Fit the ``'variance'`` branch, handling the ``K = 0`` edge case.
 
         ``VarianceThreshold.fit`` raises ``ValueError`` when no feature
@@ -211,8 +261,11 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         return support, k_selected
 
     def _fit_target_based(
-        self, X_arr: Any, y_arr: Any, n_features: int
-    ) -> tuple[np.ndarray, int]:
+        self,
+        X_arr: Array | SparseMatrix,
+        y_arr: Array,
+        n_features: int,
+    ) -> tuple[Array, int]:
         """Fit the target-based branches (importance/percentile/mutual_info)."""
         selector = self._build_selector()
         selector.fit(X_arr, y_arr)
@@ -224,48 +277,64 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
             support, k_selected = self._apply_guard(scores, n_features)
         return support, k_selected
 
-    def _build_selector(self) -> Any:
+    def _build_selector(self) -> _FittableSelector:
         """Create the sklearn base selector for the chosen method.
 
         The method is already validated in :meth:`fit`, so this branch is
         unreachable for invalid values.
         """
         if self.method == "importance":
-            return SelectFromModel(
-                ExtraTreesRegressor(
-                    n_estimators=self.n_estimators,
-                    random_state=self.random_state,
+            return cast(
+                _FittableSelector,
+                SelectFromModel(
+                    ExtraTreesRegressor(
+                        n_estimators=self.n_estimators,
+                        random_state=self.random_state,
+                    ),
+                    threshold="mean",
                 ),
-                threshold="mean",
             )
         if self.method == "percentile":
-            return SelectPercentile(score_func=f_regression, percentile=self.percentile)
+            return cast(
+                _FittableSelector,
+                SelectPercentile(score_func=f_regression, percentile=self.percentile),
+            )
         if self.method == "mutual_info":
             # The seed fixes the stochasticity of the kNN mutual-information
             # estimate.
             score_func = partial(mutual_info_regression, random_state=self.random_state)
-            return SelectPercentile(score_func=score_func, percentile=self.percentile)
+            return cast(
+                _FittableSelector,
+                SelectPercentile(score_func=score_func, percentile=self.percentile),
+            )
         if self.method == "variance":
-            return VarianceThreshold(threshold=self.variance_threshold)
+            return cast(
+                _FittableSelector,
+                VarianceThreshold(threshold=self.variance_threshold),
+            )
         raise AssertionError(
             f"Unreachable: method {self.method!r} must be validated in fit()."
         )
 
-    def _extract_scores(self, selector: Any) -> np.ndarray:
+    def _extract_scores(self, selector: object) -> Array:
         """Extract feature scores from the fitted sklearn base selector."""
         if self.method == "importance":
-            return np.asarray(selector.estimator_.feature_importances_, dtype=float)
+            estimator = cast(_ImportanceSelector, selector).estimator_
+            return np.asarray(
+                cast(_ImportanceEstimator, estimator).feature_importances_,
+                dtype=float,
+            )
         if self.method in ("percentile", "mutual_info"):
-            return np.asarray(selector.scores_, dtype=float)
+            return np.asarray(cast(_ScoresSelector, selector).scores_, dtype=float)
         if self.method == "variance":
-            return np.asarray(selector.variances_, dtype=float)
+            return np.asarray(
+                cast(_VariancesSelector, selector).variances_, dtype=float
+            )
         raise AssertionError(
             f"Unreachable: method {self.method!r} must be validated in fit()."
         )
 
-    def _apply_guard(
-        self, scores: np.ndarray, n_features: int
-    ) -> tuple[np.ndarray, int]:
+    def _apply_guard(self, scores: Array, n_features: int) -> tuple[Array, int]:
         """Forcibly activate the ``top-min(min_features, P)`` features.
 
         Returns:
@@ -278,7 +347,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         support[top_indices] = True
         return support, int(np.count_nonzero(support))
 
-    def transform(self, X: Any) -> np.ndarray | sp.spmatrix | pd.DataFrame:
+    def transform(self, X: Frame | SparseMatrix) -> Array | SparseMatrix | DataFrame:
         """Reduce the feature space according to the fitted ``support_`` mask.
 
         The matrix type is preserved: ``np.ndarray`` -> ``np.ndarray``,
@@ -307,7 +376,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
                 f"X has {n_input} features, but FeatureSelector was fitted "
                 f"with {len(self.support_)} features."
             )
-        if isinstance(X, pd.DataFrame):
+        if isinstance(X, DataFrame):
             # Name verification, like in sklearn: with the same number of
             # columns but a different order, a positional slice would
             # silently take the wrong features.
@@ -326,12 +395,15 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
             # CSR -> CSR, CSC -> CSC, COO -> COO etc. Without .toarray():
             # no dense copy is created (prevents OOM). scipy-stubs do not
             # type indexing and dynamic to<format> for SparseABC — Any.
-            sparse_X = cast(Any, X)
+            sparse_X = cast(sp.csr_matrix[np.float64], X)
             sliced = sparse_X.tocsr()[:, self.support_]
-            return cast(sp.spmatrix, getattr(sliced, "to" + sparse_X.format)())
+            return cast(
+                SparseMatrix,
+                getattr(sliced, "to" + sparse_X.format)(),
+            )
         return np.asarray(X)[:, self.support_]
 
-    def get_support(self, indices: bool = False) -> np.ndarray:
+    def get_support(self, indices: bool = False) -> BoolArray | Array:
         """Return the mask (or the indices) of the selected features.
 
         Args:
@@ -345,9 +417,9 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         check_is_fitted(self, attributes=["support_"])
         if indices:
             return np.flatnonzero(self.support_)
-        return self.support_.copy()
+        return cast(BoolArray, self.support_.copy())
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Return the names of the output (selected) features.
 
         Args:
@@ -380,7 +452,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         return names[self.support_]
 
 
-def _compute_variances(X_arr: Any) -> np.ndarray:
+def _compute_variances(X_arr: Frame | SparseMatrix) -> Array:
     """Compute the variance of each column the same way ``VarianceThreshold`` does.
 
     For sparse matrices, ``sklearn.utils.sparsefuncs.mean_variance_axis``
@@ -401,14 +473,14 @@ def _compute_variances(X_arr: Any) -> np.ndarray:
         # First tocsc(), then float64 — as in _validate_data of
         # VarianceThreshold. scipy-stubs do not type tocsc for SparseABC —
         # cast to Any.
-        X_csc = cast(Any, X_arr).tocsc().astype(np.float64)
+        X_csc = cast(sp.csr_matrix[np.float64], X_arr).tocsc().astype(np.float64)
         _, variances = mean_variance_axis(X_csc, axis=0)
         return np.asarray(variances, dtype=float).ravel()
-    X_dense: np.ndarray = np.asarray(X_arr, dtype=np.float64)
+    X_dense: Array = np.asarray(X_arr, dtype=np.float64)
     return np.asarray(np.var(X_dense, axis=0), dtype=float)
 
 
-def _top_indices(scores: np.ndarray, k: int) -> np.ndarray:
+def _top_indices(scores: Array, k: int) -> Array:
     """Return the indices of the ``k`` features with the highest scores.
 
     Non-numeric scores (NaN) are treated as ``-inf`` (they cannot enter the
@@ -425,7 +497,7 @@ def _top_indices(scores: np.ndarray, k: int) -> np.ndarray:
     return np.argsort(-safe, kind="stable")[:k]
 
 
-def _validate_sparse_mutual_info(X_arr: Any) -> None:
+def _validate_sparse_mutual_info(X_arr: SparseMatrix) -> None:
     """Check that the sparse input for ``mutual_info`` is discrete.
 
     sklearn treats all features of sparse matrices as discrete
@@ -433,8 +505,9 @@ def _validate_sparse_mutual_info(X_arr: Any) -> None:
     ``mutual_info_regression`` fails on continuous values with a cryptic
     error (an empty sample in the kNN estimate). Instead, a clear
     ``ValueError`` is raised demanding integer-valued features."""
-    data = cast(Any, X_arr).data
-    if np.issubdtype(X_arr.dtype, np.integer):
+    csr = cast(sp.csr_matrix[np.float64], X_arr)
+    data = csr.data
+    if np.issubdtype(csr.dtype, np.integer):
         return
     if np.all(np.isfinite(data)) and np.all(data == np.trunc(data)):
         return

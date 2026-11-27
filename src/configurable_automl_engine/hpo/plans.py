@@ -15,12 +15,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from statistics import fmean, pstdev
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from configurable_automl_engine.common.types import Array, Frame, Params
+from configurable_automl_engine.common.validation_utils import ValidationDecision
 
 if TYPE_CHECKING:
-    import numpy as np
     import optuna
     from optuna.trial import Trial
+    from sklearn.compose import ColumnTransformer
+    from sklearn.model_selection import BaseCrossValidator
 
     from configurable_automl_engine.feature_selection import (
         FeatureSelectionCfg,
@@ -58,14 +62,14 @@ class ValidationPlan:
             (``'median'`` by default, or ``'mean'``).
     """
 
-    X: Any = field(compare=False)
+    X: Frame = field(compare=False)
     algo: str
     fs_cfg: FeatureSelectionCfg
     is_isotonic: bool
     n_samples_eff: int
     method: str
-    cv: Any = field(compare=False)
-    auto_decision: dict[str, Any] | None
+    cv: BaseCrossValidator | None = field(compare=False)
+    auto_decision: ValidationDecision | None
     resolved_via_auto: bool
     n_folds: int
     test_size: float | int
@@ -102,11 +106,11 @@ class PreprocessingPlan:
             ``feature_index`` range.
     """
 
-    X: Any = field(compare=False)
+    X: Frame = field(compare=False)
     dropped_features: list[str]
     categorical_features: list[str] | None
     numerical_features: list[str] | None
-    preprocessor: Any = field(compare=False)
+    preprocessor: ColumnTransformer | None = field(compare=False)
     n_features_eff: int
     n_numeric_eff: int | None
     n_features_size: int
@@ -127,9 +131,9 @@ class SearchSpacePlan:
             (``None`` for a custom space function).
     """
 
-    space_fn: Callable[[Trial], dict[str, Any]] = field(compare=False)
-    space_dict: dict[str, Any]
-    guard_records: list[dict[str, Any]]
+    space_fn: Callable[[Trial], Params] = field(compare=False)
+    space_dict: Params
+    guard_records: list[Params]
     user_hyperparameter_keys: list[str] | None
 
 
@@ -164,7 +168,7 @@ class TrialScore:
     """
 
     value: float
-    oof: np.ndarray | None = field(default=None, compare=False)
+    oof: Array | None = field(default=None, compare=False)
     repeat_scores: tuple[float, ...] = field(default=(), compare=False)
 
     @property
@@ -195,8 +199,8 @@ class BestTrial:
         n_trials_evaluated: The number of the phase's own completed trials.
     """
 
-    params: dict[str, Any]
+    params: Params
     score: float
-    model_params: dict[str, Any]
+    model_params: Params
     apply_fs: bool
     n_trials_evaluated: int

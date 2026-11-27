@@ -33,7 +33,7 @@ import logging
 import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 from imblearn.pipeline import Pipeline
@@ -58,6 +58,18 @@ from configurable_automl_engine.common.serialization_utils import (
 from configurable_automl_engine.common.settings import (
     InputPolicies,
     OversamplingSettings,
+)
+from configurable_automl_engine.common.types import (
+    Array,
+    BoolArray,
+    Estimator,
+    Frame,
+    FrameInput,
+    JSONDict,
+    Params,
+    ParamsInput,
+    Target,
+    TargetInput,
 )
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
@@ -229,7 +241,7 @@ class ModelTrainer(TrainerViewMixin):
     def __init__(
         self,
         algorithm: str = "elasticnet",
-        hyperparams: dict[str, Any] | None = None,
+        hyperparams: ParamsInput | None = None,
         metric: str = "r2",
         random_state: int | None = 42,
         data_oversampling: bool = False,
@@ -244,15 +256,15 @@ class ModelTrainer(TrainerViewMixin):
         id_column: str | None = None,
         encoding_strategy: str = "one_hot",
         additional_metrics: Iterable[str] | None = None,
-        custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, Any]]
+        custom_metrics: Mapping[str, CustomMetricSpec | Mapping[str, object]]
         | None = None,
-        preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None,
+        preprocessing_override: PreprocessingOverride | ParamsInput | None = None,
         high_cardinality_threshold: int | None = 50,
         high_cardinality_encoding: str | None = "frequency",
         hashing_n_components: int = 16,
         target_encoding_smoothing: float = 20.0,
         target_encoding_fallback: float | None = None,
-        feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+        feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None = None,
         feature_selection_active: bool | None = None,
         validation_strategy: ValidationStrategy | str = "auto",
         n_folds: int = 5,
@@ -398,7 +410,7 @@ class ModelTrainer(TrainerViewMixin):
         # Artifact metadata, populated by :meth:`save` (read back by
         # :meth:`load`): the format version, versions, timestamp, the
         # algorithm, hyperparameters and a config hash.
-        self.artifact_metadata_: dict[str, Any] | None = None
+        self.artifact_metadata_: JSONDict | None = None
 
     # ── read-only views of the settings and of the fit results ────────────
     @property
@@ -407,7 +419,7 @@ class ModelTrainer(TrainerViewMixin):
         return self.settings.algorithm
 
     @property
-    def hyperparams(self) -> dict[str, Any]:
+    def hyperparams(self) -> Params:
         """The model hyperparameters."""
         return self.settings.hyperparams
 
@@ -498,19 +510,19 @@ class ModelTrainer(TrainerViewMixin):
         return self._selection.active
 
     @property
-    def selected_features_mask_(self) -> np.ndarray | None:
+    def selected_features_mask_(self) -> BoolArray | None:
         """The selected-column mask of the post-preprocessor matrix."""
         return self._selection.mask
 
     # ── persistence of the object state ───────────────────────────────────
-    def __getstate__(self) -> dict[str, Any]:
+    def __getstate__(self) -> dict[str, object]:
         """Control the object state for serialization (no lock/logger)."""
         state = self.__dict__.copy()
         state.pop("lock", None)
         state.pop("logger", None)
         return state
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, object]) -> None:
         """Restore the object state, reinitializing the lock and logger.
 
         The state is restored as is: ``load`` checks the artifact format
@@ -519,13 +531,13 @@ class ModelTrainer(TrainerViewMixin):
         self.lock = threading.RLock()
         self.logger = logging.getLogger(__name__)
 
-    def _restore_oof_repeat_vectors(self, vectors: Iterable[Any] | None) -> None:
+    def _restore_oof_repeat_vectors(self, vectors: Iterable[Target] | None) -> None:
         """Reattach the per-repeat OOF vectors dropped by serialization."""
         if vectors is not None and self._scores is not None:
             self._scores = self._scores.with_oof_repeat_vectors(vectors)
 
     # ── training ───────────────────────────────────────────────────────────
-    def _create_base_model(self) -> Any:
+    def _create_base_model(self) -> Estimator:
         """Create the regressor via the model factory.
 
         The model seed follows the trainer's ``random_state``, unless the
@@ -545,18 +557,18 @@ class ModelTrainer(TrainerViewMixin):
             model_kwargs.pop("isotonic_feature", None)
             if "random_state" not in model_kwargs:
                 model_kwargs["random_state"] = self.random_state
-            return create_model(self.algorithm, **model_kwargs)
+            return cast(Estimator, create_model(self.algorithm, **model_kwargs))
         except (ValueError, ImportError) as e:
             raise TrainingError(f"Error creating model: {e}") from e
 
     def _assemble_steps(
         self,
         preprocessor: ColumnTransformer,
-        base_model: Any,
+        base_model: Estimator,
         *,
         feature_selection_active: bool,
-        X_for_estimate: Any = None,
-    ) -> list[tuple[str, Any]]:
+        X_for_estimate: Frame | None = None,
+    ) -> list[tuple[str, object]]:
         """Assemble the training pipeline steps (see ``assemble_pipeline_steps``)."""
         return assemble_pipeline_steps(
             self.settings,
@@ -568,13 +580,15 @@ class ModelTrainer(TrainerViewMixin):
             X_for_estimate=X_for_estimate,
         )
 
-    def _steps_factory(self, preprocessor: Any, base_model: Any) -> StepsFactory:
+    def _steps_factory(
+        self, preprocessor: object, base_model: Estimator
+    ) -> StepsFactory:
         """Build fresh pipeline steps from clones (the validation folds and
         the feature selection auto-check never share a fitted step)."""
 
         def make_steps(
-            feature_selection_active: bool, X_for_estimate: Any
-        ) -> list[tuple[str, Any]]:
+            feature_selection_active: bool, X_for_estimate: Frame | None
+        ) -> list[tuple[str, object]]:
             return self._assemble_steps(
                 clone(preprocessor),
                 clone(base_model),
@@ -586,10 +600,10 @@ class ModelTrainer(TrainerViewMixin):
 
     def _fit_internal(
         self,
-        X_train: Any,
-        y_train: Any,
+        X_train: Frame,
+        y_train: Target,
         preprocessor: ColumnTransformer,
-        base_model: Any,
+        base_model: Estimator,
         *,
         feature_selection_active: bool = False,
     ) -> Pipeline:
@@ -644,7 +658,7 @@ class ModelTrainer(TrainerViewMixin):
         self._selection = FeatureSelectionResult()
         self.datetime_expansion_ = {}
 
-    def fit(self, X: Any, y: Any) -> ModelTrainer:
+    def fit(self, X: FrameInput, y: TargetInput | str) -> ModelTrainer:
         """Run the full cycle of data preparation, training and evaluation.
 
         Quality evaluation (``val_score`` / ``additional_scores``) uses the
@@ -765,7 +779,7 @@ class ModelTrainer(TrainerViewMixin):
             # pipeline sees 100% of the sample, val_score stays the
             # held-out estimate.
             self._fit_internal(
-                features.X,
+                cast(Frame, features.X),
                 data.y,
                 setup.preprocessor,
                 base_model,
@@ -822,7 +836,7 @@ class ModelTrainer(TrainerViewMixin):
                 **self.datetime_expansion_,
             }
 
-    def __sklearn_tags__(self) -> Any:
+    def __sklearn_tags__(self) -> Tags:
         """Declare the estimator tags sklearn tools resolve on the trainer.
 
         sklearn introspection helpers (``permutation_importance`` and the
@@ -837,7 +851,7 @@ class ModelTrainer(TrainerViewMixin):
         # An unfitted trainer: the sklearn default regressor tags.
         return Tags(estimator_type="regressor", target_tags=TargetTags(required=True))
 
-    def predict(self, X: Any) -> np.ndarray:
+    def predict(self, X: FrameInput) -> Array:
         """Get model predictions for new data using the trained pipeline.
 
         For ``pd.DataFrame`` inputs, a defensive validation and alignment of
@@ -946,16 +960,16 @@ class ModelTrainer(TrainerViewMixin):
 
 
 def train_model(
-    cfg_or_algo: dict[str, Any] | str,
+    cfg_or_algo: ParamsInput | str,
     metric_or_testsize: str | float,
-    params_or_metric: dict[str, Any] | str,
-    X: Any = None,
-    y: Any = None,
+    params_or_metric: ParamsInput | str,
+    X: FrameInput | None = None,
+    y: TargetInput | str | None = None,
     enable_logging: bool = False,
     random_state: int | None = 42,
     log_path: str | Path | None = None,
     *,
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None = None,
     feature_selection_active: bool | None = None,
 ) -> float:
     """Functional facade over :class:`ModelTrainer`.

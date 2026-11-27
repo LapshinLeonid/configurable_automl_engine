@@ -14,10 +14,12 @@ the prediction input (``prepare_predict_input``). The module must not import
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from collections.abc import Sized
+from typing import cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 from scipy import sparse as sp
 from sklearn.compose import ColumnTransformer
 
@@ -28,6 +30,14 @@ from configurable_automl_engine.common.datetime_features import (
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.settings import EncodingSettings, InputPolicies
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.common.types import (
+    Array,
+    DataFrame,
+    Estimator,
+    Frame,
+    Params,
+    Series,
+)
 from configurable_automl_engine.common.validation_utils import (
     apply_inf_policy,
     check_target_constant,
@@ -62,7 +72,7 @@ from .trainer_state import (
 _LOG = logging.getLogger(__name__)
 
 
-def extract_feature_names(X: Any) -> list[str] | None:
+def extract_feature_names(X: object) -> list[str] | None:
     """Extract column names from various data structures without copying.
 
     Args:
@@ -73,16 +83,18 @@ def extract_feature_names(X: Any) -> list[str] | None:
         list[str] | None: The column names (``col_<i>`` for a 2-D array),
             or ``None`` when ``X`` has no columns.
     """
-    if hasattr(X, "get_data_info"):
-        return cast(list[str], X.get_data_info()["columns"])
-    if isinstance(X, pd.DataFrame):
+    get_data_info = getattr(X, "get_data_info", None)
+    if get_data_info is not None:
+        return cast(list[str], get_data_info()["columns"])
+    if isinstance(X, DataFrame):
         return X.columns.tolist()
-    if hasattr(X, "shape") and len(X.shape) > 1:
-        return [str(f"col_{i}") for i in range(X.shape[1])]
+    shape = getattr(X, "shape", None)
+    if shape is not None and len(shape) > 1:
+        return [str(f"col_{i}") for i in range(shape[1])]
     return None
 
 
-def load_training_data(X: Any, y: Any) -> TrainingData:
+def load_training_data(X: object, y: object) -> TrainingData:
     """Validate the input data types and separate features from the target.
 
     ``y`` may be a target column name of ``X`` (a ``pd.DataFrame``), a
@@ -108,17 +120,17 @@ def load_training_data(X: Any, y: Any) -> TrainingData:
     """
     try:
         feature_names = extract_feature_names(X)
-        detected_dtypes = X.dtypes if isinstance(X, pd.DataFrame) else None
+        detected_dtypes = X.dtypes if isinstance(X, DataFrame) else None
         # 1. Type validation
         valid_types = (pd.DataFrame, pd.Series, np.ndarray, SharedDataFrame)
         if not isinstance(X, valid_types):
             raise TrainingError(f"Unsupported data type: {type(X)}")
 
-        X_obj: pd.DataFrame | pd.Series | np.ndarray
-        y_obj: pd.Series | np.ndarray
+        X_obj: DataFrame | Series | Array
+        y_obj: Series | Array
 
         if isinstance(y, str):
-            if not isinstance(X, pd.DataFrame):
+            if not isinstance(X, DataFrame):
                 raise TrainingError(
                     f"Target column '{y}' specified, but X is not a DataFrame"
                 )
@@ -129,7 +141,7 @@ def load_training_data(X: Any, y: Any) -> TrainingData:
             X_obj = X.get_view() if isinstance(X, SharedDataFrame) else X
             if isinstance(y, (pd.Series, np.ndarray)):
                 y_obj = y
-            elif isinstance(y, pd.DataFrame):
+            elif isinstance(y, DataFrame):
                 y_obj = y.iloc[:, 0]
             elif hasattr(y, "get_view"):  # Support SharedDataFrame for y
                 y_obj = y.get_view().iloc[:, 0]
@@ -151,18 +163,22 @@ def load_training_data(X: Any, y: Any) -> TrainingData:
 
     _check_training_data(X_obj, y_obj)
     return TrainingData(
-        X=X_obj, y=y_obj, feature_names=feature_names, detected_dtypes=detected_dtypes
+        X=X_obj,
+        y=y_obj,
+        feature_names=feature_names,
+        detected_dtypes=detected_dtypes,
     )
 
 
-def _check_training_data(X: Any, y: Any) -> None:
+def _check_training_data(X: object, y: object) -> None:
     """Reject too few rows and a non-numeric or constant target.
 
     Raises:
         TrainingError: If there are fewer than 2 rows or the target is
             non-numeric, non-finite or constant.
     """
-    n_samples = X.shape[0] if hasattr(X, "shape") else len(X)
+    shape = getattr(X, "shape", None)
+    n_samples = shape[0] if shape is not None else len(cast(Sized, X))
     if n_samples < 2:
         raise TrainingError("Insufficient records for training")
     try:
@@ -173,10 +189,10 @@ def _check_training_data(X: Any, y: Any) -> None:
 
 
 def prepare_features(
-    X: Any,
+    X: object,
     *,
     feature_names: list[str] | None,
-    detected_dtypes: Any = None,
+    detected_dtypes: Series | None = None,
     categorical_features: list[str] | None,
     numerical_features: list[str] | None,
     id_column: str | None,
@@ -218,8 +234,9 @@ def prepare_features(
     cats = None if categorical_features is None else list(categorical_features)
     nums = None if numerical_features is None else list(numerical_features)
     expansion: dict[str, list[str]] = {}
+    X = cast(Frame | Series, X)
     dropped: list[str] = []
-    if isinstance(X, pd.DataFrame):
+    if isinstance(X, DataFrame):
         X, names, cats, nums, expansion = _apply_input_diagnostics(
             X, names, cats, nums, policies, warn_id_like
         )
@@ -251,14 +268,14 @@ def prepare_features(
 
 
 def _apply_input_diagnostics(
-    X: pd.DataFrame,
+    X: DataFrame,
     names: list[str] | None,
     cats: list[str] | None,
     nums: list[str] | None,
     policies: InputPolicies,
     warn_id_like: bool,
 ) -> tuple[
-    pd.DataFrame,
+    DataFrame,
     list[str] | None,
     list[str] | None,
     list[str] | None,
@@ -306,13 +323,11 @@ def _apply_input_diagnostics(
 
 
 def _drop_uninformative_features(
-    X: pd.DataFrame,
+    X: DataFrame,
     names: list[str] | None,
     cats: list[str] | None,
     nums: list[str] | None,
-) -> tuple[
-    pd.DataFrame, list[str] | None, list[str] | None, list[str] | None, list[str]
-]:
+) -> tuple[DataFrame, list[str] | None, list[str] | None, list[str] | None, list[str]]:
     """Remove fully empty and strictly constant columns from the training frame.
 
     Cleaning runs BEFORE feature type detection and preprocessor assembly,
@@ -336,7 +351,7 @@ def _drop_uninformative_features(
 
 
 def _detect_feature_types(
-    X: pd.DataFrame,
+    X: DataFrame,
     cats: list[str] | None,
     nums: list[str] | None,
     id_column: str | None,
@@ -442,7 +457,7 @@ def build_trainer_preprocessor(
     return TrainerPreprocessor(preprocessor=preprocessor, preset=preset)
 
 
-def _resolve_isotonic_feature_index(hyperparams: dict[str, Any]) -> int:
+def _resolve_isotonic_feature_index(hyperparams: Params) -> int:
     """Resolve the numerical feature selected by the isotonic data adapter.
 
     The ``feature_index`` value is a user/HPO hyperparameter (not an
@@ -482,7 +497,7 @@ def _isotonic_n_numeric(numerical_features: list[str] | None) -> int:
 
 
 def _isotonic_n_total_estimate(
-    X: Any,
+    X: object,
     *,
     categorical_features: list[str] | None,
     numerical_features: list[str] | None,
@@ -506,7 +521,7 @@ def _isotonic_n_total_estimate(
     )
 
 
-def log_preprocessed_matrix(preprocessor: Any, X: Any) -> None:
+def log_preprocessed_matrix(preprocessor: ColumnTransformer, X: object) -> None:
     """Log the shape and the storage format of the preprocessed matrix.
 
     Emits the INFO line ``preprocessed matrix: n × p (sparse/dense)`` for
@@ -532,9 +547,7 @@ def log_preprocessed_matrix(preprocessor: Any, X: Any) -> None:
         _LOG.debug("Could not log the preprocessed matrix dimensions: %s", err)
 
 
-def _align_predict_columns(
-    feature_names: list[str] | None, X: pd.DataFrame
-) -> pd.DataFrame:
+def _align_predict_columns(feature_names: list[str] | None, X: DataFrame) -> DataFrame:
     """Align the DataFrame columns to the training order.
 
     A defensive layer for ``predict``: validates the presence of all
@@ -561,7 +574,7 @@ def _align_predict_columns(
 
 def _align_predict_shared_dataframe(
     feature_names: list[str] | None, X: SharedDataFrame
-) -> Any:
+) -> Frame:
     """Prepare a SharedDataFrame for prediction.
 
     If the container stores column names, the data is restored into a
@@ -580,11 +593,11 @@ def _align_predict_shared_dataframe(
 
 
 def prepare_predict_input(
-    X: Any,
+    X: object,
     feature_names: list[str] | None,
-    datetime_expansion: Any,
+    datetime_expansion: dict[str, list[str]] | None,
     inf_policy: str,
-) -> Any:
+) -> Frame:
     """Bring the input of ``ModelTrainer.predict`` to the training schema.
 
     A ``pd.DataFrame`` gets its datetime columns expanded as at training
@@ -601,7 +614,7 @@ def prepare_predict_input(
         inf_policy: The ±inf policy of the trainer.
 
     Returns:
-        Any: The input for ``pipeline.predict``.
+        Frame: The input for ``pipeline.predict``.
 
     Raises:
         TrainingError: If ``inf_policy`` is ``"error"`` and ``X`` contains
@@ -609,18 +622,18 @@ def prepare_predict_input(
     """
     # Align columns for inputs with names; for the rest, avoid
     # conversion if X is already an array or DataFrame
-    X_input: Any
-    if isinstance(X, pd.DataFrame):
+    X_input: Frame | Series
+    if isinstance(X, DataFrame):
         X_input = _align_predict_columns(
             feature_names,
-            expand_datetime_columns(X, datetime_expansion),
+            expand_datetime_columns(X, datetime_expansion or {}),
         )
     elif isinstance(X, SharedDataFrame):
         X_input = _align_predict_shared_dataframe(feature_names, X)
     elif isinstance(X, (pd.Series, np.ndarray)):
         X_input = X
     else:
-        X_input = np.asarray(X)
+        X_input = np.asarray(cast(ArrayLike, X))
 
     # The same ±inf policy as in fit(): without it a frame that
     # trained fine (inf → NaN) would fail at prediction time with
@@ -630,19 +643,19 @@ def prepare_predict_input(
             X_input = apply_inf_policy(X_input, inf_policy)
         except ValueError as err:
             raise TrainingError(str(err)) from err
-    return X_input
+    return cast(Frame, X_input)
 
 
 def assemble_pipeline_steps(
     settings: TrainerSettings,
     preprocessor: ColumnTransformer,
-    base_model: Any,
+    base_model: Estimator,
     *,
     categorical_features: list[str] | None,
     numerical_features: list[str] | None,
     feature_selection_active: bool,
-    X_for_estimate: Any = None,
-) -> list[tuple[str, Any]]:
+    X_for_estimate: Frame | None = None,
+) -> list[tuple[str, object]]:
     """Assemble the list of training pipeline steps.
 
     Strict step order:
@@ -676,7 +689,7 @@ def assemble_pipeline_steps(
     Returns:
         A list of ``(name, transformer)`` tuples for building the Pipeline.
     """
-    steps: list[tuple[str, Any]] = [("preprocessor", preprocessor)]
+    steps: list[tuple[str, object]] = [("preprocessor", preprocessor)]
     if resolve_algorithm_name(settings.algorithm) == "isotonic_regression":
         steps.append(
             (

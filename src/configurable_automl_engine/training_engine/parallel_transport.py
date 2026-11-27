@@ -23,11 +23,10 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Self
-
-import pandas as pd
+from typing import Self
 
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.common.types import DataFrame
 
 __all__ = ["DiskPersistenceManager", "PayloadTransport", "TaskPayload"]
 
@@ -79,7 +78,7 @@ class DiskPersistenceManager:
             return 0
         return st.f_bavail * st.f_frsize
 
-    def save_df(self, df: pd.DataFrame) -> str:
+    def save_df(self, df: DataFrame) -> str:
         """Save a DataFrame to a temporary Parquet file.
         Saving logic:
         1. Location: the file is created in /dev/shm (RAM disk) to speed up operations
@@ -177,20 +176,20 @@ class TaskPayload:
     """What one task sends to the worker (``_worker_proxy`` arguments).
 
     Attributes:
-        args (tuple[Any, ...]): The positional arguments; a frame sent through
+        args (tuple[object, ...]): The positional arguments; a frame sent through
             shared memory is replaced with ``None``, a frame sent through the
             disk cache with the path of its Parquet file.
-        kwargs (Mapping[str, Any]): The keyword arguments.
+        kwargs (Mapping[str, object]): The keyword arguments.
         disk_indices (list[int]): The argument indices the worker reads from
             Parquet (a non-path argument at such an index is passed through).
-        shm_info (dict[int, tuple[Any, ...]]): Argument index → the shared
+        shm_info (dict[int, tuple[object, ...]]): Argument index → the shared
             memory metadata ``(name, shape, dtype, columns)``.
     """
 
-    args: tuple[Any, ...]
-    kwargs: Mapping[str, Any]
+    args: tuple[object, ...]
+    kwargs: Mapping[str, object]
     disk_indices: list[int]
-    shm_info: dict[int, tuple[Any, ...]]
+    shm_info: dict[int, tuple[object, ...]]
 
 
 class PayloadTransport:
@@ -247,8 +246,8 @@ class PayloadTransport:
 
     def prepare(
         self,
-        args_seq: Sequence[Sequence[Any]],
-        kwargs_seq: Sequence[Mapping[str, Any]],
+        args_seq: Sequence[Sequence[object]],
+        kwargs_seq: Sequence[Mapping[str, object]],
     ) -> list[TaskPayload]:
         """Build the payload of every task.
 
@@ -306,8 +305,8 @@ class PayloadTransport:
 
     def _plain(
         self,
-        args_seq: Sequence[Sequence[Any]],
-        kwargs_seq: Sequence[Mapping[str, Any]],
+        args_seq: Sequence[Sequence[object]],
+        kwargs_seq: Sequence[Mapping[str, object]],
     ) -> list[TaskPayload]:
         return [
             TaskPayload(tuple(a), kw, list(self._disk_list), {})
@@ -315,27 +314,30 @@ class PayloadTransport:
         ]
 
     def _encode_task(
-        self, args: Sequence[Any], kwargs: Mapping[str, Any]
+        self, args: Sequence[object], kwargs: Mapping[str, object]
     ) -> TaskPayload:
         new_args = list(args)
-        shm_info: dict[int, tuple[Any, ...]] = {}
+        shm_info: dict[int, tuple[object, ...]] = {}
         for idx in self._shared | self._disk:
-            if idx < len(new_args) and isinstance(new_args[idx], pd.DataFrame):
-                new_args[idx], meta = self._encode_frame(idx, new_args[idx])
+            arg = new_args[idx] if idx < len(new_args) else None
+            if isinstance(arg, DataFrame):
+                new_args[idx], meta = self._encode_frame(idx, arg)
                 if meta is not None:
                     shm_info[idx] = meta
+
+        def _is_parquet(arg: object) -> bool:
+            return isinstance(arg, str) and arg.endswith(".parquet")
+
         disk = [
             i
             for i in self._shared | self._disk
-            if i < len(new_args)
-            and isinstance(new_args[i], str)
-            and new_args[i].endswith(".parquet")
+            if i < len(new_args) and _is_parquet(new_args[i])
         ]
         return TaskPayload(tuple(new_args), kwargs, disk, shm_info)
 
     def _encode_frame(
-        self, idx: int, df: pd.DataFrame
-    ) -> tuple[Any, tuple[Any, ...] | None]:
+        self, idx: int, df: DataFrame
+    ) -> tuple[object, tuple[object, ...] | None]:
         """Return the argument to send and the shared memory metadata."""
         if (
             idx in self._shared
@@ -348,7 +350,7 @@ class PayloadTransport:
                 return None, meta  # the frame itself is not sent
         return self._parquet_path(df), None
 
-    def _segment(self, df: pd.DataFrame) -> SharedDataFrame | None:
+    def _segment(self, df: DataFrame) -> SharedDataFrame | None:
         segment = self._segment_by_id.get(id(df))
         if segment is not None:
             return segment
@@ -371,7 +373,7 @@ class PayloadTransport:
         self._segments.append(segment)
         return segment
 
-    def _parquet_path(self, df: pd.DataFrame) -> str:
+    def _parquet_path(self, df: DataFrame) -> str:
         path = self._path_by_id.get(id(df))
         if path is None:
             path = self._persistence.save_df(df)

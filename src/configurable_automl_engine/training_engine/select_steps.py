@@ -468,14 +468,20 @@ def _select_sanity_gate(
     # Output form: replace the working set.
     if phase.output == "winner":
         winner_algo = result.winner_algo
+        if winner_algo not in full_fit_trainers:
+            raise RuntimeError(
+                f"The winning candidate '{winner_algo}' has no trainer trained "
+                f"on the full dataset in select phase '{phase.name}'."
+            )
+        winner_trainer = full_fit_trainers[winner_algo]
         # Only the winner's trainer is needed for the artifact: the other
         # finalists' trainers are not kept in memory until the end of
         # train_best_model.
         return SelectOutcome(
             working_set={winner_algo: ctx.working_set[winner_algo]},
             winner_algo=winner_algo,
-            pre_trained_trainer=candidates[winner_algo].trainer,
-            full_fit_trainers={winner_algo: candidates[winner_algo].trainer},
+            pre_trained_trainer=winner_trainer,
+            full_fit_trainers={winner_algo: winner_trainer},
             disqualified_algorithms=disqualified,
             sanity_gate_section=section,
         )

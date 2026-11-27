@@ -37,15 +37,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator, Iterable
-from typing import Any, Literal, overload
+from typing import Literal, TypeVar, cast, overload
 
 import numpy as np
-import pandas as pd
 from sklearn import model_selection
 from sklearn.model_selection import KFold, LeaveOneOut, train_test_split
 
 from configurable_automl_engine.common.definitions import ValidationStrategy
+from configurable_automl_engine.common.types import Array, DataFrame, Series
 from configurable_automl_engine.common.validation_utils import (
+    ValidationDecision,
     choose_validation_method,
     resolve_auto_no_features_fallback,
     validate_df_not_empty,
@@ -83,7 +84,7 @@ REPEAT_INDEX_ATTR = "repeat_index"
 SKLEARN_SEED_MODULUS = 2**32
 
 
-class RepeatedSplit(tuple[Any, ...]):
+class RepeatedSplit(tuple[object, ...]):
     """A split tuple tagged with its repeat index (attribute-only tag).
 
     A lightweight ``tuple`` subclass: the elements and the unpacking are
@@ -209,7 +210,7 @@ def with_repeat_index(
     """
     tagged = RepeatedSplit(split)
     tagged.repeat_index = int(repeat_index)
-    return tagged
+    return cast(Split | SplitWithIndices, tagged)
 
 
 def repeat_index_of(split: Split | SplitWithIndices) -> int:
@@ -276,7 +277,7 @@ def make_cv(
     test_size: float,
     n_features: int | None = None,
     n_repeats: int | None = None,
-) -> tuple[str, model_selection.BaseCrossValidator | None, dict[str, Any] | None]:
+) -> tuple[str, model_selection.BaseCrossValidator | None, ValidationDecision | None]:
     """
     A factory of scikit-learn validation objects with an adaptation mechanism for data size.
     Args:
@@ -300,7 +301,7 @@ def make_cv(
             (may differ from the requested one on fallback).
             - cv_object (BaseCrossValidator | None): The sklearn validator
             object, or None if 'train_test_split' is selected.
-            - decision (dict[str, Any] | None): The resolved 'auto' strategy
+            - decision (ValidationDecision | None): The resolved 'auto' strategy
             decision (from choose_validation_method) for synchronizing test_size
             between decision points. None for non-auto strategies.
     Note:
@@ -369,7 +370,7 @@ def _resolve_auto_cv(
     n_folds: int,
     random_state: int | None,
     test_size: float,
-) -> tuple[str, model_selection.BaseCrossValidator | None, dict[str, Any] | None]:
+) -> tuple[str, model_selection.BaseCrossValidator | None, ValidationDecision | None]:
     """Resolve the 'auto' validation strategy into a concrete sklearn CV object.
 
     Uses choose_validation_method(n_samples, n_features) to pick between LOO,
@@ -420,23 +421,21 @@ def _resolve_auto_cv(
 
 # The ``iter_splits`` result: a tuple of four subsets (X_train, X_val,
 # y_train, y_val) or of five when ``include_indices=True`` — the fifth element
-# is an ``np.ndarray`` of positional indices of the validation rows in the
+# is an ``Array`` of positional indices of the validation rows in the
 # original data (assembly of OOF predictions in ``ModelTrainer``).
 # Precise typing via ``@overload`` with ``Literal``: calls with
 # ``include_indices=False`` (default) get a 4-element tuple,
 # with ``include_indices=True`` — a 5-element one.
-Split = tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]
-SplitWithIndices = tuple[
-    np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray
-]
-Pair = tuple[np.ndarray, np.ndarray]
+Split = tuple[Array, Array, Array | None, Array | None]
+SplitWithIndices = tuple[Array, Array, Array | None, Array | None, Array]
+Pair = tuple[Array, Array]
 PairSet = Iterable[Pair]
 
 
 @overload
 def iter_splits(
-    X: np.ndarray | pd.DataFrame,
-    y: np.ndarray | pd.Series | None = None,
+    X: Array | DataFrame,
+    y: Array | Series | None = None,
     *,
     method: ValidationStrategy | str = "k_fold",
     n_folds: int = 5,
@@ -449,8 +448,8 @@ def iter_splits(
 
 @overload
 def iter_splits(
-    X: np.ndarray | pd.DataFrame,
-    y: np.ndarray | pd.Series | None = None,
+    X: Array | DataFrame,
+    y: Array | Series | None = None,
     *,
     method: ValidationStrategy | str = "k_fold",
     n_folds: int = 5,
@@ -462,8 +461,8 @@ def iter_splits(
 
 
 def iter_splits(
-    X: np.ndarray | pd.DataFrame,
-    y: np.ndarray | pd.Series | None = None,
+    X: Array | DataFrame,
+    y: Array | Series | None = None,
     *,
     method: ValidationStrategy | str = "k_fold",
     n_folds: int = 5,
@@ -554,11 +553,9 @@ def iter_splits(
             )
 
 
-def _validate_split_inputs(
-    X: np.ndarray | pd.DataFrame, y: np.ndarray | pd.Series | None
-) -> None:
+def _validate_split_inputs(X: Array | DataFrame, y: Array | Series | None) -> None:
     """Validate that X is non-empty and X/y lengths match."""
-    if isinstance(X, pd.DataFrame):
+    if isinstance(X, DataFrame):
         validate_df_not_empty(X)
     elif len(X) == 0:
         raise InvalidDataError("Input array X is empty.")
@@ -567,7 +564,7 @@ def _validate_split_inputs(
 
 
 def _warn_about_repeat_sample_size(
-    X: np.ndarray | pd.DataFrame,
+    X: Array | DataFrame,
     final_method: str,
     cv: model_selection.BaseCrossValidator | None,
     n_folds: int,
@@ -591,11 +588,11 @@ def _warn_about_repeat_sample_size(
 
 
 def _resolve_pair_sets(
-    X: np.ndarray | pd.DataFrame,
+    X: Array | DataFrame,
     *,
     final_method: str,
     cv: model_selection.BaseCrossValidator | None,
-    decision: dict[str, Any] | None,
+    decision: ValidationDecision | None,
     method_str: str,
     test_size: float,
     random_state: int | None,
@@ -622,7 +619,7 @@ def _resolve_pair_sets(
 
 
 def _cv_pair_sets(
-    X: np.ndarray | pd.DataFrame,
+    X: Array | DataFrame,
     cv: model_selection.BaseCrossValidator,
     final_method: str,
     random_state: int | None,
@@ -643,19 +640,20 @@ def _cv_pair_sets(
 
 
 def _make_split(
-    X: np.ndarray | pd.DataFrame,
-    y: np.ndarray | pd.Series | None,
-    train_idx: np.ndarray,
-    test_idx: np.ndarray,
+    X: Array | DataFrame,
+    y: Array | Series | None,
+    train_idx: Array,
+    test_idx: Array,
     *,
     include_indices: bool,
     repeats: int,
     repeat_idx: int,
 ) -> Split | SplitWithIndices:
     """Materialize the train/validation subsets for one index pair."""
-    x_tr, x_te = _take(X, train_idx), _take(X, test_idx)
-    y_tr = None if y is None else _take(y, train_idx)
-    y_te = None if y is None else _take(y, test_idx)
+    x_tr = cast(Array, _take(X, train_idx))
+    x_te = cast(Array, _take(X, test_idx))
+    y_tr = None if y is None else cast(Array, _take(y, train_idx))
+    y_te = None if y is None else cast(Array, _take(y, test_idx))
     if include_indices:
         split: Split | SplitWithIndices = (
             x_tr,
@@ -671,7 +669,10 @@ def _make_split(
     return split
 
 
-def _take(obj: Any, idx: np.ndarray) -> Any:
+_T = TypeVar("_T")
+
+
+def _take(obj: _T, idx: Array) -> _T:
     """Select rows by position (pandas via ``iloc``, numpy by indexing).
 
     Args:
@@ -680,11 +681,12 @@ def _take(obj: Any, idx: np.ndarray) -> Any:
 
 
     Returns:
-        Any: The selected rows, of the same type as ``obj``.
+        The selected rows, of the same type as ``obj``.
     """
-    if hasattr(obj, "iloc"):
-        return obj.iloc[idx]
-    return obj[idx]
+    iloc = getattr(obj, "iloc", None)
+    if iloc is not None:
+        return cast(_T, iloc[idx])
+    return cast(_T, cast(Array, obj)[idx])
 
 
 def _holdout_pairs(
@@ -692,7 +694,7 @@ def _holdout_pairs(
     *,
     test_size: float,
     method_str: str,
-    decision: dict[str, Any] | None,
+    decision: ValidationDecision | None,
     random_state: int | None,
     n_repeats: int = 1,
 ) -> list[PairSet]:

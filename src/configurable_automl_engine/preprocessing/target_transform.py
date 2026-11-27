@@ -60,15 +60,17 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy import stats
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.preprocessing import PowerTransformer
 
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.types import Array, Estimator
 
 _LOG = logging.getLogger(__name__)
 
@@ -188,7 +190,7 @@ def normalize_target_transform(
 
 
 def validate_target_for_transform(
-    y: Any, method: TargetTransform | str, *, allow_auto: bool = False
+    y: ArrayLike, method: TargetTransform | str, *, allow_auto: bool = False
 ) -> None:
     """Validate that ``y`` lies in the domain of the transformation.
 
@@ -246,7 +248,7 @@ class TargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         self.method = method
         self.clip_margin = clip_margin
 
-    def fit(self, y: Any, X: Any = None) -> TargetTransformer:
+    def fit(self, y: ArrayLike, X: object = None) -> TargetTransformer:
         """Fit the transformer and record the transformed train range.
 
         Args:
@@ -278,11 +280,11 @@ class TargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         self.y_max_ = float(np.max(y_arr))
         return self
 
-    def transform(self, y: Any) -> np.ndarray:
+    def transform(self, y: ArrayLike) -> Array:
         """Transform ``y`` into the model scale (shape ``(n, 1)``)."""
         return self._forward(np.asarray(y, dtype=float))
 
-    def inverse_transform(self, t: Any) -> np.ndarray:
+    def inverse_transform(self, t: ArrayLike) -> Array:
         """Clip ``t`` to the transformed train range and invert.
 
         The clip window is ``[t_min_ - m, t_max_ + m]`` with
@@ -345,27 +347,27 @@ class TargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         return out
 
     # ── internals ──────────────────────────────────────────────────────────
-    def _forward(self, y: np.ndarray) -> np.ndarray:
+    def _forward(self, y: Array) -> Array:
         """Apply the forward transformation to ``(n,)`` or ``(n, 1)`` input."""
         y_arr = y.reshape(-1, 1)
         if self.power_ is not None:
-            transformed: np.ndarray = np.asarray(self.power_.transform(y_arr))
+            transformed: Array = np.asarray(self.power_.transform(y_arr))
             return transformed
         # log1p: no state (the forward direction has no domain checks here —
         # validate_target_for_transform guards it before training).
-        logged: np.ndarray = np.log1p(y_arr)
+        logged: Array = np.log1p(y_arr)
         return logged
 
-    def _inverse(self, t: np.ndarray) -> np.ndarray:
+    def _inverse(self, t: Array) -> Array:
         """Apply the inverse transformation to a ``(n, 1)`` array."""
         if self.power_ is not None:
-            restored: np.ndarray = np.asarray(self.power_.inverse_transform(t))
+            restored: Array = np.asarray(self.power_.inverse_transform(t))
             return restored
-        exponentiated: np.ndarray = np.expm1(t)
+        exponentiated: Array = np.expm1(t)
         return exponentiated
 
 
-def _fit_power(y: np.ndarray, method: str) -> PowerTransformer:
+def _fit_power(y: Array, method: str) -> PowerTransformer:
     """Fit the internal ``PowerTransformer`` for a power method.
 
     For a constant ``y`` (zero variance) the standardized power transform
@@ -451,7 +453,7 @@ class AutoTargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[mi
     def __init__(self, skew_threshold: float = DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD):
         self.skew_threshold = skew_threshold
 
-    def fit(self, y: Any, X: Any = None) -> AutoTargetTransformer:
+    def fit(self, y: ArrayLike, X: object = None) -> AutoTargetTransformer:
         """Resolve the method from ``y`` and fit the inner transformer.
 
         Args:
@@ -481,14 +483,14 @@ class AutoTargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[mi
         )
         return self
 
-    def transform(self, y: Any) -> np.ndarray:
+    def transform(self, y: ArrayLike) -> Array:
         """Transform ``y`` with the method resolved at fit time."""
         inner = self._inner()
         if inner is None:
             return np.asarray(y, dtype=float).reshape(-1, 1)
         return inner.transform(y)
 
-    def inverse_transform(self, t: Any) -> np.ndarray:
+    def inverse_transform(self, t: ArrayLike) -> Array:
         """Invert ``y`` with the method resolved at fit time (with clipping)."""
         inner = self._inner()
         if inner is None:
@@ -506,11 +508,11 @@ class AutoTargetTransformer(TransformerMixin, BaseEstimator):  # type: ignore[mi
 
 
 def wrap_with_target_transform(
-    model: Any,
+    model: Estimator,
     method: TargetTransform | str,
     *,
     skew_threshold: float | None = None,
-) -> Any:
+) -> Estimator:
     """Wrap a regressor into a target-transformed regressor.
 
     Args:
@@ -545,14 +547,17 @@ def wrap_with_target_transform(
         )
     else:
         transformer = TargetTransformer(method=method_str)
-    return TransformedTargetRegressor(
-        regressor=model,
-        transformer=transformer,
-        check_inverse=False,
+    return cast(
+        Estimator,
+        TransformedTargetRegressor(
+            regressor=model,
+            transformer=transformer,
+            check_inverse=False,
+        ),
     )
 
 
-def fit_transform_target(y: Any, method: TargetTransform | str) -> np.ndarray:
+def fit_transform_target(y: ArrayLike, method: TargetTransform | str) -> Array:
     """Fit the transformation on ``y`` and return it in the model scale.
 
     The single entry point for "train on the transformed ``y``" consumers
@@ -576,14 +581,14 @@ def fit_transform_target(y: Any, method: TargetTransform | str) -> np.ndarray:
     validate_target_for_transform(y, method_str)
     transformer = TargetTransformer(method=method_str)
     transformed = cast(
-        np.ndarray,
+        Array,
         transformer.fit_transform(np.asarray(y, dtype=float).reshape(-1)),
     )
     return transformed.reshape(-1)
 
 
 def resolve_target_transform(
-    y: Any,
+    y: ArrayLike,
     method: TargetTransform | str,
     skew_threshold: float = DEFAULT_TARGET_TRANSFORM_SKEW_THRESHOLD,
 ) -> TargetTransform:

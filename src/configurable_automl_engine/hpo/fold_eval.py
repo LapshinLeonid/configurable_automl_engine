@@ -9,7 +9,7 @@ callers keep the failure policy (a non-fatal fold failure penalizes the fold).
 from __future__ import annotations
 
 import logging as _logging
-from typing import Any
+from typing import cast
 
 import numpy as np
 from sklearn.base import clone
@@ -17,6 +17,13 @@ from sklearn.base import clone
 from configurable_automl_engine.common.metrics import (
     pooled_scorer_value,
     warn_pooled_fallback_once,
+)
+from configurable_automl_engine.common.types import (
+    Array,
+    Estimator,
+    Frame,
+    Scorer,
+    Target,
 )
 
 from .types import InvalidDataError
@@ -61,8 +68,12 @@ def _warn_invalid_fold_predictions(fold_idx: int, n_finite: int, n_rows: int) ->
 
 
 def _fit_predict_fold(
-    estimator: Any, X_tr: Any, y_tr: Any, X_te: Any, fold_idx: int
-) -> tuple[Any, np.ndarray] | None:
+    estimator: Estimator,
+    X_tr: Frame,
+    y_tr: Target | None,
+    X_te: Frame,
+    fold_idx: int,
+) -> tuple[Estimator, Array] | None:
     """Fit a clone of the estimator on a fold and predict its test rows.
 
     Clone the estimator for every fold (as cross_val_score does) to avoid
@@ -91,13 +102,13 @@ def _fit_predict_fold(
         fold_idx: The 1-based fold index (for the warning).
 
     Returns:
-        tuple[Any, np.ndarray] | None: The fitted fold estimator and its
+        tuple[Estimator, np.ndarray] | None: The fitted fold estimator and its
             (finite) predictions, or ``None`` — the fold failed and is
             penalized.
     """
     try:
-        fold_estimator = clone(estimator)
-        fold_estimator.fit(X_tr, y_tr)
+        fold_estimator = cast(Estimator, clone(estimator))
+        fold_estimator.fit(X_tr, cast(Target, y_tr))
     except (MemoryError, RuntimeError, InvalidDataError):
         raise
     except Exception as err:  # noqa: BLE001 — per-fold failure, cross_val_score(error_score=nan) semantics
@@ -124,11 +135,11 @@ def _fit_predict_fold(
 
 
 def _final_pooled_estimate(
-    scorer: Any,
+    scorer: Scorer,
     fold_scores: list[float],
-    fold_pairs: list[tuple[np.ndarray, np.ndarray]],
-    pooled_y: np.ndarray,
-    pooled_pred: np.ndarray,
+    fold_pairs: list[tuple[Array, Array]],
+    pooled_y: Array,
+    pooled_pred: Array,
     *,
     poolable: bool,
     n_folds_total: int,
@@ -187,12 +198,12 @@ def _final_pooled_estimate(
 
 
 def _running_pooled_value(
-    scorer: Any,
-    fold_estimator: Any,
-    X_te: Any,
-    y_te: Any,
-    pooled_y_buf: np.ndarray,
-    pooled_pred_buf: np.ndarray,
+    scorer: Scorer,
+    fold_estimator: Estimator,
+    X_te: Frame,
+    y_te: Target | None,
+    pooled_y_buf: Array,
+    pooled_pred_buf: Array,
     fold_scores: list[float],
 ) -> float:
     """The running pooled metric value over the rows covered so far.
@@ -226,10 +237,10 @@ def _running_pooled_value(
 
 
 def _final_intermediate_estimate(
-    scorer: Any,
+    scorer: Scorer,
     fold_scores: list[float],
-    pooled_y_buf: np.ndarray,
-    pooled_pred_buf: np.ndarray,
+    pooled_y_buf: Array,
+    pooled_pred_buf: Array,
     *,
     pool_metric: bool,
     n_folds_total: int,

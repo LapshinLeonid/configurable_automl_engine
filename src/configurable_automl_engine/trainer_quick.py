@@ -9,28 +9,73 @@ re-exported from there, and ``trainer`` imports this module.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, SupportsFloat, cast
 
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.log_setup import setup_logging
 from configurable_automl_engine.common.metrics import is_error_metric
+from configurable_automl_engine.common.types import (
+    Frame,
+    FrameInput,
+    Params,
+    ParamsInput,
+    Target,
+    TargetInput,
+)
 from configurable_automl_engine.feature_selection import FeatureSelectionCfg
 
 
+class _Trainer(Protocol):
+    """Minimal fitted-trainer interface used by the facade."""
+
+    @property
+    def val_score(self) -> float | None:
+        """The validation score of the fitted trainer."""
+        ...  # pragma: no cover - protocol definition
+
+    @property
+    def validation_strategy(self) -> str:
+        """The resolved validation strategy of the fitted trainer."""
+        ...  # pragma: no cover - protocol definition
+
+    def fit(self, X: FrameInput, y: TargetInput | str) -> object:
+        """Fit the trainer on ``X`` and ``y``."""
+        ...  # pragma: no cover - protocol definition
+
+
+class _TrainerFactory(Protocol):
+    """Constructor interface of the trainer class used by the facade."""
+
+    def __call__(
+        self,
+        *,
+        algorithm: str,
+        hyperparams: ParamsInput,
+        metric: str,
+        random_state: int | None,
+        data_oversampling: bool,
+        data_oversampling_multiplier: float,
+        data_oversampling_algorithm: str,
+        feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None,
+        feature_selection_active: bool | None,
+    ) -> _Trainer:
+        """Build a trainer with the facade's keyword arguments."""
+        ...  # pragma: no cover - protocol definition
+
+
 def run_train_model(
-    trainer_cls: Callable[..., Any],
-    cfg_or_algo: dict[str, Any] | str,
+    trainer_cls: _TrainerFactory,
+    cfg_or_algo: ParamsInput | str,
     metric_or_testsize: str | float,
-    params_or_metric: dict[str, Any] | str,
-    X: Any = None,
-    y: Any = None,
+    params_or_metric: ParamsInput | str,
+    X: FrameInput | None = None,
+    y: TargetInput | str | None = None,
     enable_logging: bool = False,
     random_state: int | None = 42,
     log_path: str | Path | None = None,
     *,
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None,
+    feature_selection_cfg: FeatureSelectionCfg | ParamsInput | None = None,
     feature_selection_active: bool | None = None,
 ) -> float:
     """Run the ``train_model`` facade with the given trainer class.
@@ -85,18 +130,18 @@ def run_train_model(
     """
     algo: str = ""
     metric: str = ""
-    hyperparams: dict[str, Any] = {}
+    hyperparams: Params = {}
     rs: int | None = random_state
 
-    fs_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    fs_cfg: FeatureSelectionCfg | ParamsInput | None
     fs_active: bool | None
 
     # The "config dict" case
     if isinstance(cfg_or_algo, dict):
-        cfg: dict[str, Any] = cfg_or_algo
+        cfg: Params = cfg_or_algo
         algo = str(cfg.get("algorithm", ""))
         metric = str(cfg.get("metric", ""))
-        hyperparams = cast(dict[str, Any], cfg.get("hyperparams", {}))
+        hyperparams = cast(Params, cfg.get("hyperparams", {}))
         rs = cast(int | None, cfg.get("random_state", 42))
         enable_logging = bool(cfg.get("enable_logging", False))
         # ``log_path`` follows the same precedence rule as
@@ -107,14 +152,16 @@ def run_train_model(
         if "log_path" in cfg and cfg["log_path"] is not None:
             log_path = cast(str | Path | None, cfg["log_path"])
         data_os = bool(cfg.get("data_oversampling", False))
-        data_os_mult = float(cfg.get("data_oversampling_multiplier", 1.0))
+        data_os_mult = float(
+            cast(SupportsFloat, cfg.get("data_oversampling_multiplier", 1.0))
+        )
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
         # Config keys take precedence over the explicit arguments (similarly to
         # ``data_oversampling``); a key with the value None is treated as
         # "value not set" and falls back to the function argument (see docstring).
         if "feature_selection_cfg" in cfg and cfg["feature_selection_cfg"] is not None:
             fs_cfg = cast(
-                FeatureSelectionCfg | dict[str, Any] | None,
+                FeatureSelectionCfg | ParamsInput | None,
                 cfg["feature_selection_cfg"],
             )
         else:
@@ -130,9 +177,9 @@ def run_train_model(
         # Simple API
         # A None algorithm stays empty here; the type check below raises
         # "Invalid algorithm" for any non-string/non-dict input.
-        algo = cfg_or_algo if cfg_or_algo is not None else ""
+        algo = cfg_or_algo if isinstance(cfg_or_algo, str) else ""
         metric = str(metric_or_testsize)
-        hyperparams = cast(dict[str, Any], params_or_metric)
+        hyperparams = cast(Params, params_or_metric)
         rs = random_state
         data_os = False
         data_os_mult = 1.0
@@ -160,7 +207,7 @@ def run_train_model(
         feature_selection_cfg=fs_cfg,
         feature_selection_active=fs_active,
     )
-    trainer.fit(X, y)
+    trainer.fit(cast(Frame, X), cast(Target | str, y))
     val_score = trainer.val_score
     if val_score is None:
         raise TrainingError("Model did not return a metric value")

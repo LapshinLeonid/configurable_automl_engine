@@ -90,8 +90,8 @@ import importlib
 import json
 import logging
 import math
+from collections.abc import Mapping
 from types import ModuleType
-from typing import Any
 
 from configurable_automl_engine.common.dependency_utils import is_installed
 from configurable_automl_engine.experiment.leaderboard import build_leaderboard
@@ -180,7 +180,7 @@ def _sanitize_metric(name: str, value: float) -> float | None:
     return float(value)
 
 
-def _sanitize_param(value: Any) -> str:
+def _sanitize_param(value: object) -> str:
     """Render one parameter value as an MLflow-safe string.
 
     MLflow stores parameters as strings; the JSON rendering keeps
@@ -233,7 +233,7 @@ def _clamp_key(key: str) -> str:
     return key[:_MAX_KEY_LENGTH]
 
 
-def _flatten_params(params: dict[str, Any], prefix: str) -> dict[str, str]:
+def _flatten_params(params: Mapping[str, object], prefix: str) -> dict[str, str]:
     """Flatten one parameter mapping into ``prefix.key`` string values.
 
     The result model stores the best parameters as a JSON-serializable
@@ -246,7 +246,7 @@ def _flatten_params(params: dict[str, Any], prefix: str) -> dict[str, str]:
     """
     flat: dict[str, str] = {}
 
-    def _walk(mapping: dict[str, Any], path: str) -> None:
+    def _walk(mapping: Mapping[str, object], path: str) -> None:
         for key, value in mapping.items():
             key_path = f"{path}.{key}" if path else str(key)
             if isinstance(value, dict):

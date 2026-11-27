@@ -16,9 +16,10 @@ and exposes the consumed artifacts:
 
 Documented contract:
 
-* the config argument is passed to ``load_config`` unchanged: a ``Config``
-  object, a plain dict, a YAML file path (``str`` or ``pathlib.Path``) —
-  every form the training engine accepts today keeps working;
+* the config argument is passed to ``load_config`` as a ``Config`` object, a
+  mutable ``dict`` (a read-only mapping is copied at construction), or a
+  YAML file path (``str`` or ``pathlib.Path``) — every form the training
+  engine accepts today keeps working;
 * the training result is registered in the ``ExperimentStore`` of the
   experiment (an in-memory store by default; pass ``store`` or ``store_path``
   to persist the history as JSONL) and kept as the ``result`` attribute;
@@ -60,13 +61,20 @@ import copy
 import logging
 import uuid
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TypeVar, overload
-
-import pandas as pd
+from typing import TypeVar, overload
 
 from configurable_automl_engine.common.datetime_features import (
     expand_datetime_columns,
+)
+from configurable_automl_engine.common.types import (
+    DataFrame,
+    JSONDict,
+    Params,
+    ParamsInput,
+    Target,
+    TargetInput,
 )
 from configurable_automl_engine.experiment.ensemble import EnsembleModel
 from configurable_automl_engine.experiment.export import export_experiment
@@ -94,6 +102,7 @@ from configurable_automl_engine.explain import (
 )
 from configurable_automl_engine.trainer import ModelTrainer
 from configurable_automl_engine.training_engine import train_best_model
+from configurable_automl_engine.training_engine.config_parser import Config
 from configurable_automl_engine.training_engine.result_registry import (
     get_experiment_result_owned_by,
 )
@@ -109,6 +118,13 @@ __all__ = [
 #: The explain methods of ``AutoMLExperiment.explain``.
 _EXPLAIN_METHODS = frozenset({"permutation", "shap"})
 
+#: The structured explain result (optionally paired with its Markdown section).
+ExplainOutcome = (
+    PermutationImportanceResult
+    | ShapFeatureImportance
+    | tuple[PermutationImportanceResult | ShapFeatureImportance, str]
+)
+
 _LOG = logging.getLogger(__name__)
 
 #: The report file written by the default ``report()`` reporter chain,
@@ -119,7 +135,7 @@ DEFAULT_REPORT_JSON_NAME = "experiment_report.json"
 def _explanations_payload(
     method: str,
     importance: PermutationImportanceResult | ShapFeatureImportance,
-) -> dict[str, Any]:
+) -> JSONDict:
     """Serialize one explain result into the JSON-safe run payload.
 
     The payload is the value of ``ExperimentResult.explanations``: a
@@ -131,7 +147,7 @@ def _explanations_payload(
     importing the engine.
 
     Returns:
-        dict[str, Any]: The JSON-serializable explain payload.
+        JSONDict: The JSON-serializable explain payload.
     """
     importances = [
         {
@@ -145,7 +161,7 @@ def _explanations_payload(
         }
         for item in importance.importances
     ]
-    payload: dict[str, Any] = {"method": method, "importances": importances}
+    payload: JSONDict = {"method": method, "importances": importances}
     if isinstance(importance, PermutationImportanceResult):
         payload.update(
             {
@@ -206,8 +222,8 @@ class AutoMLExperiment:
 
     def __init__(
         self,
-        config: str | Path | dict[str, Any] | Any,
-        data: pd.DataFrame,
+        config: str | Path | ParamsInput | Config,
+        data: DataFrame,
         *,
         target: str | None = None,
         store: ExperimentStore | None = None,
@@ -219,8 +235,9 @@ class AutoMLExperiment:
 
         Args:
             config: The training configuration: a ``Config`` object, a
-                plain dict, or a path (``str``/``Path``) to a YAML file —
-                the same forms the training engine accepts.
+                mapping, or a path (``str``/``Path``) to a YAML file — the
+                same forms the training engine accepts. A mapping is copied
+                into a mutable ``dict`` so read-only mappings are accepted.
             data: The input dataset (snapshotted at ``run()`` time).
             target: The target column name (default ``"target"``).
             store: The run-history store to register the result in;
@@ -235,7 +252,9 @@ class AutoMLExperiment:
                 to the training engine; default ``None`` keeps the
                 configured ``general.path_to_model``).
         """
-        self._config = config
+        self._config: str | Path | Params | Config = (
+            dict(config) if isinstance(config, Mapping) else config
+        )
         self._data = data
         self._target = target
         self._label = label
@@ -263,7 +282,7 @@ class AutoMLExperiment:
         return self._result
 
     @property
-    def run_id(self) -> Any:
+    def run_id(self) -> uuid.UUID | None:
         """The ``run_id`` of the last ``run()`` (``None`` before it)."""
         return self._result.run_id if self._result is not None else None
 
@@ -455,7 +474,7 @@ class AutoMLExperiment:
             )
         return ModelTrainer.load(model_path)
 
-    def ensemble_model(self) -> Any:
+    def ensemble_model(self) -> EnsembleModel:
         """Return the experimental top-K ensemble of the last run.
 
         The ensemble is built by the engine when ``general.ensemble.enable``
@@ -491,7 +510,7 @@ class AutoMLExperiment:
     @overload
     def report(self, reporter: None = None) -> ReporterArtifact: ...
 
-    def report(self, reporter: Reporter[Any] | None = None) -> Any:
+    def report(self, reporter: Reporter[object] | None = None) -> object:
         """Run the reporter chain on the last run result.
 
         The default chain renders the Markdown report to stdout and
@@ -563,14 +582,14 @@ class AutoMLExperiment:
     def explain(
         self,
         method: str = "permutation",
-        X: pd.DataFrame | None = None,
-        y: Any | None = None,
+        X: DataFrame | None = None,
+        y: TargetInput | None = None,
         *,
         n_repeats: int = DEFAULT_N_REPEATS,
         max_rows: int = DEFAULT_SAMPLE_ROWS,
         post_preprocessing: bool = False,
         markdown: bool = True,
-    ) -> Any:
+    ) -> ExplainOutcome:
         """Explain the winner model of the last run.
 
         Two computations are available (one per call):
@@ -699,9 +718,9 @@ class AutoMLExperiment:
 
     def _explain_data(
         self,
-        X: pd.DataFrame | None,
-        y: Any | None,
-    ) -> tuple[pd.DataFrame, Any | None]:
+        X: DataFrame | None,
+        y: TargetInput | None,
+    ) -> tuple[DataFrame, TargetInput | None]:
         """The frame/target the explanation is computed on.
 
         The defaults are the run's training data: the feature columns of
@@ -725,13 +744,13 @@ class AutoMLExperiment:
         """
         if X is not None:
             return X, y
-        if not isinstance(self._data, pd.DataFrame):
+        if not isinstance(self._data, DataFrame):
             return self._data, y
         data = copy.copy(self._data)
         target = self._target or "target"
         if target in data.columns:
             features = data.drop(columns=[target])
-            target_values: Any = data[target]
+            target_values: Target | None = data[target]
         else:
             features = data
             target_values = None

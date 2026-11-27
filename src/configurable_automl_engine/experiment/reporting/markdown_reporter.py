@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from collections.abc import Mapping
+from typing import SupportsFloat, SupportsInt, cast
 
 from configurable_automl_engine.common.definitions import RunStatus, RunStepStatus
 from configurable_automl_engine.experiment.leaderboard import build_leaderboard
@@ -105,7 +106,7 @@ def _format_score(score: float | None) -> str:
     return _EMPTY_CELL if score is None else f"{score:.3f}"
 
 
-def _format_number(value: Any) -> str:
+def _format_number(value: object) -> str:
     """Render a number, or ``n/a`` for a missing/non-finite value.
 
     Report sections are JSON-safe mappings assembled by the engine; a
@@ -116,7 +117,7 @@ def _format_number(value: Any) -> str:
     if value is None:
         return _NA
     try:
-        numeric = float(value)
+        numeric = float(cast(SupportsFloat, value))
     except (TypeError, ValueError):
         return _NA
     if not math.isfinite(numeric):
@@ -150,7 +151,7 @@ def _repeat_note(result: ExperimentResult) -> str | None:
     return f"{_aggregation_label(result)} of {n_repeats} repeats"
 
 
-def _format_spread(value: Any, std: Any, result: ExperimentResult) -> str:
+def _format_spread(value: object, std: object, result: ExperimentResult) -> str:
     """Render an aggregate with its spread for a repeated-validation run.
 
     A single split renders as a plain scalar. For several
@@ -158,18 +159,20 @@ def _format_spread(value: Any, std: Any, result: ExperimentResult) -> str:
     spread renders as ``n/a`` instead of failing the whole report.
     """
     if _repeat_count(result) <= 1:
-        return _format_score(value if value is None else float(value))
+        return _format_score(
+            value if value is None else float(cast(SupportsFloat, value))
+        )
     return f"{_format_number(value)} ± {_format_number(std)}"
 
 
-def _format_value_with_std(value: Any, std: Any) -> str:
+def _format_value_with_std(value: object, std: object) -> str:
     """Render a section metric with an optional spread."""
     if std is None:
         return _format_number(value)
     return f"{_format_number(value)} ± {_format_number(std)}"
 
 
-def _pick(mapping: dict[str, Any], *keys: str) -> Any:
+def _pick(mapping: Mapping[str, object], *keys: str) -> object:
     """Return the first present value among the alternative section keys."""
     for key in keys:
         if key in mapping:
@@ -177,7 +180,7 @@ def _pick(mapping: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _has_repeat_markers(value: Any) -> bool:
+def _has_repeat_markers(value: object) -> bool:
     """True when a report section carries multi-split aggregate markers.
 
     A section with a per-repeat spread (``*_std``), an explicit median key or
@@ -207,7 +210,7 @@ def _has_repeat_markers(value: Any) -> bool:
     return False
 
 
-def _has_aggregated_audit(value: Any) -> bool:
+def _has_aggregated_audit(value: object) -> bool:
     """True when a gate section actually records aggregated audit values.
 
     The section-level ``n_repeats`` alone does not prove aggregation: the
@@ -243,7 +246,7 @@ def _has_aggregated_audit(value: Any) -> bool:
     return False
 
 
-def _has_rmse_spread(value: dict[str, Any]) -> bool:
+def _has_rmse_spread(value: Mapping[str, object]) -> bool:
     """True when a gate section records an ``RMSE_oof`` per-repeat spread."""
     if value.get("winner_rmse_oof_std") is not None:
         return True
@@ -253,17 +256,17 @@ def _has_rmse_spread(value: dict[str, Any]) -> bool:
     )
 
 
-def _format_count(value: Any) -> str:
+def _format_count(value: object) -> str:
     """Render an integer count, or ``n/a`` for a missing value."""
     if value is None:
         return _NA
     try:
-        return str(int(value))
+        return str(int(cast(SupportsInt, value)))
     except (TypeError, ValueError, OverflowError):
         return _NA
 
 
-def _text_items(value: Any) -> list[str]:
+def _text_items(value: object) -> list[str]:
     """Normalize a report list-or-string value to a list of plain strings.
 
     A section may carry ``reasons`` as a single string instead of a list;
@@ -279,7 +282,7 @@ def _text_items(value: Any) -> list[str]:
     return [str(value)]
 
 
-def _format_gap(value: Any, std: Any, infinite: Any) -> str:
+def _format_gap(value: object, std: object, infinite: object) -> str:
     """Render the generalization gap, honoring the explicit infinity flag.
 
     The engine serializes a non-finite gap as ``null`` plus
@@ -288,7 +291,7 @@ def _format_gap(value: Any, std: Any, infinite: Any) -> str:
     """
     if infinite:
         try:
-            numeric = float(value)
+            numeric = float(cast(SupportsFloat, value))
         except (TypeError, ValueError):
             numeric = None
         if numeric is None or not math.isfinite(numeric):
@@ -296,12 +299,12 @@ def _format_gap(value: Any, std: Any, infinite: Any) -> str:
     return _format_value_with_std(value, std)
 
 
-def _format_seconds(seconds: Any) -> str:
+def _format_seconds(seconds: object) -> str:
     """Render one duration cell in seconds (two decimal places)."""
     if seconds is None:
         return _EMPTY_CELL
     try:
-        numeric = float(seconds)
+        numeric = float(cast(SupportsFloat, seconds))
     except (TypeError, ValueError):
         return _NA
     if not math.isfinite(numeric):
@@ -309,7 +312,7 @@ def _format_seconds(seconds: Any) -> str:
     return f"{numeric:.2f}s"
 
 
-def _format_params(params: dict[str, Any]) -> str:
+def _format_params(params: Mapping[str, object]) -> str:
     """Render the best-parameters mapping as one inline-code cell."""
     if not params:
         return _EMPTY_CELL
@@ -614,7 +617,7 @@ class MarkdownReporter(Reporter[ReporterArtifact]):
                 self._render_gate_audit(lines, audit)
             lines.append("")
 
-    def _render_gate_audit(self, lines: list[str], audit: dict[str, Any]) -> None:
+    def _render_gate_audit(self, lines: list[str], audit: Mapping[str, object]) -> None:
         """Render the per-candidate audit table of one gate section."""
         lines.append("")
         lines.append(

@@ -14,10 +14,11 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import Any
+from typing import SupportsFloat, cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike
 
 from configurable_automl_engine.common.definitions import (
     WORST_SCORE_THRESHOLD,
@@ -32,6 +33,15 @@ from configurable_automl_engine.common.metrics import (
     pooled_scorer_value,
     to_sklearn_name,
     to_user_value,
+)
+from configurable_automl_engine.common.types import (
+    Array,
+    Frame,
+    JSONDict,
+    Params,
+    Scorer,
+    Series,
+    Target,
 )
 from configurable_automl_engine.preprocessing_presets import (
     merge_preprocessing_overrides,
@@ -57,7 +67,7 @@ _LOG = logging.getLogger(__name__)
 def _build_trainer(
     algo_name: str,
     algo_cfg: AlgoCfg,
-    best_params: dict[str, Any],
+    best_params: Params,
     cfg: Config,
     metric_name_sklearn: str = "r2",
     *,
@@ -161,7 +171,7 @@ def _build_trainer(
         target_encoding_smoothing=general.target_encoding_smoothing,
         target_encoding_fallback=general.target_encoding_fallback,
         feature_selection_cfg=general.feature_selection,
-        feature_selection_active=fs_active,
+        feature_selection_active=cast(bool | None, fs_active),
         validation_strategy=validation_strategy,
         n_folds=n_folds,
         test_size=test_size,
@@ -188,9 +198,9 @@ def _build_trainer(
 def _fit_and_save(
     algo_name: str,
     algo_cfg: AlgoCfg,
-    X: pd.DataFrame,
-    y: pd.Series,
-    best_params: dict[str, Any],
+    X: Frame,
+    y: Target,
+    best_params: Params,
     model_path: Path,
     cfg: Config,
     metric_name_sklearn: str = "r2",
@@ -256,17 +266,17 @@ def _fit_and_save(
     return trainer
 
 
-def _finite_float_or_none(value: Any) -> float | None:
+def _finite_float_or_none(value: object) -> float | None:
     """Normalize an optional numeric trainer statistic to a finite float."""
     if isinstance(value, bool) or not isinstance(
         value, (int, float, np.integer, np.floating)
     ):
         return None
-    normalized = float(value)
+    normalized = float(cast(SupportsFloat, value))
     return normalized if np.isfinite(normalized) else None
 
 
-def _effective_repeat_count(trainer: Any) -> int:
+def _effective_repeat_count(trainer: ModelTrainer) -> int:
     """Return the number of repeats the final trainer actually scored.
 
     ``repeat_scores_`` is ``None`` for a single-split run (and for an
@@ -281,8 +291,8 @@ def _effective_repeat_count(trainer: Any) -> int:
 
 
 def _add_repeat_statistics(
-    result: dict[str, Any],
-    trainer: Any,
+    result: JSONDict,
+    trainer: ModelTrainer,
     winner_repeat_scores: tuple[float, ...] | None = None,
     oof_score_std: float | None = None,
 ) -> None:
@@ -327,11 +337,11 @@ def _add_repeat_statistics(
 
 
 def _pooled_raw_oof_metric(
-    scorer: Any, oof_true: np.ndarray, oof_pred: Any
+    scorer: Scorer, oof_true: Array, oof_pred: object
 ) -> float | None:
     """Return the pooled raw scorer value on one OOF vector, if possible."""
     try:
-        oof_pred_arr = np.asarray(oof_pred, dtype=float).reshape(-1)
+        oof_pred_arr = np.asarray(cast(ArrayLike, oof_pred), dtype=float).reshape(-1)
     except (TypeError, ValueError):
         return None
     if oof_true.shape != oof_pred_arr.shape:
@@ -347,14 +357,16 @@ def _pooled_raw_oof_metric(
 
 def _oof_score_in_user_metric(
     metric_user: str,
-    trainer: Any,
-    y: pd.Series,
+    trainer: ModelTrainer,
+    y: Series,
 ) -> float | None:
     """Compute the comparison metric on the final pipeline's OOF channel."""
     return _oof_score_with_std_in_user_metric(metric_user, trainer, y)[0]
 
 
-def _rmse_user_repeat_values(metric_user: str, oof_repeat_scores: Any) -> list[float]:
+def _rmse_user_repeat_values(
+    metric_user: str, oof_repeat_scores: object
+) -> list[float]:
     """Convert the finite RMSE repeat scores into user-semantic values."""
     if not isinstance(oof_repeat_scores, (list, tuple)):
         return []
@@ -367,24 +379,24 @@ def _rmse_user_repeat_values(metric_user: str, oof_repeat_scores: Any) -> list[f
 
 def _rmse_oof_score_with_std_in_user_metric(
     metric_user: str,
-    oof_aggregate: Any,
-    oof_repeat_scores: Any,
+    oof_aggregate: object,
+    oof_repeat_scores: object,
 ) -> tuple[float | None, float | None]:
     """Build the RMSE-family OOF aggregate and its per-repeat spread."""
-    if oof_aggregate is None or not np.isfinite(oof_aggregate):
+    if oof_aggregate is None or not np.isfinite(cast(ArrayLike, oof_aggregate)):
         return None, None
     user_repeats = _rmse_user_repeat_values(metric_user, oof_repeat_scores)
     std = float(np.std(user_repeats)) if len(user_repeats) > 1 else None
-    return to_user_value(metric_user, -float(oof_aggregate)), std
+    return to_user_value(metric_user, -float(cast(SupportsFloat, oof_aggregate))), std
 
 
 def _select_oof_repeat_vectors(
-    trainer: Any, oof_repeat_scores: Any
-) -> list[Any] | None:
+    trainer: ModelTrainer, oof_repeat_scores: object
+) -> list[Target] | None:
     """Select the per-repeat OOF vectors aligned with the finite repeat scores."""
     repeat_vectors = getattr(trainer, "oof_predictions_by_repeat_", None)
     if isinstance(repeat_vectors, (list, tuple)) and len(repeat_vectors) > 1:
-        vectors: list[Any] = list(repeat_vectors)
+        vectors: list[Target] = list(repeat_vectors)
         if isinstance(oof_repeat_scores, (list, tuple)) and len(
             oof_repeat_scores
         ) == len(vectors):
@@ -402,8 +414,8 @@ def _select_oof_repeat_vectors(
 
 def _raw_and_user_oof_scores(
     metric_user: str,
-    y: pd.Series,
-    vectors: list[Any],
+    y: Series,
+    vectors: list[Target],
 ) -> tuple[list[float], list[float]] | None:
     """Score every OOF vector with the pooled scorer in raw and user semantics."""
     try:
@@ -417,7 +429,7 @@ def _raw_and_user_oof_scores(
 
     raw_scores: list[float] = []
     for vector in vectors:
-        raw = _pooled_raw_oof_metric(scorer, oof_true, vector)
+        raw = _pooled_raw_oof_metric(cast(Scorer, scorer), oof_true, vector)
         if raw is not None and np.isfinite(raw):
             raw_scores.append(raw)
     if not raw_scores:
@@ -428,8 +440,8 @@ def _raw_and_user_oof_scores(
 
 def _oof_score_with_std_in_user_metric(
     metric_user: str,
-    trainer: Any,
-    y: pd.Series,
+    trainer: ModelTrainer,
+    y: Series,
 ) -> tuple[float | None, float | None]:
     """Compute the OOF aggregate and its per-repeat spread.
 
@@ -497,7 +509,7 @@ def _compute_holdout_score(
     winner_cfg: AlgoCfg,
     prepared: PreparedData,
     winner_algo: str,
-    final_params: dict[str, Any],
+    final_params: Params,
 ) -> float:
     """Compute the honest hold-out score of the winner.
 
@@ -525,6 +537,8 @@ def _compute_holdout_score(
             hold-out rows — the failure is logged with its reason).
     """
     try:
+        if prepared.holdout_X is None or prepared.holdout_y is None:
+            return float("nan")
         # The trainer is assembled through the same single point as the final
         # fit (``_build_trainer``): the feature-selection helper key
         # (``use_feature_selection``) is popped from a copy by the same
@@ -572,7 +586,7 @@ def _compute_holdout_score(
             prepared.metric_user,
             global_y=np.asarray(prepared.y, dtype=float).reshape(-1),
         )
-        raw = pooled_scorer_value(scorer, true[mask], pred[mask])
+        raw = pooled_scorer_value(cast(Scorer, scorer), true[mask], pred[mask])
         if not np.isfinite(raw):
             return float("nan")
         return to_user_value(prepared.metric_user, raw)
@@ -591,16 +605,16 @@ def persist_artifact(
     prepared: PreparedData,
     winner_algo: str,
     final_score: float,
-    final_params: dict[str, Any],
+    final_params: Params,
     model_path_override: str | Path | None,
     disqualified_algorithms: dict[str, str],
-    pre_trained_trainer: Any | None = None,
-    sanity_gate_sections: dict[str, dict[str, Any]] | None = None,
-    complexity_guard_sections: dict[str, Any] | None = None,
+    pre_trained_trainer: ModelTrainer | None = None,
+    sanity_gate_sections: dict[str, JSONDict] | None = None,
+    complexity_guard_sections: JSONDict | None = None,
     n_trials_evaluated: int | None = None,
-    oof_pool: list[np.ndarray] | None = None,
+    oof_pool: list[Array] | None = None,
     winner_repeat_scores: tuple[float, ...] | None = None,
-) -> dict[str, Any]:
+) -> JSONDict:
     """Final training of the winner, artifact persistence, and report assembly.
 
     Pipeline step 5. Trains the winning algorithm's model on the full dataset
@@ -651,7 +665,7 @@ def persist_artifact(
             reported winner score.
 
     Returns:
-        Dict[str, Any]: A dict with the training results.
+        JSONDict: A dict with the training results.
 
     Raises:
         Exception: The final training/saving error is propagated (logged
@@ -710,7 +724,7 @@ def persist_artifact(
         _LOG.error(f"Failed to save final model: {e}")
         raise
 
-    result: dict[str, Any] = {
+    result: JSONDict = {
         "algorithm": winner_algo,
         # Consistent user semantics: score always reflects the natural metric
         # value (positive RMSE/MAE, plain R²), and metric is the user-facing
@@ -808,8 +822,8 @@ def persist_artifact(
 
 def _bbc_score_in_user_metric(
     metric_user: str,
-    oof_pool: list[np.ndarray],
-    y: pd.Series,
+    oof_pool: list[Array],
+    y: Series,
     random_state: int | None,
     *,
     n_bootstrap: int = BBC_N_BOOTSTRAP,

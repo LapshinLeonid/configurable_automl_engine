@@ -345,6 +345,16 @@ def test_validate_data_y_dataframe_column_is_validated():
         hpo_runner._validate_data(X, y_bad)
 
 
+def test_optimize_accepts_single_column_dataframe_target(toy_data):
+    """``optimize`` accepts the documented single-column DataFrame target."""
+    X, y = toy_data
+    y_frame = pd.DataFrame({"t": y.to_numpy()})
+
+    result = hyperopt.optimize("ridge", X, y_frame, n_trials=2)
+
+    assert result is not None
+
+
 def test_validate_data_duplicate_columns_rejected():
     """Duplicate feature columns are rejected before the search (S2)."""
     X = pd.DataFrame(np.ones((4, 3)), columns=["a", "b", "a"])

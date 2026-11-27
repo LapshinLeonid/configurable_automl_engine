@@ -29,11 +29,14 @@ from __future__ import annotations
 import importlib
 import logging
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
+from imblearn.pipeline import Pipeline
+from numpy.typing import ArrayLike, NDArray
 from sklearn.inspection import permutation_importance
 
 from configurable_automl_engine.common.datetime_features import (
@@ -44,10 +47,16 @@ from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     to_user_value,
 )
+from configurable_automl_engine.common.types import (
+    Array,
+    DataFrame,
+    Scorer,
+    Series,
+    Target,
+    TargetInput,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
-
     from configurable_automl_engine.experiment.result import ExperimentResult
     from configurable_automl_engine.trainer import ModelTrainer
 
@@ -160,7 +169,7 @@ class PermutationImportanceResult:
 # --------------------------------------------------------------------------- #
 
 
-def _require_pipeline(trainer: ModelTrainer) -> Any:
+def _require_pipeline(trainer: ModelTrainer) -> Pipeline:
     """The fitted pipeline of ``trainer`` or the not-available error."""
     pipeline = trainer.pipeline
     if pipeline is None:
@@ -189,7 +198,7 @@ def _sanitized(value: float, label: str) -> float:
     return round(number, _IMPORTANCE_DECIMALS)
 
 
-def _sample_rows(X: pd.DataFrame, max_rows: int) -> pd.DataFrame:
+def _sample_rows(X: DataFrame, max_rows: int) -> DataFrame:
     """Sample ``X`` to ``max_rows`` rows (deterministically, seeded).
 
     The row budget keeps ``n_repeats × n_features`` prediction calls
@@ -206,7 +215,7 @@ def _sample_rows(X: pd.DataFrame, max_rows: int) -> pd.DataFrame:
     return X.sample(n=max_rows, random_state=0)
 
 
-def _shap_feature_names(trainer: ModelTrainer, matrix: np.ndarray) -> list[str]:
+def _shap_feature_names(trainer: ModelTrainer, matrix: Array) -> list[str]:
     """The names of the pipeline-matrix columns (best effort).
 
     ``preprocessor.get_feature_names_out()`` names the expanded columns
@@ -252,7 +261,7 @@ def _preprocessor_feature_names(trainer: ModelTrainer) -> list[str]:
         return []
 
 
-def _selected_component_names(pipeline: Any, names: list[str]) -> list[str]:
+def _selected_component_names(pipeline: Pipeline, names: list[str]) -> list[str]:
     """The pipeline column names actually reaching the model.
 
     With an active column reducer (``feature_selector`` /
@@ -287,7 +296,7 @@ def _selected_component_names(pipeline: Any, names: list[str]) -> list[str]:
 
 
 def _explainer_importance(
-    shap_values: Any, labels: list[str]
+    shap_values: object, labels: list[str]
 ) -> tuple[FeatureImportance, ...]:
     """Aggregate raw SHAP values into per-feature importances.
 
@@ -307,7 +316,7 @@ def _explainer_importance(
     )
 
 
-def _shap_matrix(shap_values: Any) -> np.ndarray:
+def _shap_matrix(shap_values: object) -> Array:
     """Normalize the various SHAP value shapes into a 2D matrix.
 
     Explainers return ``ndarray (n, m)`` for regression, an ``Explanation``
@@ -319,7 +328,7 @@ def _shap_matrix(shap_values: Any) -> np.ndarray:
     values = getattr(shap_values, "values", shap_values)
     if isinstance(values, list):
         values = np.sum([np.abs(np.asarray(v)) for v in values], axis=0)
-    matrix = np.asarray(values, dtype=float)
+    matrix = np.asarray(cast(ArrayLike, values), dtype=float)
     if matrix.ndim == 3 and matrix.shape[2] == 1:
         # Some explainers append a trailing singleton output axis.
         matrix = matrix[:, :, 0]
@@ -336,7 +345,7 @@ def _shap_matrix(shap_values: Any) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_scorer_for_explain(metric_user: str, y: Any) -> Callable[..., Any]:
+def _resolve_scorer_for_explain(metric_user: str, y: Target) -> Scorer:
     """Build the scorer of ``metric_user`` for the importance computation.
 
     The engine's own scorer resolution is reused: custom metrics resolve
@@ -345,10 +354,10 @@ def _resolve_scorer_for_explain(metric_user: str, y: Any) -> Callable[..., Any]:
     ``global_nrmse`` needs the target vector to build its scorer.
     """
     scorer = get_scorer_object(metric_user, global_y=np.asarray(y))
-    return cast("Callable[..., Any]", scorer)
+    return cast(Scorer, scorer)
 
 
-def _validate_target(X: pd.DataFrame, y: Any) -> tuple[pd.Series | np.ndarray, str]:
+def _validate_target(X: DataFrame, y: object) -> tuple[Series | Array, str]:
     """Validate the caller's target against the (unsampled) frame ``X``.
 
     A ``pd.Series`` target is checked for the frame's labels (a missing
@@ -381,7 +390,10 @@ def _validate_target(X: pd.DataFrame, y: Any) -> tuple[pd.Series | np.ndarray, s
                 "and pass it again."
             )
         return y, "series"
-    values = np.asarray(list(y) if not isinstance(y, np.ndarray) else y)
+    # An iterable target (a generator included) must be materialized first:
+    # ``np.asarray`` would turn a generator into a 0-d object array.
+    raw = y if isinstance(y, np.ndarray) else list(cast(Iterable[object], y))
+    values = np.asarray(raw)
     if len(values) != len(X):
         raise ExplainNotAvailableError(
             f"The target length ({len(values)}) does not match the "
@@ -392,8 +404,8 @@ def _validate_target(X: pd.DataFrame, y: Any) -> tuple[pd.Series | np.ndarray, s
 
 
 def _sample_rows_with_target(
-    X: pd.DataFrame, y: pd.Series | np.ndarray, kind: str, max_rows: int
-) -> tuple[pd.DataFrame, np.ndarray]:
+    X: DataFrame, y: Series | Array, kind: str, max_rows: int
+) -> tuple[DataFrame, Array]:
     """Sample the frame and take the target of the SAME rows.
 
     The row selection is drawn ONCE (``DataFrame.sample`` with a fixed
@@ -425,18 +437,16 @@ def _sample_rows_with_target(
     )
     X_sampled = X.sample(n=max_rows, random_state=0)
     if kind == "series":
-        series = cast("pd.Series[Any]", y)
+        series = cast("pd.Series[float]", y)
         return X_sampled, series.reindex(X_sampled.index).to_numpy()
     positions = np.asarray(
         [X.index.get_loc(label) for label in X_sampled.index], dtype=int
     )
-    values = cast("np.ndarray[Any, Any]", y)
+    values = cast(NDArray[np.float64], y)
     return X_sampled, values[positions]
 
 
-def _expand_frame_to_trainer_schema(
-    trainer: ModelTrainer, X: pd.DataFrame
-) -> pd.DataFrame:
+def _expand_frame_to_trainer_schema(trainer: ModelTrainer, X: DataFrame) -> DataFrame:
     """The frame with the trainer's recorded datetime expansion applied.
 
     The saved pipeline was fit on the datetime-expanded columns
@@ -460,9 +470,9 @@ def _expand_frame_to_trainer_schema(
 def _baseline_score(
     metric_user: str,
     trainer: ModelTrainer,
-    X: pd.DataFrame,
-    y: np.ndarray,
-    scorer: Callable[..., Any],
+    X: DataFrame,
+    y: Array,
+    scorer: Scorer,
 ) -> float:
     """The unshuffled scorer value of ``trainer`` on ``(X, y)``, in user
     semantics.
@@ -481,8 +491,8 @@ def _baseline_score(
 
 def explain_permutation_importance(
     trainer: ModelTrainer,
-    X: pd.DataFrame,
-    y: Any,
+    X: DataFrame,
+    y: TargetInput,
     result: ExperimentResult,
     *,
     n_repeats: int = DEFAULT_N_REPEATS,
@@ -603,7 +613,7 @@ def explain_permutation_importance(
 # --------------------------------------------------------------------------- #
 
 
-def _transform_prefix(pipeline: Any) -> Any:
+def _transform_prefix(pipeline: Pipeline) -> Pipeline:
     """The leading ``Pipeline`` of the steps that actually transform rows.
 
     The prefix ends right before the first sampler step (a step with
@@ -618,7 +628,7 @@ def _transform_prefix(pipeline: Any) -> Any:
 
     The last step (the model) is always excluded.
     """
-    steps: list[tuple[str, Any]] = []
+    steps: list[tuple[str, object]] = []
     for name, step in list(pipeline.steps)[:-1]:
         is_sampler = hasattr(step, "fit_resample") and not hasattr(step, "transform")
         if is_sampler:
@@ -629,7 +639,7 @@ def _transform_prefix(pipeline: Any) -> Any:
 
 def explain_shap(
     trainer: ModelTrainer,
-    X: pd.DataFrame,
+    X: DataFrame,
     result: ExperimentResult,
     *,
     max_rows: int = DEFAULT_SAMPLE_ROWS,
@@ -761,7 +771,7 @@ def explain_shap(
 
 def _aggregate_shap_to_original(
     trainer: ModelTrainer,
-    matrix: np.ndarray,
+    matrix: Array,
     feature_names: list[str],
 ) -> tuple[FeatureImportance, ...]:
     """Map per-component SHAP values back to the original columns.

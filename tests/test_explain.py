@@ -49,6 +49,7 @@ from configurable_automl_engine.explain import (
     ExplainNotAvailableError,
     FeatureImportance,
     PermutationImportanceResult,
+    _validate_target,
     aggregate_to_original_features,
     explain_permutation_importance,
     explain_shap,
@@ -462,6 +463,16 @@ def test_b5_datetime_missing_components_raise_defined_error(tmp_path: Any) -> No
     else:
         with pytest.raises(ExplainNotAvailableError, match="missing columns"):
             explain_shap(trainer, broken, _minimal_result())
+
+
+def test_b6_generator_target_is_materialized() -> None:
+    """B6: an iterable target (a generator) is materialized before the
+    length check instead of collapsing into a 0-d object array."""
+    df = _small_df()
+    X = df[["f1", "f2"]]
+    values, kind = _validate_target(X, (float(v) for v in range(len(df))))
+    assert kind == "positional"
+    assert len(values) == len(X)
 
 
 def test_b6_series_target_missing_labels_raise(tmp_path: Any) -> None:

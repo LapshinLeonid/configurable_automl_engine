@@ -12,7 +12,7 @@ come from a ``make_steps`` callable passed in. The module must not import
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -25,6 +25,7 @@ from configurable_automl_engine.common.metrics import (
     get_scorer_object,
     to_user_value,
 )
+from configurable_automl_engine.common.types import ParamsInput
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
@@ -42,7 +43,7 @@ _MIN_AUTO_CHECK_SAMPLES = 10
 
 
 def _validate_feature_selection_cfg(
-    cfg: FeatureSelectionCfg | dict[str, Any] | None,
+    cfg: FeatureSelectionCfg | ParamsInput | None,
 ) -> FeatureSelectionCfg:
     """Validate and normalize the feature selection configuration.
 
@@ -56,8 +57,8 @@ def _validate_feature_selection_cfg(
     if isinstance(cfg, FeatureSelectionCfg):
         return cfg
     try:
-        if isinstance(cfg, dict):
-            return FeatureSelectionCfg.model_validate(cfg)
+        if isinstance(cfg, Mapping):
+            return FeatureSelectionCfg.model_validate(dict(cfg))
     except Exception as e:
         raise TrainingError(f"Invalid feature_selection_cfg: {e}") from e
     raise TrainingError(

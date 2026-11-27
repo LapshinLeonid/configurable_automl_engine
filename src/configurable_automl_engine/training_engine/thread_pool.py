@@ -32,7 +32,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from functools import partial
 from multiprocessing.context import BaseContext
-from typing import Any
+from typing import ParamSpec, Protocol, cast
 
 from .parallel_deadlines import POLL_INTERVAL
 from .parallel_executor import create_process_pool, resolve_context
@@ -44,6 +44,17 @@ from .parallel_supervisor import (
     is_infrastructure_error,
 )
 from .parallel_transport import DiskPersistenceManager, PayloadTransport
+
+_P = ParamSpec("_P")
+
+
+class _DynamicCallable(Protocol):
+    """A callable invoked with a runtime-built argument list."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        """Forward the given positional and keyword arguments."""
+        ...  # pragma: no cover - protocol definition
+
 
 __all__ = [
     "DEFAULT_START_METHOD",
@@ -70,22 +81,22 @@ DEFAULT_START_METHOD = (
 )
 
 
-def _importable_module(func: Callable[..., Any]) -> list[str]:
+def _importable_module(func: Callable[_P, object]) -> list[str]:
     """The module of ``func`` if a worker can import it by name."""
     module = getattr(func, "__module__", None)
     return [module] if module and module != "__main__" else []
 
 
 def _normalize_tasks(
-    args_seq: Iterable[Sequence[Any]] | None,
-    kwargs_seq: Iterable[Mapping[str, Any]] | None,
-) -> tuple[list[Sequence[Any]], list[Mapping[str, Any]]]:
+    args_seq: Iterable[Sequence[object]] | None,
+    kwargs_seq: Iterable[Mapping[str, object]] | None,
+) -> tuple[list[Sequence[object]], list[Mapping[str, object]]]:
     """Materialize the task arguments.
 
     ``args_seq=None`` means one call without arguments; an explicitly empty
     ``args_seq`` means zero tasks."""
-    args_list: list[Sequence[Any]] = [()] if args_seq is None else list(args_seq)
-    kwargs_list: list[Mapping[str, Any]] = (
+    args_list: list[Sequence[object]] = [()] if args_seq is None else list(args_seq)
+    kwargs_list: list[Mapping[str, object]] = (
         [{} for _ in args_list] if kwargs_seq is None else list(kwargs_seq)
     )
     if len(args_list) != len(kwargs_list):
@@ -110,17 +121,18 @@ def _warn_threads_timeouts(timeout: float | None, task_timeout: float | None) ->
 
 
 def _run_threads(
-    func: Callable[..., Any],
-    args_list: Sequence[Sequence[Any]],
-    kwargs_list: Sequence[Mapping[str, Any]],
+    func: Callable[_P, object],
+    args_list: Sequence[Sequence[object]],
+    kwargs_list: Sequence[Mapping[str, object]],
     max_workers: int | None,
 ) -> list[TaskOutcome]:
     """Run the tasks in a thread pool, without timeouts."""
     started: list[float | None] = [None] * len(args_list)
+    dynamic = cast(_DynamicCallable, func)
 
-    def call(idx: int) -> Any:
+    def call(idx: int) -> object:
         started[idx] = time.time()
-        return func(*args_list[idx], **kwargs_list[idx])
+        return dynamic(*args_list[idx], **kwargs_list[idx])
 
     outcomes: list[TaskOutcome] = []
     with ThreadPoolExecutor(max_workers) as pool:
@@ -140,7 +152,9 @@ def _run_threads(
     return outcomes
 
 
-def _thread_outcome(idx: int, fut: Future[Any], duration: float | None) -> TaskOutcome:
+def _thread_outcome(
+    idx: int, fut: Future[object], duration: float | None
+) -> TaskOutcome:
     exc = fut.exception()
     if exc is None:
         return TaskOutcome("ok", fut.result(), duration=duration)
@@ -154,9 +168,9 @@ def _thread_outcome(idx: int, fut: Future[Any], duration: float | None) -> TaskO
 def _fallback_to_threads(
     what: str,
     exc: BaseException,
-    func: Callable[..., Any],
-    args_list: Sequence[Sequence[Any]],
-    kwargs_list: Sequence[Mapping[str, Any]],
+    func: Callable[_P, object],
+    args_list: Sequence[Sequence[object]],
+    kwargs_list: Sequence[Mapping[str, object]],
     max_workers: int | None,
 ) -> list[TaskOutcome]:
     logger.warning(
@@ -170,9 +184,9 @@ def _fallback_to_threads(
 
 
 def _run_processes(
-    func: Callable[..., Any],
-    args_list: Sequence[Sequence[Any]],
-    kwargs_list: Sequence[Mapping[str, Any]],
+    func: Callable[_P, object],
+    args_list: Sequence[Sequence[object]],
+    kwargs_list: Sequence[Mapping[str, object]],
     *,
     max_workers: int | None,
     mp_context: BaseContext | None,
@@ -230,9 +244,9 @@ def _run_processes(
 
 
 def run_parallel_outcomes(
-    func: Callable[..., Any],
-    args_seq: Iterable[Sequence[Any]] | None = None,
-    kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
+    func: Callable[_P, object],
+    args_seq: Iterable[Sequence[object]] | None = None,
+    kwargs_seq: Iterable[Mapping[str, object]] | None = None,
     max_workers: int | None = None,
     mode: str = "threads",
     timeout: float | None = None,
@@ -282,9 +296,9 @@ def run_parallel_outcomes(
 
 
 def run_parallel(
-    func: Callable[..., Any],
-    args_seq: Iterable[Sequence[Any]] | None = None,
-    kwargs_seq: Iterable[Mapping[str, Any]] | None = None,
+    func: Callable[_P, object],
+    args_seq: Iterable[Sequence[object]] | None = None,
+    kwargs_seq: Iterable[Mapping[str, object]] | None = None,
     max_workers: int | None = None,
     mode: str = "threads",
     timeout: float | None = None,
@@ -293,7 +307,7 @@ def run_parallel(
     shutdown_grace_period: float = 5.0,
     task_timeout: float | None = None,  # per-task timeout
     mp_context: str | BaseContext | None = None,
-) -> list[Any]:
+) -> list[object]:
     """Run a function in parallel with memory and lifecycle management.
 
     Semantics:
@@ -349,7 +363,7 @@ def run_parallel(
             (``forkserver`` where available, else ``spawn``).
 
     Returns:
-        list[Any]: The results in the input order. A task that failed, timed
+        list[object]: The results in the input order. A task that failed, timed
             out, crashed its worker or was cancelled gives ``None``
             (``run_parallel_outcomes`` tells which).
 

@@ -16,14 +16,21 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.custom_metrics import CustomMetricSpec
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.types import (
+    Array,
+    DataFrame,
+    JSONDict,
+    Params,
+    Predictor,
+    Series,
+    Target,
+)
 from configurable_automl_engine.hpo.types import TrialStats
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -36,8 +43,15 @@ from configurable_automl_engine.training_engine.config_parser import (
 from .sanity_gate import SanityCheckResult
 
 if TYPE_CHECKING:
+    from configurable_automl_engine.hpo.complexity_guard import (
+        ComplexityGuardConfig,
+    )
     from configurable_automl_engine.preprocessing_presets import (
         PreprocessingOverride,
+    )
+    from configurable_automl_engine.trainer import ModelTrainer
+    from configurable_automl_engine.training_engine.config.complexity_guard import (
+        ComplexityGuardCfg,
     )
 
 __all__ = [
@@ -70,11 +84,11 @@ class PhaseResult:
         score (float): The raw CV score of the phase (optimizer semantics,
             higher is better). Already passes the ``is_valid_winner_score``
             invariant.
-        params (dict[str, Any]): The best found hyperparameters.
+        params (Params): The best found hyperparameters.
         trials (list[FrozenTrial]): The Optuna trials of the current phase
             ONLY (transferred TPE history is excluded); passed as
             ``previous_trials`` to the next HPO phase (refine warm-start).
-        complexity_guard (list[dict[str, Any]]): Log records of the adaptive
+        complexity_guard (list[JSONDict]): Log records of the adaptive
             complexity guard for the phase (one per restricted parameter,
             "before → after" with the reason). Empty when the guard
             produced no records.
@@ -95,11 +109,11 @@ class PhaseResult:
     """
 
     score: float
-    params: dict[str, Any]
+    params: Params
     trials: list[FrozenTrial] = field(default_factory=list)
-    complexity_guard: list[dict[str, Any]] = field(default_factory=list)
+    complexity_guard: list[JSONDict] = field(default_factory=list)
     n_trials_evaluated: int = 0
-    oof_predictions: np.ndarray | None = None
+    oof_predictions: Array | None = None
     trial_stats: TrialStats = field(default_factory=TrialStats)
 
 
@@ -113,10 +127,11 @@ class FinalistCandidate:
 
     Attributes:
         algo_name (str): The algorithm name.
-        model (Any): The pipeline trained on 100% of the data
-            (``trainer.pipeline``); used by the audit (circuit B) and for
-            ``y_pred_full`` predictions.
-        params (dict[str, Any]): The best hyperparameters from HPO
+        model (Predictor | None): The pipeline trained on 100% of the data
+            (``trainer.pipeline``) or ``None`` when the trainer has no fitted
+            pipeline; used by the audit (circuit B) and for ``y_pred_full``
+            predictions.
+        params (Params): The best hyperparameters from HPO
             (``phase_results[algo_name].params``).
         cv_score (float): The raw score from the HPO phase (optimizer
             semantics); used by the ``cv_best`` select step and the report.
@@ -127,17 +142,18 @@ class FinalistCandidate:
         rmse_oof_std (float | None): The standard deviation of the per-repeat
             ``RMSE_oof`` values (``None`` when ``n_repeats = 1`` or no repeat
             is valid).
-        y_pred_oof (Any): The OOF prediction vector
-            (``trainer.oof_predictions_``), aligned to the rows of X.
-        y_pred_full (Any): The full-fit model's predictions on the same rows
+        y_pred_oof (Target | None): The OOF prediction vector
+            (``trainer.oof_predictions_``), aligned to the rows of X, or
+            ``None`` when the trainer kept no OOF vector.
+        y_pred_full (Target): The full-fit model's predictions on the same rows
             (``trainer.predict(X)``); used by circuit D (RMSE_full) and the
             report.
         rmse_full (float | None): ``RMSE_full = RMSE(y, y_pred_full)``;
             ``None`` if it cannot be computed.
-        trainer (Any | None): The finalist's ``ModelTrainer`` itself; passed to
-            ``persist_artifact`` so the artifact can be saved WITHOUT retraining
-            the winner.
-        y_pred_oof_by_repeat (list[np.ndarray | pd.Series] | None): The OOF
+        trainer (ModelTrainer | None): The finalist's ``ModelTrainer`` itself;
+            passed to ``persist_artifact`` so the artifact can be saved WITHOUT
+            retraining the winner.
+        y_pred_oof_by_repeat (list[Array | Series] | None): The OOF
             vectors of the valid repeats of the multi-split validation,
             aligned to the rows of X and each one-dimensional (NaN marks an
             uncovered row); repeats invalidated by the scoring layer are
@@ -153,16 +169,16 @@ class FinalistCandidate:
     """
 
     algo_name: str
-    model: Any
-    params: dict[str, Any]
+    model: Predictor | None
+    params: Params
     cv_score: float
     rmse_oof: float | None
-    y_pred_oof: Any
-    y_pred_full: Any
+    y_pred_oof: Target | None
+    y_pred_full: Target
     rmse_full: float | None = None
-    trainer: Any | None = None
+    trainer: ModelTrainer | None = None
     rmse_oof_std: float | None = None
-    y_pred_oof_by_repeat: list[np.ndarray | pd.Series] | None = None
+    y_pred_oof_by_repeat: list[Array | Series] | None = None
     has_valid_oof: bool = True
     n_repeats: int = 1
 
@@ -239,8 +255,8 @@ class PreparedData:
             on the raw input schema.
     """
 
-    X: pd.DataFrame
-    y: pd.Series
+    X: DataFrame
+    y: Series
     metric_user: str
     metric_sklearn: str
     resolved_validation: ValidationStrategy
@@ -249,8 +265,8 @@ class PreparedData:
     categorical_features: list[str]
     numerical_features: list[str]
     random_state: int | None = None
-    holdout_X: pd.DataFrame | None = None
-    holdout_y: pd.Series | None = None
+    holdout_X: DataFrame | None = None
+    holdout_y: Series | None = None
     holdout_fraction: float | None = None
     datetime_expansion: dict[str, list[str]] = field(default_factory=dict)
 
@@ -299,19 +315,20 @@ class PhaseContext:
             "algorithm → reason". Populated by HPO failures and Sanity Gate
             select-step disqualifications — the sources are mixed deliberately;
             the detailed gate audit lives in ``sanity_gate_sections``.
-        full_fit_trainers (dict[str, Any]): The ``ModelTrainer`` objects of the
-            last ``sanity_gate`` select step, trained on 100% of the data.
+        full_fit_trainers (dict[str, ModelTrainer]): The ``ModelTrainer``
+            objects of the last ``sanity_gate`` select step, trained on 100%
+            of the data.
             Cleared by each HPO phase (its params rebuild the working set)
             and rebuilt by each sanity-select (full-fit trainers are not
             reused).
-        sanity_gate_sections (dict[str, dict[str, Any]]): Report sections of
+        sanity_gate_sections (dict[str, JSONDict]): Report sections of
             the ``sanity_gate`` select steps (key — the phase name).
         winner_algo (str | None): The winner of the terminal select step
             (``output: winner``); ``None`` until it runs.
-        pre_trained_trainer (Any | None): The winner's trainer of the terminal
-            ``sanity_gate`` select step, trained on 100% of the data (no
-            retraining of the winner required); ``None`` otherwise.
-        complexity_guard_records (list[dict[str, Any]]): The accumulated
+        pre_trained_trainer (ModelTrainer | None): The winner's trainer of
+            the terminal ``sanity_gate`` select step, trained on 100% of the
+            data (no retraining of the winner required); ``None`` otherwise.
+        complexity_guard_records (list[JSONDict]): The accumulated
             "before → after" records of the adaptive complexity guard across
             all HPO phases (one per restricted parameter), for the report.
         oof_pool (list[np.ndarray]): The OOF prediction matrices of every
@@ -338,12 +355,12 @@ class PhaseContext:
 
     working_set: dict[str, PhaseResult] = field(default_factory=dict)
     disqualified_algorithms: dict[str, str] = field(default_factory=dict)
-    full_fit_trainers: dict[str, Any] = field(default_factory=dict)
-    sanity_gate_sections: dict[str, dict[str, Any]] = field(default_factory=dict)
+    full_fit_trainers: dict[str, ModelTrainer] = field(default_factory=dict)
+    sanity_gate_sections: dict[str, JSONDict] = field(default_factory=dict)
     winner_algo: str | None = None
-    pre_trained_trainer: Any | None = None
-    complexity_guard_records: list[dict[str, Any]] = field(default_factory=list)
-    oof_pool: list[np.ndarray] = field(default_factory=list)
+    pre_trained_trainer: ModelTrainer | None = None
+    complexity_guard_records: list[JSONDict] = field(default_factory=list)
+    oof_pool: list[Array] = field(default_factory=list)
     phase_timings: list[PhaseTiming] = field(default_factory=list)
     disqualification_phases: dict[str, str] = field(default_factory=dict)
     leaderboard_snapshot: dict[str, PhaseResult] = field(default_factory=dict)
@@ -382,7 +399,7 @@ class WorkerOutcome:
 
     results: dict[str, PhaseResult] = field(compare=False)
     disqualified: dict[str, str]
-    oof_pool: list[np.ndarray] = field(compare=False)
+    oof_pool: list[Array] = field(compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,13 +412,14 @@ class SelectOutcome:
     Attributes:
         working_set (dict[str, PhaseResult]): The step output.
         winner_algo (str | None): The winner of a terminal step.
-        pre_trained_trainer (Any | None): The winner's full-fit trainer.
-        full_fit_trainers (dict[str, Any]): The full-fit trainers kept for
-            the output candidates.
+        pre_trained_trainer (ModelTrainer | None): The winner's full-fit
+            trainer.
+        full_fit_trainers (dict[str, ModelTrainer]): The full-fit trainers
+            kept for the output candidates.
         disqualified_algorithms (dict[str, str]): The circuit breaker after
             the step (gate disqualifications added, fallback candidates of
             this step removed).
-        sanity_gate_section (dict[str, Any] | None): The report section of a
+        sanity_gate_section (JSONDict | None): The report section of a
             ``sanity_gate`` step (``None`` for ``cv_best``). The section
             carries the aggregated multi-split statistics (``n_repeats`` and
             the median diversity/unique ratios and generalization gap)
@@ -410,10 +428,10 @@ class SelectOutcome:
 
     working_set: dict[str, PhaseResult] = field(compare=False)
     winner_algo: str | None
-    pre_trained_trainer: Any | None = field(compare=False)
-    full_fit_trainers: dict[str, Any] = field(compare=False)
+    pre_trained_trainer: ModelTrainer | None = field(compare=False)
+    full_fit_trainers: dict[str, ModelTrainer] = field(compare=False)
     disqualified_algorithms: dict[str, str]
-    sanity_gate_section: dict[str, Any] | None = field(compare=False)
+    sanity_gate_section: JSONDict | None = field(compare=False)
 
 
 @dataclass
@@ -423,7 +441,7 @@ class _HPOWorkerResult:
     Attributes:
         name (str): The algorithm name.
         score (float | None): A valid "raw" score; ``None`` on failure.
-        params (dict[str, Any] | None): The best parameters; ``None`` on
+        params (Params | None): The best parameters; ``None`` on
             failure.
         trials (list[FrozenTrial] | None): The phase's own Optuna trials;
             ``None`` on failure.
@@ -435,7 +453,7 @@ class _HPOWorkerResult:
             serializable in the "processes" mode; the consumer re-raises the
             error in the main process — fail fast even in the parallel mode,
             where ``run_parallel`` otherwise swallows worker exceptions.
-        complexity_guard (list[dict[str, Any]]): The adaptive complexity
+        complexity_guard (list[JSONDict]): The adaptive complexity
             guard "before → after" records of the phase (serializable in the
             "processes" mode).
         n_trials_evaluated (int): The number of trials actually evaluated by
@@ -451,13 +469,13 @@ class _HPOWorkerResult:
 
     name: str
     score: float | None = None
-    params: dict[str, Any] | None = None
+    params: Params | None = None
     trials: list[FrozenTrial] | None = None
     disqualify_reason: str | None = None
     history_error: str | None = None
-    complexity_guard: list[dict[str, Any]] = field(default_factory=list)
+    complexity_guard: list[JSONDict] = field(default_factory=list)
     n_trials_evaluated: int = 0
-    oof_predictions: np.ndarray | None = None
+    oof_predictions: Array | None = None
     trial_stats: TrialStats = field(default_factory=TrialStats)
 
 
@@ -501,7 +519,7 @@ class _HpoPhaseSpec:
             oversampled numeric features.
         oversampling_noise_level (float): Noise intensity relative to the
             column standard deviation.
-        pruning_cfg (dict[str, Any] | None): Early stopping settings.
+        pruning_cfg (Params | None): Early stopping settings.
         encoding (str): Categorical encoding strategy.
         high_cardinality_threshold (int | None): High-cardinality threshold.
         high_cardinality_encoding (str | None): High-cardinality strategy.
@@ -547,7 +565,7 @@ class _HpoPhaseSpec:
 
     phase: HPOPhaseCfg
     prev_results: dict[str, PhaseResult]
-    y: pd.Series
+    y: Series
     metric_sklearn: str
     resolved_validation: ValidationStrategy
     resolved_n_folds: int
@@ -560,17 +578,17 @@ class _HpoPhaseSpec:
     oversampling_target_bins: int
     oversampling_add_noise: bool
     oversampling_noise_level: float
-    pruning_cfg: dict[str, Any] | None
+    pruning_cfg: Params | None
     encoding: str
     high_cardinality_threshold: int | None
     high_cardinality_encoding: str | None
     hashing_n_components: int
     target_encoding_smoothing: float
     target_encoding_fallback: float | None
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None
+    feature_selection_cfg: FeatureSelectionCfg | Params | None
     winsorizer_exclude: list[str] = field(default_factory=list)
     preprocessing_default: PreprocessingOverride | None = None
-    complexity_guard_cfg: Any = None
+    complexity_guard_cfg: ComplexityGuardCfg | ComplexityGuardConfig | None = None
     user_hyperparameter_keys: list[str] | None = None
     random_state: int | None = None
     sampler_seed: int | None = None

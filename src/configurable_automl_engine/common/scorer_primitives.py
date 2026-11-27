@@ -12,8 +12,6 @@ and ``common.bbc_cv`` no longer imports the private names of
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any
 
 import numpy as np
 from sklearn.metrics import (
@@ -25,6 +23,12 @@ from sklearn.metrics import (
 
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.sklearn_compat import scorer_raw_parts
+from configurable_automl_engine.common.types import (
+    Array,
+    BoolArray,
+    Scorer,
+    Target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,7 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 #  The metrics themselves
 # --------------------------------------------------------------------------- #
-def rmse(y_true: Any, y_pred: Any) -> float:
+def rmse(y_true: Target, y_pred: Target) -> float:
     """Compute the root mean squared error (RMSE).
 
     The MSE is computed with scikit-learn's ``mean_squared_error`` and the
@@ -58,8 +62,8 @@ def rmse(y_true: Any, y_pred: Any) -> float:
 
 
 def resolve_expected_valid_mask(
-    yt: np.ndarray, yp: np.ndarray, expected: np.ndarray | None
-) -> np.ndarray:
+    yt: Array, yp: Array, expected: Array | None
+) -> BoolArray:
     """Resolve the shared masking contract of ``oof_rmse``/``pooled_scorer_value``.
 
     The two cases of the non-finite prediction policy:
@@ -83,13 +87,13 @@ def resolve_expected_valid_mask(
             ``None`` — every row is expected: any non-finite pair is dropped.
 
     Returns:
-        np.ndarray: The boolean mask of the rows entering the estimate.
+        BoolArray: The boolean mask of the rows entering the estimate.
 
     Raises:
         InvalidPredictionError: If any expected row has a non-finite
             prediction (with ``expected`` given).
     """
-    mask: np.ndarray
+    mask: BoolArray
     if expected is None:
         mask = np.isfinite(yt) & np.isfinite(yp)
     else:
@@ -107,7 +111,11 @@ def resolve_expected_valid_mask(
 
 
 def pooled_scorer_value(
-    scorer: Any, y_true: Any, y_pred: Any, *, expected: Any | None = None
+    scorer: Scorer,
+    y_true: Target,
+    y_pred: Target,
+    *,
+    expected: Array | None = None,
 ) -> float:
     """Compute a scorer value over the whole aligned vector at once.
 
@@ -160,7 +168,7 @@ def pooled_scorer_value(
 
 
 # Per-fold NRMSE
-def nrmse(y_true: Any, y_pred: Any) -> float:
+def nrmse(y_true: Target, y_pred: Target) -> float:
     """Compute the local normalized RMSE (NRMSE).
 
     The standard RMSE for the current sample is divided by the range
@@ -199,7 +207,7 @@ def nrmse(y_true: Any, y_pred: Any) -> float:
 # inverted neg_ metrics), False — "lower is better" (rmse, mae, etc.).
 # The direction is never inferred heuristically from name substrings — only
 # from this registry or from the sklearn scorer object itself.
-SCORER_OBJECTS: dict[str, tuple[Callable[..., Any], bool]] = {
+SCORER_OBJECTS: dict[str, tuple[Scorer, bool]] = {
     # For errors set greater_is_better=False;
     # sklearn itself will return negative values for maximization
     "nrmse": (make_scorer(nrmse, greater_is_better=False), False),

@@ -13,9 +13,12 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import cast
 
 import numpy as np
+from numpy.typing import ArrayLike
+
+from configurable_automl_engine.common.types import Array
 
 _SEVERITY_CLEAN = 0
 _SEVERITY_WARNING = 1
@@ -177,11 +180,11 @@ def _compute_severity(
     return min(severity, _SEVERITY_WARNING) if warn_only else severity
 
 
-def _to_float_vector(values: Any, name: str) -> np.ndarray:
+def _to_float_vector(values: object, name: str) -> Array:
     """Convert an input to a 1-D float array (with shape validation)."""
     if values is None:
         raise ValueError(f"{name} must not be None")
-    arr = np.asarray(values, dtype=float)
+    arr = np.asarray(cast(ArrayLike, values), dtype=float)
     if arr.ndim == 2 and 1 in arr.shape:
         arr = arr.reshape(-1)
     if arr.ndim != 1:
@@ -193,8 +196,8 @@ def _to_float_vector(values: Any, name: str) -> np.ndarray:
 
 
 def _validate_check_inputs(
-    y: Any, y_pred_oof: Any, X: Any | None
-) -> tuple[np.ndarray, np.ndarray]:
+    y: object, y_pred_oof: object, X: object | None
+) -> tuple[Array, Array]:
     """Validate the ``check()`` inputs and convert them to float vectors."""
     y_arr = _to_float_vector(y, "y")
     oof_arr = _to_float_vector(y_pred_oof, "y_pred_oof")
@@ -220,8 +223,8 @@ def _validate_check_inputs(
 
 
 def _validate_repeat_vectors(
-    y: np.ndarray, repeats: Sequence[Any] | None
-) -> list[np.ndarray] | None:
+    y: Array, repeats: Sequence[object] | None
+) -> list[Array] | None:
     """Validate the per-repeat OOF vectors of a multi-split audit.
 
     ``None`` and an empty sequence mean "no repeat information" — the caller
@@ -247,7 +250,7 @@ def _validate_repeat_vectors(
     vectors = list(repeats)
     if not vectors:
         return None
-    validated: list[np.ndarray] = []
+    validated: list[Array] = []
     for index, vector in enumerate(vectors):
         arr = _to_float_vector(vector, f"y_pred_oof_by_repeat[{index}]")
         if arr.shape != y.shape:

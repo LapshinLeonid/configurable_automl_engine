@@ -14,7 +14,7 @@ import inspect
 import logging
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Protocol, cast
 
 from automl_contracts.custom_metrics import (
     ERR_CUSTOM_NAME_INVALID,
@@ -28,6 +28,12 @@ from sklearn.metrics import make_scorer
 from configurable_automl_engine.common.sklearn_compat import (
     scorer_raw_parts,
     scorer_sign,
+)
+from configurable_automl_engine.common.types import (
+    Frame,
+    MetricFn,
+    Scorer,
+    Target,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +59,7 @@ ERR_DIRECTION_CONFLICT = "custom_metric_direction_conflict"
 ERR_KWARGS_UNSUPPORTED = "custom_metric_kwargs_unsupported"
 
 
-def resolve_dotted_path(path: str) -> Any:
+def resolve_dotted_path(path: str) -> object:
     """Import the object named by a dotted path.
 
     Two forms are accepted: ``"pkg.module:attr"`` (the part after ``:`` may
@@ -64,7 +70,7 @@ def resolve_dotted_path(path: str) -> Any:
         path: The import path of the object.
 
     Returns:
-        Any: The imported object.
+        object: The imported object.
 
     Raises:
         ImportError: If the path is malformed, the module cannot be imported
@@ -82,7 +88,7 @@ def resolve_dotted_path(path: str) -> Any:
             "'package.module:attribute' or 'package.module.attribute'"
         )
     try:
-        obj: Any = importlib.import_module(module_name)
+        obj: object = importlib.import_module(module_name)
     except Exception as err:  # user code may raise anything on import
         raise ImportError(
             f"cannot import module '{module_name}': {type(err).__name__}: {err}"
@@ -97,19 +103,23 @@ def resolve_dotted_path(path: str) -> Any:
     return obj
 
 
-def _is_sklearn_scorer(obj: Any) -> bool:
+def _is_sklearn_scorer(obj: object) -> bool:
     """Whether ``obj`` exposes the raw metric of a ``make_scorer`` object."""
     return scorer_raw_parts(obj)[0] is not None
 
 
-def _check_positional_arity(fn: Any, n_args: int, kwargs: dict[str, Any]) -> str | None:
+def _check_positional_arity(
+    fn: object, n_args: int, kwargs: dict[str, object]
+) -> str | None:
     """Return a reason when ``fn`` cannot take ``n_args`` positionals + kwargs.
 
     ``None`` means the call is compatible or the signature is unavailable
     (C extensions and some builtins expose none; the call is then trusted).
     """
     try:
-        sig = inspect.signature(fn)
+        # ``inspect.signature`` only reads the object, it never calls it; the
+        # no-argument callable type avoids spelling ``Callable[..., Any]``.
+        sig = inspect.signature(cast(Callable[[], object], fn))
     except (TypeError, ValueError):
         logger.debug("No signature for %r; the call shape is not checked.", fn)
         return None
@@ -152,7 +162,7 @@ def validate_custom_metric_spec(spec: CustomMetricSpec) -> CustomMetricSpec:
     return spec
 
 
-def _validate_metric_function(spec: CustomMetricSpec, fn: Callable[..., Any]) -> None:
+def _validate_metric_function(spec: CustomMetricSpec, fn: object) -> None:
     """Check a ``kind="metric"`` function: two positionals and a direction.
 
     Args:
@@ -181,7 +191,7 @@ def _validate_metric_function(spec: CustomMetricSpec, fn: Callable[..., Any]) ->
         )
 
 
-def _validate_scorer(spec: CustomMetricSpec, obj: Callable[..., Any]) -> None:
+def _validate_scorer(spec: CustomMetricSpec, obj: object) -> None:
     """Check a ``kind="scorer"`` object.
 
     The function distinguishes a ``make_scorer`` object (direction is read
@@ -248,6 +258,12 @@ def natural_greater_is_better(spec: CustomMetricSpec) -> bool:
     return True
 
 
+class _ScorerWithKwargs(Protocol):
+    """A scorer object carrying the configured keyword arguments."""
+
+    _kwargs: dict[str, object]
+
+
 class _CallableScorer:
     """Adapter giving a plain callable scorer the sklearn scorer direction.
 
@@ -258,36 +274,42 @@ class _CallableScorer:
     pooled out-of-fold vector cannot be computed for such a scorer.
     """
 
-    def __init__(self, func: Callable[..., Any], sign: int) -> None:
+    def __init__(self, func: Scorer, sign: int) -> None:
         self._func = func
         self._sign = sign
 
-    def __call__(self, estimator: Any, X: Any, y: Any, **kwargs: Any) -> float:
+    def __call__(
+        self, estimator: object, X: Frame, y: Target, **kwargs: object
+    ) -> float:
         return float(self._sign * self._func(estimator, X, y, **kwargs))
 
 
 _cache_lock = threading.Lock()
-_scorer_cache: dict[tuple[str, str, bool | None, bool, str], Any] = {}
+_scorer_cache: dict[tuple[str, str, bool | None, bool, str], Scorer] = {}
 
 
-def _build_scorer_uncached(spec: CustomMetricSpec) -> Any:
+def _build_scorer_uncached(spec: CustomMetricSpec) -> Scorer:
     """Import the callable of ``spec`` and wrap it into a scorer object."""
-    obj = resolve_dotted_path(spec.path)
     if spec.kind == "metric":
-        return make_scorer(
-            obj, greater_is_better=bool(spec.greater_is_better), **spec.kwargs
+        metric = cast(MetricFn, resolve_dotted_path(spec.path))
+        return cast(
+            Scorer,
+            make_scorer(
+                metric, greater_is_better=bool(spec.greater_is_better), **spec.kwargs
+            ),
         )
+    obj = cast(Scorer, resolve_dotted_path(spec.path))
     if _is_sklearn_scorer(obj):
         if not spec.kwargs:
             return obj
         _, _, obj_kwargs = scorer_raw_parts(obj)
-        merged = copy.copy(obj)
+        merged = cast(_ScorerWithKwargs, copy.copy(obj))
         merged._kwargs = {**obj_kwargs, **spec.kwargs}
-        return merged
+        return cast(Scorer, merged)
     return _CallableScorer(obj, 1 if natural_greater_is_better(spec) else -1)
 
 
-def build_custom_scorer(spec: CustomMetricSpec) -> Any:
+def build_custom_scorer(spec: CustomMetricSpec) -> Scorer:
     """Return the scorer object of a custom metric, cached per process.
 
     A ``kind="metric"`` function is wrapped with ``make_scorer`` (so the
@@ -300,7 +322,7 @@ def build_custom_scorer(spec: CustomMetricSpec) -> Any:
         spec: The validated custom metric declaration.
 
     Returns:
-        Any: A callable ``scorer(estimator, X, y) -> float`` (higher is
+        Scorer: A callable ``scorer(estimator, X, y) -> float`` (higher is
             better), exposing the direction flag (``_sign``).
 
     Raises:
@@ -319,11 +341,11 @@ def build_custom_scorer(spec: CustomMetricSpec) -> Any:
 class _MetricFunctionAdapter:
     """Concrete ``MetricFunction`` implementation for a custom metric path."""
 
-    def __init__(self, func: Callable[..., Any], kwargs: dict[str, Any]) -> None:
+    def __init__(self, func: MetricFn, kwargs: dict[str, object]) -> None:
         self._func = func
         self._kwargs = dict(kwargs)
 
-    def __call__(self, y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+    def __call__(self, y_true: Target, y_pred: Target, **kwargs: object) -> float:
         merged = {**self._kwargs, **kwargs}
         return float(self._func(y_true, y_pred, **merged))
 
@@ -339,7 +361,7 @@ def custom_metric_function(spec: CustomMetricSpec) -> MetricFunction:
     """
     if spec.kind != "metric":
         raise KeyError(f"custom scorer '{spec.path}' has no raw metric function")
-    fn = resolve_dotted_path(spec.path)
+    fn = cast(MetricFn, resolve_dotted_path(spec.path))
     return _MetricFunctionAdapter(fn, dict(spec.kwargs))
 
 
