@@ -395,7 +395,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):  # type: ignore[misc]
             # CSR -> CSR, CSC -> CSC, COO -> COO etc. Without .toarray():
             # no dense copy is created (prevents OOM). scipy-stubs do not
             # type indexing and dynamic to<format> for SparseABC — Any.
-            sparse_X = cast(sp.csr_matrix[np.float64], X)
+            sparse_X = cast("sp.csr_matrix[np.float64]", X)
             sliced = sparse_X.tocsr()[:, self.support_]
             return cast(
                 SparseMatrix,
@@ -473,7 +473,7 @@ def _compute_variances(X_arr: Frame | SparseMatrix) -> Array:
         # First tocsc(), then float64 — as in _validate_data of
         # VarianceThreshold. scipy-stubs do not type tocsc for SparseABC —
         # cast to Any.
-        X_csc = cast(sp.csr_matrix[np.float64], X_arr).tocsc().astype(np.float64)
+        X_csc = cast("sp.csr_matrix[np.float64]", X_arr).tocsc().astype(np.float64)
         _, variances = mean_variance_axis(X_csc, axis=0)
         return np.asarray(variances, dtype=float).ravel()
     X_dense: Array = np.asarray(X_arr, dtype=np.float64)
@@ -505,7 +505,7 @@ def _validate_sparse_mutual_info(X_arr: SparseMatrix) -> None:
     ``mutual_info_regression`` fails on continuous values with a cryptic
     error (an empty sample in the kNN estimate). Instead, a clear
     ``ValueError`` is raised demanding integer-valued features."""
-    csr = cast(sp.csr_matrix[np.float64], X_arr)
+    csr = cast("sp.csr_matrix[np.float64]", X_arr)
     data = csr.data
     if np.issubdtype(csr.dtype, np.integer):
         return

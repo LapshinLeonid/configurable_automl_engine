@@ -2778,11 +2778,11 @@ def _has_write_permission(
     if isinstance(job_permissions, dict):
         return job_permissions.get(permission) == "write"
     if job_permissions is not None:
-        return job_permissions == "write-all"
+        return isinstance(job_permissions, str) and job_permissions == "write-all"
     workflow_permissions = document.get("permissions")
     if isinstance(workflow_permissions, dict):
         return workflow_permissions.get(permission) == "write"
-    return workflow_permissions == "write-all"
+    return isinstance(workflow_permissions, str) and workflow_permissions == "write-all"
 
 
 def _shell_commands(text: str) -> list[str]:

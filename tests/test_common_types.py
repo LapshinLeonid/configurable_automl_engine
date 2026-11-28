@@ -5,6 +5,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse as sp
 
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.types import (
@@ -13,6 +14,7 @@ from configurable_automl_engine.common.types import (
     ParamsInput,
     Predictor,
     Series,
+    SparseMatrix,
     TargetInput,
 )
 from configurable_automl_engine.experiment.ensemble import (
@@ -34,6 +36,11 @@ def test_runtime_aliases_point_to_pandas_objects() -> None:
     """The runtime fallbacks resolve to the pandas classes."""
     assert Series is pd.Series
     assert DataFrame is pd.DataFrame
+
+
+def test_sparse_matrix_alias_resolves_to_the_scipy_class() -> None:
+    """The sparse alias stays a plain class at runtime for every scipy release."""
+    assert SparseMatrix is sp.spmatrix
 
 
 def test_public_input_aliases_accept_documented_shapes() -> None:

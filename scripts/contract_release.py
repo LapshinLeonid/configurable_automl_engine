@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from packaging.utils import InvalidWheelFilename, parse_wheel_filename
@@ -603,7 +603,7 @@ def _open_registry_url(
     *,
     timeout: int,
     auth_origin: str | None = None,
-) -> Any:
+) -> http.client.HTTPResponse:
     """Open a URL and attach the PAT only to one trusted origin.
 
     The ``Authorization`` header is sent only when ``url`` has the same scheme
@@ -624,7 +624,7 @@ def _open_registry_url(
     else:
         request = urllib.request.Request(url)
     opener = urllib.request.build_opener(_CredentialSafeRedirectHandler())
-    return opener.open(request, timeout=timeout)
+    return cast(http.client.HTTPResponse, opener.open(request, timeout=timeout))
 
 
 def _read_registry_page(

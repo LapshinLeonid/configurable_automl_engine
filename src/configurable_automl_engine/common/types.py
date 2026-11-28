@@ -63,9 +63,14 @@ BoolArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.bool_]]
 #: A NumPy array of feature names (object dtype, not numeric).
 NamesArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.object_]]
 
-#: A scipy sparse matrix of float values. The preprocessing pipeline emits
-#: ``float64`` sparse matrices, so that element type is the supported one.
-SparseMatrix: TypeAlias = sp.spmatrix[np.float64]
+if TYPE_CHECKING:
+    #: A scipy sparse matrix of float values. The preprocessing pipeline emits
+    #: ``float64`` sparse matrices, so that element type is the supported one.
+    #: The subscript is resolved by the type checker only: older supported
+    #: scipy releases do not implement runtime generic subscription.
+    SparseMatrix: TypeAlias = sp.spmatrix[np.float64]
+else:
+    SparseMatrix = sp.spmatrix
 
 #: A pandas frame (the aliases module is the single place that names the
 #: library's default generic arguments).
