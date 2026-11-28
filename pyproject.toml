@@ -128,6 +128,12 @@ line-ending = "auto"
 
 [tool.mypy]
 strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
 
 [[tool.mypy.overrides]]
 module = [
@@ -152,16 +158,6 @@ disallow_any_explicit = true
 # raw metric registry is a heterogeneous ``Callable[..., float]``. Both are
 # confined to this module so the rest of the package stays explicit-Any free.
 module = ["configurable_automl_engine.common.types"]
-disallow_any_explicit = false
-
-[[tool.mypy.overrides]]
-# ``disallow_any_explicit`` flags every ``pydantic.BaseModel`` subclass in the
-# store module (pydantic's own ``__init__(**data: Any)``), not an ``Any`` in
-# the module source: with pydantic 2.14.4 and mypy 2.4.1,
-# ``mypy --no-incremental --disallow-any-explicit
-# src/configurable_automl_engine/experiment/store.py`` reports
-# ``RunSummary`` (``Explicit "Any" is not allowed``).
-module = ["configurable_automl_engine.experiment.store"]
 disallow_any_explicit = false
 
 [tool.importlinter]
