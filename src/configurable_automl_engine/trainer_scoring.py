@@ -17,6 +17,7 @@ import numpy as np
 from imblearn.pipeline import Pipeline
 
 from configurable_automl_engine import validation as _val
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.errors import (
     InvalidPredictionError,
     TrainingError,
@@ -348,14 +349,14 @@ def _build_validation_scorers(
     does not depend on a given fold). An additional metric whose scorer
     cannot be built is skipped with a WARNING."""
     try:
-        scorer = cast(Scorer, get_scorer_object(metric, global_y=np.asarray(y)))
+        scorer = as_scorer(get_scorer_object(metric, global_y=np.asarray(y)))
     except Exception as err:
         raise TrainingError(f"Error calculating metrics on validation: {err}") from err
     add_scorers: dict[str, Scorer] = {}
     for mname in additional_metrics:
         try:
-            add_scorers[mname] = cast(
-                Scorer, get_scorer_object(mname, global_y=np.asarray(y))
+            add_scorers[mname] = as_scorer(
+                get_scorer_object(mname, global_y=np.asarray(y))
             )
         except Exception as err:  # noqa: BLE001
             _LOG.warning(

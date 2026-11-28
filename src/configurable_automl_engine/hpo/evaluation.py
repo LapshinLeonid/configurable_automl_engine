@@ -23,6 +23,7 @@ from sklearn.model_selection import BaseCrossValidator, train_test_split
 from sklearn.utils import _safe_indexing
 
 from configurable_automl_engine.common.bbc_cv import BBC_MAX_OOF_CELLS
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import get_scorer_object
 from configurable_automl_engine.common.sklearn_compat import scorer_raw_parts
@@ -79,7 +80,7 @@ def _build_scorer(name: str) -> Scorer:
     try:
         # get_scorer_object returns a scorer callable (a make_scorer or
         # sklearn scorer object)
-        return cast(Scorer, get_scorer_object(name))
+        return as_scorer(get_scorer_object(name))
     except Exception as err:
         raise HyperoptError(f"Unknown metric name: '{name}'") from err
 

@@ -14,12 +14,13 @@ from __future__ import annotations
 import copy
 import logging
 from pathlib import Path
-from typing import SupportsFloat, cast
+from typing import cast
 
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike
 
+from configurable_automl_engine.common.casts import as_float, as_scorer
 from configurable_automl_engine.common.definitions import (
     WORST_SCORE_THRESHOLD,
     TargetTransform,
@@ -272,7 +273,7 @@ def _finite_float_or_none(value: object) -> float | None:
         value, (int, float, np.integer, np.floating)
     ):
         return None
-    normalized = float(cast(SupportsFloat, value))
+    normalized = as_float(value)
     return normalized if np.isfinite(normalized) else None
 
 
@@ -387,7 +388,7 @@ def _rmse_oof_score_with_std_in_user_metric(
         return None, None
     user_repeats = _rmse_user_repeat_values(metric_user, oof_repeat_scores)
     std = float(np.std(user_repeats)) if len(user_repeats) > 1 else None
-    return to_user_value(metric_user, -float(cast(SupportsFloat, oof_aggregate))), std
+    return to_user_value(metric_user, -as_float(oof_aggregate)), std
 
 
 def _select_oof_repeat_vectors(
@@ -429,7 +430,7 @@ def _raw_and_user_oof_scores(
 
     raw_scores: list[float] = []
     for vector in vectors:
-        raw = _pooled_raw_oof_metric(cast(Scorer, scorer), oof_true, vector)
+        raw = _pooled_raw_oof_metric(as_scorer(scorer), oof_true, vector)
         if raw is not None and np.isfinite(raw):
             raw_scores.append(raw)
     if not raw_scores:
@@ -586,7 +587,7 @@ def _compute_holdout_score(
             prepared.metric_user,
             global_y=np.asarray(prepared.y, dtype=float).reshape(-1),
         )
-        raw = pooled_scorer_value(cast(Scorer, scorer), true[mask], pred[mask])
+        raw = pooled_scorer_value(as_scorer(scorer), true[mask], pred[mask])
         if not np.isfinite(raw):
             return float("nan")
         return to_user_value(prepared.metric_user, raw)

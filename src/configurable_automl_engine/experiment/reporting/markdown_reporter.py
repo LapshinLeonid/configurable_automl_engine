@@ -27,8 +27,8 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from typing import SupportsFloat, SupportsInt, cast
 
+from configurable_automl_engine.common.casts import as_float, as_int
 from configurable_automl_engine.common.definitions import RunStatus, RunStepStatus
 from configurable_automl_engine.experiment.leaderboard import build_leaderboard
 from configurable_automl_engine.experiment.reporting.base import (
@@ -117,7 +117,7 @@ def _format_number(value: object) -> str:
     if value is None:
         return _NA
     try:
-        numeric = float(cast(SupportsFloat, value))
+        numeric = as_float(value)
     except (TypeError, ValueError):
         return _NA
     if not math.isfinite(numeric):
@@ -159,9 +159,7 @@ def _format_spread(value: object, std: object, result: ExperimentResult) -> str:
     spread renders as ``n/a`` instead of failing the whole report.
     """
     if _repeat_count(result) <= 1:
-        return _format_score(
-            value if value is None else float(cast(SupportsFloat, value))
-        )
+        return _format_score(value if value is None else as_float(value))
     return f"{_format_number(value)} ± {_format_number(std)}"
 
 
@@ -261,7 +259,7 @@ def _format_count(value: object) -> str:
     if value is None:
         return _NA
     try:
-        return str(int(cast(SupportsInt, value)))
+        return str(as_int(value))
     except (TypeError, ValueError, OverflowError):
         return _NA
 
@@ -291,7 +289,7 @@ def _format_gap(value: object, std: object, infinite: object) -> str:
     """
     if infinite:
         try:
-            numeric = float(cast(SupportsFloat, value))
+            numeric = as_float(value)
         except (TypeError, ValueError):
             numeric = None
         if numeric is None or not math.isfinite(numeric):
@@ -304,7 +302,7 @@ def _format_seconds(seconds: object) -> str:
     if seconds is None:
         return _EMPTY_CELL
     try:
-        numeric = float(cast(SupportsFloat, seconds))
+        numeric = as_float(seconds)
     except (TypeError, ValueError):
         return _NA
     if not math.isfinite(numeric):

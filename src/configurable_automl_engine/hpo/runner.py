@@ -22,6 +22,7 @@ import pandas as pd
 from optuna.trial import FrozenTrial, Trial
 from scipy import sparse as sp
 
+from configurable_automl_engine.common.casts import as_float
 from configurable_automl_engine.common.datetime_features import (
     generated_datetime_columns,
 )
@@ -676,7 +677,7 @@ class _OptimizeRunner:
                 for t in self.phase_trials
                 if t.state == optuna.trial.TrialState.COMPLETE
             ),
-            key=lambda t: cast(float, t.value),
+            key=lambda t: as_float(t.value),
         )
         best_params = dict(best_trial.params)
 
@@ -715,7 +716,7 @@ class _OptimizeRunner:
         }
         self.best = BestTrial(
             params=best_params,
-            score=float(cast(float, best_trial.value)),
+            score=as_float(best_trial.value),
             model_params=model_params,
             apply_fs=apply_fs,
             # The honest evaluation count reported next to the best-trial

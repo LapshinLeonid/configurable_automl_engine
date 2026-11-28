@@ -25,6 +25,7 @@ import numpy as np
 import optuna
 from optuna.trial import Trial
 
+from configurable_automl_engine.common.casts import as_float, as_int
 from configurable_automl_engine.common.types import Params
 from configurable_automl_engine.hpo.complexity_guard import (
     ComplexityGuardConfig,
@@ -177,26 +178,26 @@ def _apply_dynamic_space(
             dist_type = entry.dist_type
             step = entry.step
             if dist_type == "int":
-                low_val, high_val = int(cast(float, low)), int(cast(float, high))
+                low_val, high_val = as_int(low), as_int(high)
                 params[key] = trial.suggest_int(
                     key,
                     low_val,
                     high_val,
-                    step=int(cast(float, step)) if step is not None else 1,
+                    step=as_int(step) if step is not None else 1,
                 )
             elif dist_type == "float":
                 params[key] = trial.suggest_float(
                     key,
-                    float(cast(float, low)),
-                    float(cast(float, high)),
-                    step=float(cast(float, step)) if step is not None else None,
+                    as_float(low),
+                    as_float(high),
+                    step=as_float(step) if step is not None else None,
                 )
             elif dist_type == "float_log":
-                FloatSpace.validate_log_low(float(cast(float, low)))
+                FloatSpace.validate_log_low(as_float(low))
                 params[key] = trial.suggest_float(
                     key,
-                    float(cast(float, low)),
-                    float(cast(float, high)),
+                    as_float(low),
+                    as_float(high),
                     log=True,
                 )
             elif dist_type == "categorical":
@@ -827,7 +828,7 @@ def _warn_if_optimum_at_boundary(
         try:
             low = float(entry.low)
             high = float(entry.high)
-            num = float(cast(float | int | str, value))
+            num = as_float(value)
         except (TypeError, ValueError):
             continue
         if low == high:

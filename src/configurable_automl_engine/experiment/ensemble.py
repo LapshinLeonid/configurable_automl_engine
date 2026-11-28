@@ -61,6 +61,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from configurable_automl_engine.common.casts import as_float
 from configurable_automl_engine.common.definitions import (
     WORST_SCORE_THRESHOLD,
     MetricDirection,
@@ -150,7 +151,7 @@ def validate_ensemble_score(score: object) -> float:
             f"Ensemble member score must be a real number, got "
             f"{type(score).__name__}: {score!r}"
         )
-    value = float(cast(float, score))
+    value = as_float(score)
     if not math.isfinite(value):
         raise ValueError(f"Ensemble member score must be finite, got {value!r}")
     if value <= WORST_SCORE_THRESHOLD:

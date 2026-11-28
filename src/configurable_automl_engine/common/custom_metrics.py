@@ -25,6 +25,7 @@ from automl_contracts.protocols import MetricFunction
 from pydantic_core import PydanticCustomError
 from sklearn.metrics import make_scorer
 
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.sklearn_compat import (
     scorer_raw_parts,
     scorer_sign,
@@ -292,20 +293,19 @@ def _build_scorer_uncached(spec: CustomMetricSpec) -> Scorer:
     """Import the callable of ``spec`` and wrap it into a scorer object."""
     if spec.kind == "metric":
         metric = cast(MetricFn, resolve_dotted_path(spec.path))
-        return cast(
-            Scorer,
+        return as_scorer(
             make_scorer(
                 metric, greater_is_better=bool(spec.greater_is_better), **spec.kwargs
-            ),
+            )
         )
-    obj = cast(Scorer, resolve_dotted_path(spec.path))
+    obj = as_scorer(resolve_dotted_path(spec.path))
     if _is_sklearn_scorer(obj):
         if not spec.kwargs:
             return obj
         _, _, obj_kwargs = scorer_raw_parts(obj)
         merged = cast(_ScorerWithKwargs, copy.copy(obj))
         merged._kwargs = {**obj_kwargs, **spec.kwargs}
-        return cast(Scorer, merged)
+        return as_scorer(merged)
     return _CallableScorer(obj, 1 if natural_greater_is_better(spec) else -1)
 
 

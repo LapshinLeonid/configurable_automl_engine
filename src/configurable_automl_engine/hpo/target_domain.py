@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import cast
 
 import numpy as np
 
+from configurable_automl_engine.common.casts import as_float
 from configurable_automl_engine.hpo.default_spaces import (
     CategoricalSpace,
     FloatSpace,
@@ -224,7 +224,7 @@ def check_target_domain(
     if not isinstance(power, SearchSpaceEntry):
         # A fixed value (not searched): either valid or not.
         try:
-            power_value = float(cast(float | int | str, power))
+            power_value = as_float(power)
         except (TypeError, ValueError):
             return TargetDomainCheck()
         if tweedie_power_is_valid(power_value, y_min):

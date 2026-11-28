@@ -40,6 +40,7 @@ import uuid
 from collections.abc import Mapping
 from typing import cast
 
+from configurable_automl_engine.common.casts import as_float, as_int
 from configurable_automl_engine.common.definitions import (
     MetricDirection,
     RunPhaseAction,
@@ -160,12 +161,10 @@ def build_experiment_result(
         holdout_score=_opt_float(result.get("holdout_score")),
         bbc_score=_opt_float(result.get("bbc_score")),
         n_repeats=(
-            int(cast(int, result["n_repeats"]))
-            if result.get("n_repeats") is not None
-            else None
+            as_int(result["n_repeats"]) if result.get("n_repeats") is not None else None
         ),
         n_trials_evaluated=(
-            int(cast(int, result["n_trials_evaluated"]))
+            as_int(result["n_trials_evaluated"])
             if result.get("n_trials_evaluated")
             else None
         ),
@@ -398,7 +397,7 @@ def _opt_float(value: object) -> float | None:
     """Normalize an optional dict-report float to a plain ``float``."""
     if value is None:
         return None
-    return float(cast(float, value))
+    return as_float(value)
 
 
 def _engine_version() -> str:

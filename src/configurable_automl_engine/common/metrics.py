@@ -57,6 +57,7 @@ from sklearn.metrics import (
     r2_score,
 )
 
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.custom_metrics import (
     CustomMetricSpec,
     build_custom_scorer,
@@ -296,7 +297,7 @@ def get_global_nrmse_scorer(global_y: Array) -> ScorerCallable:
         _global_nrmse, greater_is_better=False, target_range=target_range
     )
 
-    return cast(ScorerCallable, scorer)
+    return as_scorer(scorer)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,7 +355,7 @@ def _resolve_scorer(name: str) -> Scorer:
     if lname in SCORER_OBJECTS:
         return SCORER_OBJECTS[lname][0]
     try:
-        return cast(Scorer, sklearn_get_scorer(lname))
+        return as_scorer(sklearn_get_scorer(lname))
     except ValueError as err:
         raise ValueError(
             f"Metric '{name}' not implemented. Use one of the registered "

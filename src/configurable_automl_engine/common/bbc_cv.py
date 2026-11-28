@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import cast
 
 import numpy as np
 from sklearn.metrics import (
@@ -29,6 +28,7 @@ from sklearn.metrics import (
     r2_score,
 )
 
+from .casts import as_scorer
 from .scorer_primitives import (
     SCORER_OBJECTS,
     nrmse,
@@ -36,7 +36,7 @@ from .scorer_primitives import (
     rmse,
 )
 from .sklearn_compat import scorer_raw_parts
-from .types import FloatArray, Scorer
+from .types import FloatArray
 
 _LOG = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def _columnwise_raw_values(
     out = np.full(preds.shape[1], np.nan, dtype=float)
     for col in range(preds.shape[1]):
         try:
-            out[col] = pooled_scorer_value(cast(Scorer, scorer), y_true, preds[:, col])
+            out[col] = pooled_scorer_value(as_scorer(scorer), y_true, preds[:, col])
         except (ValueError, TypeError):
             continue
     return out

@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import cast
 
 import numpy as np
 from imblearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.metrics import (
     direction_label,
@@ -28,7 +28,6 @@ from configurable_automl_engine.common.metrics import (
 from configurable_automl_engine.common.types import (
     Frame,
     ParamsInput,
-    Scorer,
     Target,
 )
 from configurable_automl_engine.feature_selection import (
@@ -200,7 +199,7 @@ def _run_feature_selection_auto_check(
 
         # global_y=y_train: the global NRMSE is normalized by the full
         # target (as in HPO and final validation scoring).
-        scorer = cast(Scorer, get_scorer_object(metric, global_y=np.asarray(y_train)))
+        scorer = as_scorer(get_scorer_object(metric, global_y=np.asarray(y_train)))
         raw_full = scorer(pipe_full, X_hold, y_hold)
         raw_reduced = scorer(pipe_reduced, X_hold, y_hold)
         if (

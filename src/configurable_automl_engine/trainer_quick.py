@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Protocol, SupportsFloat, cast
+from typing import Protocol, cast
 
+from configurable_automl_engine.common.casts import as_float
 from configurable_automl_engine.common.errors import TrainingError
 from configurable_automl_engine.common.log_setup import setup_logging
 from configurable_automl_engine.common.metrics import is_error_metric
@@ -152,9 +153,7 @@ def run_train_model(
         if "log_path" in cfg and cfg["log_path"] is not None:
             log_path = cast(str | Path | None, cfg["log_path"])
         data_os = bool(cfg.get("data_oversampling", False))
-        data_os_mult = float(
-            cast(SupportsFloat, cfg.get("data_oversampling_multiplier", 1.0))
-        )
+        data_os_mult = as_float(cfg.get("data_oversampling_multiplier", 1.0))
         data_os_alg = str(cfg.get("data_oversampling_algorithm", "random"))
         # Config keys take precedence over the explicit arguments (similarly to
         # ``data_oversampling``); a key with the value None is treated as

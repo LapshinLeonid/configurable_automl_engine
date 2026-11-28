@@ -39,6 +39,7 @@ from imblearn.pipeline import Pipeline
 from numpy.typing import ArrayLike, NDArray
 from sklearn.inspection import permutation_importance
 
+from configurable_automl_engine.common.casts import as_scorer
 from configurable_automl_engine.common.datetime_features import (
     expand_datetime_columns,
 )
@@ -354,7 +355,7 @@ def _resolve_scorer_for_explain(metric_user: str, y: Target) -> Scorer:
     ``global_nrmse`` needs the target vector to build its scorer.
     """
     scorer = get_scorer_object(metric_user, global_y=np.asarray(y))
-    return cast(Scorer, scorer)
+    return as_scorer(scorer)
 
 
 def _validate_target(X: DataFrame, y: object) -> tuple[Series | Array, str]:

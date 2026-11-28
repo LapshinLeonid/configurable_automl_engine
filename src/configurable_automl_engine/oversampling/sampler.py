@@ -25,6 +25,7 @@ from pandas.api.types import is_numeric_dtype
 from scipy import sparse as sp
 from sklearn.preprocessing import OrdinalEncoder
 
+from configurable_automl_engine.common.casts import as_int
 from configurable_automl_engine.common.types import Array, FloatArray, Series
 from configurable_automl_engine.oversampling import experimental
 from configurable_automl_engine.oversampling.columns import (
@@ -486,7 +487,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         # Number of synthetic rows per bin = final - original count.
         counts_binned = Counter(target.y_fit)
         n_to_generate: dict[int, int] = {
-            int(cast(int, cls)): max(0, int(tgt) - counts_binned.get(cls, 0))
+            as_int(cls): max(0, int(tgt) - counts_binned.get(cls, 0))
             for cls, tgt in strategy.items()
             if cls in growth_eligible
         }

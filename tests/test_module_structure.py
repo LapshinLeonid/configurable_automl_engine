@@ -8,6 +8,9 @@ them from growing back:
   comments, and docstrings are not counted, so documentation does not
   inflate the metric;
 - the classes listed in ``MAX_CLASS_LINES`` stay within their limit;
+- explicit ``typing.cast`` calls stay within ``MAX_CASTS`` in total and
+  ``MAX_CASTS_PER_MODULE`` per module, so repeated narrowing is pushed into
+  the shared helpers instead of spreading through the call sites;
 - ruff ``C901`` is enabled with ``max-complexity = 15`` and the package
   has no ``# noqa: C901`` exception (``ALLOWED_C901_NOQA`` is empty).
 """
@@ -33,6 +36,14 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 #: has 652 code lines, so the limit leaves a small headroom without forcing a
 #: split.
 MAX_MODULE_LINES = 700
+
+#: Total number of ``typing.cast`` calls allowed in the package.
+#: Calibrated from the current total (137) with a small headroom.
+MAX_CASTS = 145
+
+#: Maximum number of ``typing.cast`` calls in one module.
+#: Calibrated from the current maximum (``hpo/search_space.py`` has 9).
+MAX_CASTS_PER_MODULE = 10
 
 #: Modules exempt from ``MAX_MODULE_LINES``. Empty: the limit has no
 #: exception (``test_module_size_limit_has_no_exceptions``).
@@ -132,6 +143,18 @@ def _count_code_lines(path: Path) -> int:
     return len(_code_line_numbers(path))
 
 
+def _count_casts(path: Path) -> int:
+    """Count direct ``cast(...)`` calls in one module."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "cast"
+    )
+
+
 def test_module_size_limit_has_no_exceptions() -> None:
     """No module is exempt from the line limit."""
     assert not MODULE_SIZE_EXCEPTIONS
@@ -198,6 +221,26 @@ def test_class_size_limit(module: str, cls: str) -> None:
     n_lines = node.end_lineno - node.lineno + 1
     limit = MAX_CLASS_LINES[(module, cls)]
     assert n_lines <= limit, f"{cls} has {n_lines} lines (limit {limit})"
+
+
+@pytest.mark.parametrize("path", _modules(), ids=_rel)
+def test_cast_limit_per_module(path: Path) -> None:
+    """No module concentrates more than ``MAX_CASTS_PER_MODULE`` casts."""
+    n_casts = _count_casts(path)
+    assert n_casts <= MAX_CASTS_PER_MODULE, (
+        f"{_rel(path)} has {n_casts} cast() calls "
+        f"(limit {MAX_CASTS_PER_MODULE}); "
+        "move the repeated narrowing into a shared helper"
+    )
+
+
+def test_total_cast_limit() -> None:
+    """The package stays within the overall cast budget."""
+    total = sum(_count_casts(path) for path in _modules())
+    assert total <= MAX_CASTS, (
+        f"src/ has {total} cast() calls (limit {MAX_CASTS}); "
+        "reuse the helpers from common.casts or add a narrow one"
+    )
 
 
 def test_ruff_complexity_limit_is_configured() -> None:
