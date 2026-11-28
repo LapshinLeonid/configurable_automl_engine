@@ -9,7 +9,8 @@ Normalizes the ``general.pruning`` settings and builds the Optuna pruner
 from __future__ import annotations
 
 import logging as _logging
-from typing import Any
+from collections.abc import Mapping
+from typing import TypedDict, cast
 
 import optuna
 
@@ -22,7 +23,7 @@ log = _logging.getLogger(__name__)
 
 
 # ═══════════════ early stopping (pruning) helpers ═══════════════════════════
-_DEFAULT_PRUNING_CONFIG: dict[str, Any] = {
+_DEFAULT_PRUNING_CONFIG: dict[str, object] = {
     "enable": False,
     "strategy": "median",
     "min_steps": 1,
@@ -31,9 +32,18 @@ _DEFAULT_PRUNING_CONFIG: dict[str, Any] = {
 }
 
 
+class _PruningConfig(TypedDict):
+    """Normalized early stopping settings."""
+
+    strategy: str
+    min_steps: int
+    n_startup_trials: int
+    reduction_factor: int
+
+
 def _normalize_pruning_config(
-    pruning: dict[str, Any] | None,
-) -> dict[str, Any] | None:
+    pruning: Mapping[str, object] | None,
+) -> _PruningConfig | None:
     """Normalize the early stopping configuration into a dict with valid fields.
 
     Accepts a settings dict (e.g. forwarded from ``training_engine``) or
@@ -51,18 +61,28 @@ def _normalize_pruning_config(
     return {
         "strategy": str(pruning.get("strategy", _DEFAULT_PRUNING_CONFIG["strategy"])),
         "min_steps": int(
-            pruning.get("min_steps", _DEFAULT_PRUNING_CONFIG["min_steps"])
+            cast(int, pruning.get("min_steps", _DEFAULT_PRUNING_CONFIG["min_steps"]))
         ),
         "n_startup_trials": int(
-            pruning.get("n_startup_trials", _DEFAULT_PRUNING_CONFIG["n_startup_trials"])
+            cast(
+                int,
+                pruning.get(
+                    "n_startup_trials", _DEFAULT_PRUNING_CONFIG["n_startup_trials"]
+                ),
+            )
         ),
         "reduction_factor": int(
-            pruning.get("reduction_factor", _DEFAULT_PRUNING_CONFIG["reduction_factor"])
+            cast(
+                int,
+                pruning.get(
+                    "reduction_factor", _DEFAULT_PRUNING_CONFIG["reduction_factor"]
+                ),
+            )
         ),
     }
 
 
-def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
+def _build_pruner(cfg: _PruningConfig) -> optuna.pruners.BasePruner:
     """Create an Optuna pruner object from a normalized configuration."""
     strategy = cfg["strategy"]
     min_steps = cfg["min_steps"]
@@ -99,7 +119,7 @@ def _build_pruner(cfg: dict[str, Any]) -> optuna.pruners.BasePruner:
     )
 
 
-def plan_pruning(pruning: dict[str, Any] | None, method: str) -> PruningPlan:
+def plan_pruning(pruning: Mapping[str, object] | None, method: str) -> PruningPlan:
     """Configure early stopping (pruning) for the selected validation.
 
     Normalizes the early stopping configuration and builds an Optuna

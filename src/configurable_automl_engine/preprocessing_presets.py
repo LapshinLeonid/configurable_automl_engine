@@ -10,7 +10,7 @@ helpers.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from collections.abc import Mapping
 
 from automl_contracts.preprocessing import (
     NO_OUTLIERS,
@@ -155,12 +155,12 @@ PRESET_BY_CLASS: dict[AlgorithmClass, PreprocessingPreset] = {
 
 
 def _coerce_override(
-    override: PreprocessingOverride | dict[str, Any],
+    override: PreprocessingOverride | Mapping[str, object],
 ) -> PreprocessingOverride:
     """Coerce a user override into a :class:`PreprocessingOverride` model."""
     if isinstance(override, PreprocessingOverride):
         return override
-    if isinstance(override, dict):
+    if isinstance(override, Mapping):
         return PreprocessingOverride.model_validate(override)
     raise TypeError(
         f"preprocessing_override must be a dict or PreprocessingOverride, "
@@ -182,9 +182,9 @@ def normalize_algorithm(algorithm: str) -> str:
 
 def resolve_preprocessing_preset(
     algorithm: str,
-    override: PreprocessingOverride | dict[str, Any] | None = None,
+    override: PreprocessingOverride | Mapping[str, object] | None = None,
     *,
-    default_override: PreprocessingOverride | dict[str, Any] | None = None,
+    default_override: PreprocessingOverride | Mapping[str, object] | None = None,
 ) -> PreprocessingPreset:
     """Determine the preprocessing preset for a given algorithm.
 
@@ -228,7 +228,7 @@ def resolve_preprocessing_preset(
     algo_class = ALGORITHM_CLASS_MAPPING.get(algo_key, AlgorithmClass.DEFAULT)
     preset = PRESET_BY_CLASS[algo_class]
 
-    update: dict[str, Any] = {}
+    update: dict[str, object] = {}
     if default_override is not None:
         default_model = _coerce_override(default_override)
         if default_model.imputation_strategy is not None:

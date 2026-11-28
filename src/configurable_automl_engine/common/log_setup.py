@@ -16,7 +16,7 @@ Key features:
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Protocol, cast
 
 DEFAULT_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 
@@ -28,15 +28,31 @@ _LOGGER = logging.getLogger(__name__)
 #: The package root logger: every module logs under ``__name__`` below it.
 _PACKAGE_LOGGER_NAME = __name__.partition(".")[0]
 
-# Use Any for the dynamic handler to avoid a type conflict in mypy
-HandlerClass: Any
+
+class _HandlerFactory(Protocol):
+    """Constructor interface shared by the two rotating file handlers."""
+
+    def __call__(
+        self,
+        *,
+        filename: str,
+        mode: str,
+        maxBytes: int,
+        backupCount: int,
+        encoding: str,
+    ) -> logging.Handler:
+        """Build a configured file handler."""
+        ...  # pragma: no cover - protocol definition
+
+
+HandlerClass: _HandlerFactory
 
 
 # Import the special handler
 try:
     from concurrent_log_handler import ConcurrentRotatingFileHandler
 
-    HandlerClass = ConcurrentRotatingFileHandler
+    HandlerClass = cast(_HandlerFactory, ConcurrentRotatingFileHandler)
 except ImportError:
     # Fall back to the standard handler
     # if the library is not installed

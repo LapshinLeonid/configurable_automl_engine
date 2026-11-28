@@ -1,7 +1,7 @@
 import logging
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import joblib
 
@@ -75,7 +75,7 @@ def _warn_on_extension_mismatch(path: Path, fmt: SerializationFormat) -> None:
         )
 
 
-def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
+def save_artifact(obj: object, path: str | Path, fmt: SerializationFormat) -> None:
     """
     Save an object to disk in the chosen format.
     """
@@ -89,7 +89,7 @@ def save_artifact(obj: Any, path: str | Path, fmt: SerializationFormat) -> None:
             pickle.dump(obj, f)
 
 
-def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
+def load_artifact(path: str | Path, fmt: SerializationFormat) -> object:
     """
     Load an object from disk in the chosen format.
     """
@@ -99,7 +99,7 @@ def load_artifact(path: str | Path, fmt: SerializationFormat) -> Any:
     _warn_on_extension_mismatch(path, fmt)
 
     if fmt == SerializationFormat.joblib:
-        return joblib.load(path)
+        return cast(object, joblib.load(path))
     else:
         with open(path, "rb") as f:
-            return pickle.load(f)
+            return cast(object, pickle.load(f))

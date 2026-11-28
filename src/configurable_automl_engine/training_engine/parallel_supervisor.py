@@ -37,13 +37,12 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from multiprocessing.context import BaseContext
-from typing import Any
 
 from .parallel_deadlines import next_wait, queue_budget, task_deadline
 from .parallel_executor import create_process_pool, force_shutdown
 from .parallel_outcome import TaskError, TaskOutcome, TaskStatus
 from .parallel_transport import TaskPayload
-from .parallel_worker import _StartSignal, _worker_proxy
+from .parallel_worker import _StartSignal, _TaskFunc, _worker_proxy
 
 __all__ = [
     "MAX_CRASH_ATTEMPTS",
@@ -117,7 +116,7 @@ class ProcessPoolSupervisor:
 
     def __init__(
         self,
-        func: Callable[..., Any],
+        func: _TaskFunc,
         payloads: Sequence[TaskPayload],
         *,
         max_workers: int | None = None,
@@ -139,7 +138,7 @@ class ProcessPoolSupervisor:
         self._outcomes: list[TaskOutcome | None] = [None] * n
         self._attempts = [0] * n
         self._crashes = [0] * n
-        self._running: dict[Future[Any], _Running] = {}
+        self._running: dict[Future[object], _Running] = {}
         # Tasks not submitted yet because the pool broke while submitting
         # (a worker crashed meanwhile): the crash recovery submits them.
         self._unsubmitted: list[int] = []
@@ -222,7 +221,7 @@ class ProcessPoolSupervisor:
             r.submit_t, r.started_at(), self._task_timeout, self._budget
         )
 
-    def _collect(self, fut: Future[Any]) -> bool:
+    def _collect(self, fut: Future[object]) -> bool:
         """Record a finished future; return True if its pool is broken."""
         exc = None if fut.cancelled() else fut.exception()
         if isinstance(exc, BrokenProcessPool):
@@ -253,7 +252,7 @@ class ProcessPoolSupervisor:
 
     # ── timeouts ───────────────────────────────────────────────────────────
 
-    def _handle_timeouts(self, timed_out: Iterable[Future[Any]], now: float) -> None:
+    def _handle_timeouts(self, timed_out: Iterable[Future[object]], now: float) -> None:
         for fut in timed_out:
             if fut.done() and not self._collect(fut):
                 continue  # it finished just in time

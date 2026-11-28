@@ -34,9 +34,11 @@ from configurable_automl_engine.common.types import (
     Array,
     DataFrame,
     Estimator,
+    FloatArray,
     Frame,
     Params,
     Series,
+    Target,
 )
 from configurable_automl_engine.common.validation_utils import (
     apply_inf_policy,
@@ -755,3 +757,51 @@ def assemble_pipeline_steps(
         )
     )
     return steps
+
+
+def _align_oof_vector(
+    oof_pred: FloatArray,
+    X: Frame,
+) -> Target:
+    """Align the OOF vector ``y_pred_oof`` to the original row order.
+
+    For pandas inputs (``DataFrame``/``Series``) with a unique index, a
+    ``pd.Series`` with preserved row labels is returned, including
+    MultiIndex. For numpy inputs and data with an unrecoverable index
+    (duplicate labels), an ``np.ndarray`` aligned by position is returned:
+    no sorting by index value is performed.
+
+    Note: the ``Index.hasnans`` property is not defined for ``MultiIndex``
+    (``NotImplementedError``), so the check is wrapped in try/except —
+    otherwise ``fit()`` would fail on data with a MultiIndex even though
+    such input worked on main.
+
+    Args:
+        oof_pred: OOF prediction buffer (NaN for uncovered rows), aligned
+            by position to the original data.
+        X: Original feature matrix.
+    """
+    if isinstance(X, (pd.DataFrame, pd.Series)) and X.index.is_unique:
+        try:
+            has_nan_labels = bool(X.index.hasnans)
+        except (NotImplementedError, TypeError):
+            # MultiIndex and other indexes without hasnans support: NaN
+            # labels cannot be checked, but uniqueness guarantees unambiguous
+            # positional alignment — keep the row labels.
+            has_nan_labels = False
+        if not has_nan_labels:
+            return pd.Series(oof_pred, index=X.index, name="y_pred_oof")
+    return oof_pred
+
+
+def _count_valid_pairs(oof_pred: FloatArray, oof_y: FloatArray) -> int:
+    """Count the rows with finite OOF predictions and finite targets.
+
+    Args:
+        oof_pred: OOF prediction buffer.
+        oof_y: OOF target buffer.
+
+    Returns:
+        int: The number of finite ``(y_true, y_pred)`` pairs.
+    """
+    return int((np.isfinite(oof_pred) & np.isfinite(oof_y)).sum())

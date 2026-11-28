@@ -9,8 +9,6 @@ module must not import the other preprocessing modules.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pandas as pd
 
 
@@ -48,7 +46,7 @@ class ColumnNameSelector:
         self.feature_names = list(feature_names)
         self.column_names = list(column_names)
 
-    def __call__(self, X: Any) -> list[int]:
+    def __call__(self, X: object) -> list[int]:
         if isinstance(X, pd.DataFrame):
             return _resolve_column_positions_by_name(X, self.column_names)
         return _resolve_column_positions_by_order(self.feature_names, self.column_names)

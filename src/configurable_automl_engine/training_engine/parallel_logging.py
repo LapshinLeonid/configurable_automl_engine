@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing.context import BaseContext
 from types import TracebackType
-from typing import Any, Self
+from typing import Protocol, Self
 
 __all__ = ["LoggingSnapshot", "WorkerLogForwarding", "snapshot_logging"]
 
@@ -43,6 +43,31 @@ _TARGET_ATTR = "_forwarded_to"
 
 #: How long ``stop()`` waits for the listener to drain the queue (seconds).
 _LISTENER_STOP_TIMEOUT = 5.0
+
+
+class _QueueLike(Protocol):
+    """The ``put_nowait`` surface of a multiprocessing queue."""
+
+    def put_nowait(self, item: object) -> None:
+        """Enqueue an item without blocking."""
+        ...  # pragma: no cover - protocol definition
+
+    def get(self) -> object:
+        """Dequeue an item."""
+        ...  # pragma: no cover - protocol definition
+
+
+class _Initializer(Protocol):
+    """Pool initializer forwarding the worker log records."""
+
+    def __call__(
+        self,
+        queue: _QueueLike,
+        snapshot: LoggingSnapshot,
+        modules: Sequence[str] = (),
+    ) -> None:
+        """Configure logging in a worker process."""
+        ...  # pragma: no cover - protocol definition
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +114,7 @@ def snapshot_logging() -> LoggingSnapshot:
 class _ForwardHandler(logging.handlers.QueueHandler):
     """Worker side: puts the record on the queue, tagged with its logger."""
 
-    def __init__(self, queue: Any, target: str) -> None:
+    def __init__(self, queue: _QueueLike, target: str) -> None:
         super().__init__(queue)
         self._target = target
 
@@ -102,7 +127,7 @@ class _ForwardHandler(logging.handlers.QueueHandler):
 
 
 def _init_worker_logging(
-    queue: Any, snapshot: LoggingSnapshot, modules: Sequence[str] = ()
+    queue: _QueueLike, snapshot: LoggingSnapshot, modules: Sequence[str] = ()
 ) -> None:
     """Pool initializer: route the worker's log records to the parent."""
     for name in modules:
@@ -182,12 +207,12 @@ class WorkerLogForwarding:
         self._started = False
 
     @property
-    def initializer(self) -> Any:
+    def initializer(self) -> _Initializer:
         """The pool initializer (``_init_worker_logging``)."""
         return _init_worker_logging
 
     @property
-    def initargs(self) -> tuple[Any, ...]:
+    def initargs(self) -> tuple[object, ...]:
         """The pool initializer arguments."""
         return (self._queue, self._snapshot, self._modules)
 

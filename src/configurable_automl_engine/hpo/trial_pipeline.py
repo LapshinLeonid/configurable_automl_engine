@@ -15,14 +15,16 @@ takes explicit inputs and returns its result. The module may import
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
 from optuna.trial import Trial
 from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
 
 from configurable_automl_engine.common.definitions import TargetTransform
+from configurable_automl_engine.common.types import Estimator, Frame, Target
 from configurable_automl_engine.feature_selection import (
     FeatureSelectionCfg,
     FeatureSelectionMode,
@@ -77,7 +79,7 @@ def _missing_indicator_enabled(algorithm: str | None) -> bool:
         return True
 
 
-def plan_preprocessing(X: Any, request: HpoRequest) -> PreprocessingPlan:
+def plan_preprocessing(X: Frame, request: HpoRequest) -> PreprocessingPlan:
     """Plan the preprocessor of the HPO phase.
 
     A single point of preprocessor assembly: categories -> one-hot (or
@@ -196,12 +198,12 @@ def _copy(columns: list[str] | None) -> list[str] | None:
 
 
 def _build_trial_preprocessor(
-    X: Any,
+    X: Frame,
     algo: str,
     request: HpoRequest,
     categorical: list[str] | None,
     numerical: list[str] | None,
-) -> tuple[Any, list[str] | None, list[str] | None]:
+) -> tuple[ColumnTransformer | None, list[str] | None, list[str] | None]:
     """Build the trial preprocessor from the column lists or the detected types."""
     encoding_strategy: EncodingStrategy = request.encoding.encoding or "one_hot"
     # Automatic preset selection + application of an explicit override.
@@ -272,8 +274,8 @@ def _build_trial_preprocessor(
 
 
 def _numeric_feature_count(
-    X: Any,
-    preprocessor: Any,
+    X: Frame,
+    preprocessor: ColumnTransformer | None,
     categorical: list[str] | None,
     numerical: list[str] | None,
 ) -> int | None:
@@ -329,9 +331,9 @@ def _isotonic_max_feature_index(
 
 
 def _estimate_n_features_after_preprocessing(
-    X: Any,
+    X: Frame,
     *,
-    preprocessor: Any,
+    preprocessor: ColumnTransformer | None,
     categorical_features: list[str] | None,
     numerical_features: list[str] | None,
     encoding: EncodingSettings,
@@ -389,7 +391,7 @@ def _missing_indicator_added(algo: str) -> bool:
 
 
 def assemble_estimator(
-    model_impl: Any,
+    model_impl: Estimator,
     preprocessing: PreprocessingPlan,
     *,
     is_isotonic: bool,
@@ -400,7 +402,7 @@ def assemble_estimator(
     feature_index: int | None = None,
     target_transform: TargetTransform | str = TargetTransform.none,
     target_transform_skew_threshold: float | None = None,
-) -> Any:
+) -> Estimator:
     """Assemble the pipeline in the order preprocessor -> [selector] -> [sampler] -> model.
 
     Oversampling receives already-encoded numerical features (one-hot), so
@@ -445,10 +447,10 @@ def assemble_estimator(
             ``target_transform`` is ``auto``.
 
     Returns:
-        Any: The trial pipeline (or the wrapped/bare model when it has no
+        Estimator: The trial pipeline (or the wrapped/bare model when it has no
             other step).
     """
-    steps: list[tuple[str, Any]] = []
+    steps: list[tuple[str, object]] = []
     if preprocessing.preprocessor is not None:
         steps.append(("preprocessor", preprocessing.preprocessor))
     if is_isotonic:
@@ -480,8 +482,8 @@ def assemble_estimator(
         )
     )
     if len(steps) == 1:
-        return steps[0][1]
-    return ImbPipeline(steps)
+        return cast(Estimator, steps[0][1])
+    return cast(Estimator, ImbPipeline(steps))
 
 
 def _resolve_apply_fs(
@@ -511,10 +513,10 @@ def _resolve_apply_fs(
 
 
 def _resolve_isotonic_feature_name(
-    preprocessor: Any,
+    preprocessor: ColumnTransformer | None,
     n_numeric_eff: int | None,
-    X: Any,
-    y: Any,
+    X: Frame,
+    y: Target,
     feature_index: int,
 ) -> str | None:
     """Resolve the name of the numerical feature selected by isotonic.

@@ -10,9 +10,19 @@ configured by one definition. The module holds definitions only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict
 
 from configurable_automl_engine.common.definitions import EncodingStrategy
+
+
+class SamplerParams(TypedDict):
+    """Keyword arguments of the ``DataOversampler`` constructor."""
+
+    multiplier: float
+    algorithm: str
+    target_bins: int
+    add_noise: bool
+    noise_level: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,11 +47,11 @@ class OversamplingSettings:
     add_noise: bool = False
     noise_level: float = 0.01
 
-    def sampler_params(self) -> dict[str, Any]:
+    def sampler_params(self) -> SamplerParams:
         """Return the ``DataOversampler`` constructor arguments.
 
         Returns:
-            dict[str, Any]: The keyword arguments of ``DataOversampler``.
+            SamplerParams: The keyword arguments of ``DataOversampler``.
         """
         return {
             "multiplier": self.multiplier,

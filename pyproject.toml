@@ -140,32 +140,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
-    "configurable_automl_engine.common.custom_metrics",
-    "configurable_automl_engine.common.metrics",
-    "configurable_automl_engine.common.scorer_primitives",
-    "configurable_automl_engine.common.validation_utils",
-    "configurable_automl_engine.experiment.*",
-    "configurable_automl_engine.explain",
-    "configurable_automl_engine.feature_selection",
-    "configurable_automl_engine.hpo.fold_eval",
-    "configurable_automl_engine.hpo.plans",
-    "configurable_automl_engine.models",
-    "configurable_automl_engine.preprocessing.target_transform",
-    "configurable_automl_engine.trainer",
-    "configurable_automl_engine.trainer_data",
-    "configurable_automl_engine.trainer_params",
-    "configurable_automl_engine.trainer_quick",
-    "configurable_automl_engine.trainer_state",
-    "configurable_automl_engine.tuner",
-    "configurable_automl_engine.training_engine.artifact",
-    "configurable_automl_engine.training_engine.ensemble_step",
-    "configurable_automl_engine.training_engine.experiment_facade",
-    "configurable_automl_engine.training_engine.parallel_transport",
-    "configurable_automl_engine.training_engine.sanity_circuits",
-    "configurable_automl_engine.training_engine.sanity_result",
-    "configurable_automl_engine.training_engine.state",
-    "configurable_automl_engine.training_engine.thread_pool",
-    "configurable_automl_engine.validation",
+    "configurable_automl_engine",
+    "configurable_automl_engine.*",
 ]
 disallow_any_explicit = true
 

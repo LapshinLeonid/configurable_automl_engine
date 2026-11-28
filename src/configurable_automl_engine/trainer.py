@@ -745,7 +745,7 @@ class ModelTrainer(TrainerViewMixin):
             # configuration mode (always/disabled) → standalone auto-check
             # for mode='auto'.
             feature_selection_active = _resolve_feature_selection_active(
-                features.X,
+                cast(Frame, features.X),
                 data.y,
                 make_steps,
                 algorithm=settings.algorithm,
@@ -760,7 +760,7 @@ class ModelTrainer(TrainerViewMixin):
             # val_score/additional_scores are honest estimates rather than
             # train scores.
             self._scores = score_on_validation_splits(
-                features.X,
+                cast(Frame, features.X),
                 data.y,
                 make_steps,
                 feature_selection_active=feature_selection_active,
@@ -956,7 +956,7 @@ class ModelTrainer(TrainerViewMixin):
                 a ``ModelTrainer`` instance, or was saved in another
                 artifact format version.
         """
-        return cast(ModelTrainer, load_trainer_artifact(path, fmt, cls))
+        return load_trainer_artifact(path, fmt, cls)
 
 
 def train_model(

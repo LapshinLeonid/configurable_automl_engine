@@ -23,14 +23,27 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Self
+from typing import Self, TypeAlias
+
+import numpy.typing as npt
 
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
 from configurable_automl_engine.common.types import DataFrame
 
-__all__ = ["DiskPersistenceManager", "PayloadTransport", "TaskPayload"]
+__all__ = [
+    "DiskPersistenceManager",
+    "PayloadTransport",
+    "ShmMetadata",
+    "TaskPayload",
+]
 
 logger = logging.getLogger(__name__)
+
+
+#: Shared-memory metadata of one frame argument: ``(name, shape, dtype, columns)``.
+ShmMetadata: TypeAlias = tuple[
+    str | None, tuple[int, ...], npt.DTypeLike, list[str] | None
+]
 
 
 class DiskPersistenceManager:
@@ -182,14 +195,14 @@ class TaskPayload:
         kwargs (Mapping[str, object]): The keyword arguments.
         disk_indices (list[int]): The argument indices the worker reads from
             Parquet (a non-path argument at such an index is passed through).
-        shm_info (dict[int, tuple[object, ...]]): Argument index → the shared
+        shm_info (dict[int, ShmMetadata]): Argument index → the shared
             memory metadata ``(name, shape, dtype, columns)``.
     """
 
     args: tuple[object, ...]
     kwargs: Mapping[str, object]
     disk_indices: list[int]
-    shm_info: dict[int, tuple[object, ...]]
+    shm_info: dict[int, ShmMetadata]
 
 
 class PayloadTransport:
@@ -317,7 +330,7 @@ class PayloadTransport:
         self, args: Sequence[object], kwargs: Mapping[str, object]
     ) -> TaskPayload:
         new_args = list(args)
-        shm_info: dict[int, tuple[object, ...]] = {}
+        shm_info: dict[int, ShmMetadata] = {}
         for idx in self._shared | self._disk:
             arg = new_args[idx] if idx < len(new_args) else None
             if isinstance(arg, DataFrame):
@@ -337,7 +350,7 @@ class PayloadTransport:
 
     def _encode_frame(
         self, idx: int, df: DataFrame
-    ) -> tuple[object, tuple[object, ...] | None]:
+    ) -> tuple[object, ShmMetadata | None]:
         """Return the argument to send and the shared memory metadata."""
         if (
             idx in self._shared

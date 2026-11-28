@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import logging as _logging
 from collections.abc import Callable
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import optuna
 from optuna.trial import FrozenTrial
-from sklearn.model_selection import KFold
+from sklearn.model_selection import BaseCrossValidator, KFold
 
+from configurable_automl_engine.common.types import Array
 from configurable_automl_engine.validation import (
     SUPPORTED_SPLIT_AGGREGATIONS,
     aggregate_split_scores,
@@ -33,7 +34,7 @@ from .types import HPO_WORST_SCORE
 log = _logging.getLogger(__name__)
 
 #: A per-repeat evaluator: (repeat index, repeat seed, repeat OOF buffer) -> score.
-RepeatScorer = Callable[[int, "int | None", "np.ndarray | None"], float]
+RepeatScorer = Callable[[int, int | None, Array | None], float]
 
 
 def plan_repeats(
@@ -98,7 +99,7 @@ def repeat_seed(
     return repeated_seed(random_state, repeat_index)
 
 
-def repeat_cv(validation: ValidationPlan, seed: int | None) -> Any:
+def repeat_cv(validation: ValidationPlan, seed: int | None) -> BaseCrossValidator:
     """Return the CV splitter of one repeat (same folds as ``iter_splits``).
 
     The repeated k-fold splits are re-drawn with the deterministic per-repeat
@@ -117,9 +118,7 @@ def repeat_cv(validation: ValidationPlan, seed: int | None) -> Any:
     return KFold(n_splits=validation.n_folds, shuffle=True, random_state=seed)
 
 
-def repeat_oof_buffer(
-    oof_out: np.ndarray | None, repeat_index: int
-) -> np.ndarray | None:
+def repeat_oof_buffer(oof_out: Array | None, repeat_index: int) -> Array | None:
     """Return the OOF row-buffer of one repeat.
 
     With several repeats the collector allocates a ``(n_repeats, n_rows)``
@@ -134,7 +133,7 @@ def repeat_oof_buffer(
     """
     if oof_out is None or oof_out.ndim == 1:
         return oof_out
-    return cast(np.ndarray, oof_out[repeat_index])
+    return cast(Array, oof_out[repeat_index])
 
 
 def penalize_non_finite_repeat(value: float, repeat_index: int) -> float:
@@ -171,7 +170,7 @@ def run_repeat_scores(
     validation: ValidationPlan | None,
     n_repeats: int | None,
     random_state: int | None,
-    oof_out: np.ndarray | None,
+    oof_out: Array | None,
     split_aggregation: str,
     all_failed_message: str,
     scores_out: list[float] | None = None,
@@ -255,10 +254,10 @@ def run_repeat_scores(
 
 def phase_oof_matrix(
     phase_trials: list[FrozenTrial],
-    trial_oof: dict[int, np.ndarray],
+    trial_oof: dict[int, Array],
     *,
     max_cells: int,
-) -> np.ndarray | None:
+) -> Array | None:
     """Stack the kept OOF rows of the phase's completed trials.
 
     With ``n_repeats > 1`` every trial stores one OOF vector per repeat
@@ -279,7 +278,7 @@ def phase_oof_matrix(
             ``None`` when no completed trial kept its predictions or the
             budget is exceeded.
     """
-    blocks: list[np.ndarray] = []
+    blocks: list[Array] = []
     for trial in phase_trials:
         if (
             trial.state != optuna.trial.TrialState.COMPLETE
@@ -309,12 +308,12 @@ def phase_oof_matrix(
             max_cells,
         )
         return None
-    return np.vstack(blocks)
+    return cast(Array, np.vstack(blocks))
 
 
 def successful_repeat_oof(
-    oof: np.ndarray | None, mask: list[bool], n_repeats: int
-) -> np.ndarray | None:
+    oof: Array | None, mask: list[bool], n_repeats: int
+) -> Array | None:
     """Keep only the OOF rows of the successful repeats.
 
     A repeat penalized with ``HPO_WORST_SCORE`` (a failed evaluation or a
@@ -333,4 +332,4 @@ def successful_repeat_oof(
     """
     if oof is None or n_repeats <= 1 or len(mask) != n_repeats:
         return oof
-    return cast(np.ndarray, oof[np.asarray(mask, dtype=bool)])
+    return cast(Array, oof[np.asarray(mask, dtype=bool)])

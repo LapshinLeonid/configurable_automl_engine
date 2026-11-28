@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import logging as _logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 import optuna
@@ -60,11 +60,20 @@ if TYPE_CHECKING:
 log = _logging.getLogger(__name__)
 
 
+class _DistributionEntry(Protocol):
+    """A search-space entry exposing Optuna distribution metadata."""
+
+    dist_type: str
+    low: object
+    high: object
+    step: object
+
+
 # ═══════════════════════════════════ search spaces ═══════════════════════════
 
 
 # ══════════ SVR space: epsilon depends on the spread of y ══════════
-def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
+def _svr_adaptive_epsilon_entry(y: object) -> SearchSpaceEntry:
     """Build a SearchSpaceEntry for SVR epsilon with bounds scaled by y.
 
     The bounds are computed from the spread of ``y`` (σ(y) by default) ONCE —
@@ -82,9 +91,9 @@ def _svr_adaptive_epsilon_entry(y: Any) -> SearchSpaceEntry:
 
 def build_search_space(
     algo_name: str,
-    user_overrides: dict[str, Any] | None,
+    user_overrides: Mapping[str, object] | None,
     limit: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Build the dict search space of an algorithm from the user ranges.
 
     The single merge rule of every HPO run (a direct ``optimize()`` call and
@@ -119,7 +128,7 @@ def build_search_space(
             (no ``DEFAULT_SPACES`` entries). Defaults to False.
 
     Returns:
-        dict[str, Any]: The resulting search space (a new dict; the inputs
+        dict[str, object]: The resulting search space (a new dict; the inputs
             are not mutated). Empty when ``limit`` is True and there are no
             user ranges, or when the algorithm has no default space and no
             user ranges.
@@ -129,7 +138,7 @@ def build_search_space(
             return {}
         # Only the user-listed parameters are searched; everything else
         # stays at the estimator default. The mapped names are applied once.
-        return remap_legacy_param_names(algo_name, user_overrides)
+        return remap_legacy_param_names(algo_name, dict(user_overrides))
 
     resolved = resolve_algorithm_name(algo_name)
     space: Params = dict(DEFAULT_SPACES.get(resolved, {}))
@@ -137,7 +146,7 @@ def build_search_space(
         # Apply LEGACY_PARAM_MAPPINGS to the user overrides BEFORE the merge so
         # that an explicit user value (e.g. ARDRegression n_iter → max_iter) wins
         # over the system default of the current name.
-        space.update(remap_legacy_param_names(algo_name, user_overrides))
+        space.update(remap_legacy_param_names(algo_name, dict(user_overrides)))
 
     # Adaptive epsilon for SVR: the epsilon search bounds are scaled by the
     # y_train spread at runtime (plan_search_space), so the default blind
@@ -156,38 +165,49 @@ def build_search_space(
 # ═════════════════════════════ helper utilities ═════════════════════════════
 
 
-def _apply_dynamic_space(trial: Trial, space_dict: dict[str, Any]) -> dict[str, Any]:
+def _apply_dynamic_space(
+    trial: Trial, space_dict: dict[str, object]
+) -> dict[str, object]:
     """Convert a configuration dict into model parameters via Optuna methods."""
-    params: dict[str, Any] = {}
+    params: dict[str, object] = {}
     for key, value in space_dict.items():
         if hasattr(value, "dist_type"):
-            low, high = value.low, value.high
-            dist_type = value.dist_type
-            step = value.step
+            entry = cast(_DistributionEntry, value)
+            low, high = entry.low, entry.high
+            dist_type = entry.dist_type
+            step = entry.step
             if dist_type == "int":
                 low_val, high_val = int(cast(float, low)), int(cast(float, high))
                 params[key] = trial.suggest_int(
-                    key, low_val, high_val, step=int(step) if step is not None else 1
+                    key,
+                    low_val,
+                    high_val,
+                    step=int(cast(float, step)) if step is not None else 1,
                 )
             elif dist_type == "float":
                 params[key] = trial.suggest_float(
                     key,
-                    float(low),
-                    float(high),
-                    step=float(step) if step is not None else None,
+                    float(cast(float, low)),
+                    float(cast(float, high)),
+                    step=float(cast(float, step)) if step is not None else None,
                 )
             elif dist_type == "float_log":
-                FloatSpace.validate_log_low(float(low))
+                FloatSpace.validate_log_low(float(cast(float, low)))
                 params[key] = trial.suggest_float(
-                    key, float(low), float(high), log=True
+                    key,
+                    float(cast(float, low)),
+                    float(cast(float, high)),
+                    log=True,
                 )
             elif dist_type == "categorical":
-                options = getattr(value, "options", None)
-                if options is None and hasattr(value, "config"):
-                    options = getattr(value.config, "options", None)
+                options = getattr(entry, "options", None)
+                if options is None and hasattr(entry, "config"):
+                    options = getattr(entry.config, "options", None)
                 if options is None:
                     options = low
-                params[key] = trial.suggest_categorical(key, options)
+                params[key] = trial.suggest_categorical(
+                    key, cast(list[int | float | str | None], options)
+                )
         else:
             params[key] = value
     return params
@@ -208,7 +228,7 @@ class _DistributionRecorder:
 
     def __init__(self) -> None:
         """Initialize an empty distribution recorder."""
-        self.distributions: dict[str, Any] = {}
+        self.distributions: dict[str, optuna.distributions.BaseDistribution] = {}
         # Trial-compatible attributes that user space functions may read
         # (e.g. ``trial.number`` to alternate between good/bad points).
         self.number = -1
@@ -235,17 +255,17 @@ class _DistributionRecorder:
         )
         return low
 
-    def suggest_categorical(self, name: str, choices: list[Any]) -> Any:
+    def suggest_categorical(self, name: str, choices: list[object]) -> object:
         """Record a ``CategoricalDistribution`` and return the first choice."""
         self.distributions[name] = optuna.distributions.CategoricalDistribution(
-            choices=list(choices)
+            choices=cast(list[int | float | str | None], list(choices))
         )
         return choices[0]
 
 
 def _enqueueable_initial_params(
-    params: dict[str, Any], space_dict: dict[str, Any], algo: str
-) -> dict[str, Any]:
+    params: dict[str, object], space_dict: dict[str, object], algo: str
+) -> dict[str, object]:
     """Drop initial params whose value type does not fit the search space.
 
     A value that does not fit the configured space (e.g. SVR
@@ -253,7 +273,7 @@ def _enqueueable_initial_params(
     Optuna fail the enqueued trial. Such a key is
     dropped with a warning and sampled from the space instead; numeric
     values outside the range are kept as is (Optuna handles them)."""
-    kept: dict[str, Any] = {}
+    kept: dict[str, object] = {}
     for name, value in params.items():
         entry = space_dict.get(name)
         if isinstance(entry, SearchSpaceEntry):
@@ -279,12 +299,12 @@ def _enqueueable_initial_params(
 
 
 def _canonical_distributions(
-    space_fn: Callable[[Trial], dict[str, Any]],
+    space_fn: Callable[[Trial], Params],
     *,
     fs_mode: FeatureSelectionMode,
     is_isotonic: bool,
     algo: str,
-) -> dict[str, Any] | None:
+) -> dict[str, optuna.distributions.BaseDistribution] | None:
     """Compute the canonical distributions of the current phase space.
 
     Runs ``space_fn`` (plus the feature selection suggestion) on a
@@ -316,7 +336,7 @@ def _canonical_distributions(
 
 
 def _resolve_complexity_guard(
-    space: dict[str, Any],
+    space: dict[str, object],
     *,
     algo: str,
     config: ComplexityGuardConfig,
@@ -324,7 +344,7 @@ def _resolve_complexity_guard(
     n_samples_eff: int,
     n_features_eff: int,
     n_features_size: int,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Apply the adaptive complexity guard to a dict search space.
 
     The guard depends on ``n`` (the effective training-fold rows,
@@ -364,7 +384,7 @@ def _resolve_complexity_guard(
 
 
 def log_complexity_guard(
-    records: list[dict[str, Any]], config: ComplexityGuardConfig
+    records: list[dict[str, object]], config: ComplexityGuardConfig
 ) -> None:
     """Log the adaptive complexity guard records at INFO level.
 
@@ -379,10 +399,10 @@ def log_complexity_guard(
     cfg_mode = config.mode
     cfg_policy = config.user_range_policy
     for record in records:
-        before = record["before"]
-        after = record["after"]
+        before = cast(list[object], record["before"])
+        after = cast(list[object], record["after"])
 
-        def fmt(v: Any) -> str:
+        def fmt(v: object) -> str:
             if v is None:
                 return "n/a"
             return str(v) if isinstance(v, int) else f"{v:g}"
@@ -402,7 +422,7 @@ def log_complexity_guard(
                 message += " (parameter fixed)"
             log.info("%s: %s", message, record["reason"])
         elif record.get("conflict"):
-            rule_range = record.get("rule_range") or [None, None]
+            rule_range = cast(list[object], record.get("rule_range") or [None, None])
             if cfg_mode == "warn":
                 # In the warn mode nothing is applied at all — report the
                 # conflict without claiming that the user range wins.
@@ -448,7 +468,9 @@ def log_complexity_guard(
             )
 
 
-def _normalize_space_dict(algo: str, space_dict: dict[str, Any]) -> dict[str, Any]:
+def _normalize_space_dict(
+    algo: str, space_dict: dict[str, object]
+) -> dict[str, object]:
     """Re-resolve inferred range types in a dict search space.
 
     The same normalization the Config path applies (see
@@ -465,11 +487,11 @@ def _normalize_space_dict(algo: str, space_dict: dict[str, Any]) -> dict[str, An
     explicitly typed entries and constants pass through unchanged.
 
     Returns:
-        dict[str, Any]: A new dict with the same structure: every numeric
+        dict[str, object]: A new dict with the same structure: every numeric
             key holds a ``SearchSpaceEntry`` (raw lists are parsed),
             inferred range types re-resolved against the parameter type.
     """
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, object] = {}
     for param, value in space_dict.items():
         if isinstance(value, SearchSpaceEntry):
             entry = value
@@ -488,9 +510,9 @@ def _normalize_space_dict(algo: str, space_dict: dict[str, Any]) -> dict[str, An
 
 def plan_search_space(
     algo: str,
-    y: Any,
+    y: object,
     *,
-    space_override: Any,
+    space_override: object,
     limit_hyperparameters: bool,
     user_hyperparameter_keys: list[str] | None,
     complexity_guard: ComplexityGuardConfig,
@@ -535,7 +557,7 @@ def plan_search_space(
     # Priority 1: Direct overrides (functions) are used as is.
     if callable(space_override):
         return SearchSpacePlan(
-            space_fn=space_override,
+            space_fn=cast(Callable[[Trial], Params], space_override),
             space_dict={},
             guard_records=[],
             user_hyperparameter_keys=user_hyperparameter_keys,
@@ -543,7 +565,11 @@ def plan_search_space(
 
     # Priority 2: Dict ranges (SearchSpaceEntry objects or shorthand lists)
     # merged over DEFAULT_SPACES; no override — DEFAULT_SPACES only.
-    user_ranges = space_override if isinstance(space_override, dict) else None
+    user_ranges = (
+        cast(dict[str, object], space_override)
+        if isinstance(space_override, dict)
+        else None
+    )
     # The limited mode searches exactly the listed parameters; without a
     # dict override there is nothing listed, so the defaults are searched.
     limit = bool(limit_hyperparameters) and user_ranges is not None
@@ -694,7 +720,7 @@ def _natural_domain_bounds(
 
 def _is_guard_boundary(
     algo: str,
-    guard_records: list[dict[str, Any]],
+    guard_records: list[dict[str, object]],
     param: str,
     value: float,
     tolerance: float,
@@ -753,7 +779,7 @@ def _is_guard_boundary(
 
 
 def _warn_if_optimum_at_boundary(
-    best_params: dict[str, Any],
+    best_params: dict[str, object],
     search: SearchSpacePlan,
     *,
     algo: str,
@@ -801,7 +827,7 @@ def _warn_if_optimum_at_boundary(
         try:
             low = float(entry.low)
             high = float(entry.high)
-            num = float(value)
+            num = float(cast(float | int | str, value))
         except (TypeError, ValueError):
             continue
         if low == high:

@@ -10,13 +10,20 @@ HPO trial pipelines (``hpo.trial_pipeline``), and it is part of saved models.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from collections.abc import Sequence
+from typing import cast
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
 from configurable_automl_engine.common.errors import TrainingError
+from configurable_automl_engine.common.types import (
+    Array,
+    FloatArray,
+    FrameInput,
+    Series,
+)
 
 __all__ = ["IsotonicDataTransformer"]
 
@@ -72,13 +79,16 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         self.n_numeric = n_numeric
         self.n_total = n_total
 
-    def _get_dimensions(self, X: Any) -> tuple[int, int]:
+    def _get_dimensions(self, X: FrameInput) -> tuple[int, int]:
         """Return the number of rows and columns of the input data
         in a universal format."""
-        if hasattr(X, "shape"):
-            return X.shape[0], (X.shape[1] if len(X.shape) > 1 else 1)
-        n_rows = len(X)
-        n_cols = len(X[0]) if n_rows > 0 and isinstance(X[0], (list, np.ndarray)) else 1
+        shape = getattr(X, "shape", None)
+        if isinstance(shape, tuple):
+            return int(shape[0]), (int(shape[1]) if len(shape) > 1 else 1)
+        sequence = cast(Sequence[object], X)
+        n_rows = len(sequence)
+        first = sequence[0] if n_rows > 0 else None
+        n_cols = len(first) if isinstance(first, (list, tuple, np.ndarray)) else 1
         return n_rows, n_cols
 
     def _resolve_absolute_index(self, n_cols: int) -> int:
@@ -132,7 +142,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             )
         return offset + self.feature_index
 
-    def _extract_column(self, X: Any, idx: int) -> pd.Series | np.ndarray:
+    def _extract_column(self, X: FrameInput, idx: int) -> Series | Array:
         """Extract the ``idx``-th column of ``X`` without copying."""
         if isinstance(X, pd.DataFrame):
             return X.iloc[:, idx]
@@ -140,7 +150,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             return X[:, idx] if len(X.shape) > 1 else X
         return np.asarray(X)[:, idx]
 
-    def fit(self, X: Any, y: Any = None) -> IsotonicDataTransformer:
+    def fit(self, X: FrameInput, y: object = None) -> IsotonicDataTransformer:
         """Compute the median of the selected feature for subsequent missing-value imputation."""
         _, n_cols = self._get_dimensions(X)
         abs_idx = self._resolve_absolute_index(n_cols)
@@ -150,7 +160,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
         self.median_ = float(s_col.median()) if not s_col.isna().all() else 0.0
         return self
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: FrameInput) -> FloatArray:
         """Extract the feature, fill missing values,
         and convert to a 2D array (n_samples, 1)."""
         try:
@@ -179,7 +189,7 @@ class IsotonicDataTransformer(BaseEstimator, TransformerMixin):  # type: ignore[
             X_imputed = s_col.fillna(fill_value)
             # Return the result as a 2D array, as scikit-learn expects
             result = X_imputed.to_numpy().reshape(-1, 1)
-            return cast(np.ndarray, result)
+            return cast(FloatArray, result)
         except ValueError:
             # ValueError is non-fatal for the circuit breaker in HPO (see the
             # tuner), while TrainingError (a RuntimeError) is fatal — so

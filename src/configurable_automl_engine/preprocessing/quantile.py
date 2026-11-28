@@ -18,7 +18,7 @@ models. The module must not import the other preprocessing modules.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 import numpy as np
 from scipy.stats import norm
@@ -31,6 +31,7 @@ from sklearn.preprocessing import QuantileTransformer
 from sklearn.utils.validation import check_is_fitted
 
 from configurable_automl_engine.common.sklearn_compat import check_feature_names
+from configurable_automl_engine.common.types import FloatArray, Frame, NamesArray
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
         self.subsample = subsample
         self.random_state = random_state
 
-    def fit(self, X: Any, y: Any = None) -> _FoldSafeQuantileTransformer:
+    def fit(self, X: Frame, y: object = None) -> _FoldSafeQuantileTransformer:
         """Clip ``n_quantiles`` to the number of rows and fit sklearn's transformer.
 
         Args:
@@ -133,7 +134,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
         ).fit(X)
         return self
 
-    def transform(self, X: Any) -> Any:
+    def transform(self, X: Frame) -> FloatArray:
         """Transform the data with the fitted quantiles.
 
         Args:
@@ -146,7 +147,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
             NotFittedError: If called before ``fit``.
         """
         check_is_fitted(self, "_transformer_")
-        uniform = self._transformer_.transform(X)
+        uniform = cast(FloatArray, self._transformer_.transform(X))
         # A serialized model may hold an inner transformer fitted with
         # output_distribution="normal": its output is the normal
         # distribution, so it is returned as is.
@@ -158,7 +159,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
         return self._uniform_to_normal(uniform, self.n_quantiles_)
 
     @staticmethod
-    def _uniform_to_normal(uniform: Any, n_quantiles: int) -> Any:
+    def _uniform_to_normal(uniform: FloatArray, n_quantiles: int) -> FloatArray:
         """Map the uniform output to a normal one without extreme tails.
 
         ``u`` is squeezed into ``[0.5/n, 1 - 0.5/n]`` (the mid-points of
@@ -176,7 +177,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
         """
         half = 0.5 / n_quantiles
 
-        def _map(values: np.ndarray) -> np.ndarray:
+        def _map(values: FloatArray) -> FloatArray:
             return np.asarray(
                 norm.ppf(half + np.clip(values, 0.0, 1.0) * (1.0 - 2.0 * half)),
                 dtype=values.dtype if values.dtype.kind == "f" else float,
@@ -184,7 +185,7 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
 
         return _map(np.asarray(uniform))
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """One-to-one mapping: one output column per input column.
 
         Args:
@@ -196,6 +197,6 @@ class _FoldSafeQuantileTransformer(TransformerMixin, BaseEstimator):  # type: ig
         """
         check_is_fitted(self, "_transformer_")
         return cast(
-            np.ndarray,
+            NamesArray,
             self._transformer_.get_feature_names_out(input_features),
         )

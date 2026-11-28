@@ -12,15 +12,18 @@ oversampling modules; none of them may import it.
 import logging
 import threading
 from collections import Counter
-from typing import Any, ClassVar, cast
+from collections.abc import Sequence
+from typing import ClassVar, cast
 
 import numpy as np
 import pandas as pd
 from imblearn.base import BaseSampler
 from imblearn.over_sampling import ADASYN, SMOTE, SMOTENC, RandomOverSampler
 from pandas.api.types import is_numeric_dtype
+from scipy import sparse as sp
 from sklearn.preprocessing import OrdinalEncoder
 
+from configurable_automl_engine.common.types import Array, FloatArray, Series
 from configurable_automl_engine.oversampling import experimental
 from configurable_automl_engine.oversampling.columns import (
     _add_gaussian_noise,
@@ -67,7 +70,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
     _sampling_type = "over-sampling"
 
-    _parameter_constraints: ClassVar[dict[str, list[Any]]] = {
+    _parameter_constraints: ClassVar[dict[str, list[object]]] = {
         "multiplier": [float, int],
         "algorithm": [str],
         "add_noise": ["boolean"],
@@ -104,8 +107,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         self._lock = threading.RLock()
 
     def _strategy(
-        self, y: pd.Series, multiplier: float, skip_missing_code: bool = False
-    ) -> dict[Any, int]:
+        self, y: Series, multiplier: float, skip_missing_code: bool = False
+    ) -> dict[object, int]:
         """Compute the target number of rows per class (see ``targets``)."""
         return _sampling_strategy(
             y,
@@ -117,7 +120,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _add_gaussian_noise(
         self,
         df: pd.DataFrame,
-        exclude_cols: list[str] | None = None,
+        exclude_cols: Sequence[object] | None = None,
         *,
         nonzero_only: bool = False,
     ) -> pd.DataFrame:
@@ -130,13 +133,15 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             nonzero_only=nonzero_only,
         )
 
-    def _add_sparse_gaussian_noise(self, X: Any) -> Any:
+    def _add_sparse_gaussian_noise(
+        self, X: sp.csr_matrix[np.float64] | sp.csc_matrix[np.float64]
+    ) -> sp.csr_matrix[np.float64]:
         """Add Gaussian noise to the non-zero elements (see ``columns``)."""
         return _add_sparse_gaussian_noise(
             X, noise_level=self.noise_level, random_state=self.random_state
         )
 
-    def __getstate__(self) -> dict[str, Any]:
+    def __getstate__(self) -> dict[str, object]:
         # Copy the object state
         state = self.__dict__.copy()
         # Remove the non-serializable lock object under its correct name
@@ -144,7 +149,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             del state["_lock"]
         return state
 
-    def __setstate__(self, state: dict[str, Any]) -> None:
+    def __setstate__(self, state: dict[str, object]) -> None:
         # Restore the state
         self.__dict__.update(state)
         # Re-initialize the lock after deserialization
@@ -154,7 +159,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     #  Section 1: Overriding fit_resample to bypass _check_X_y            #
     # ------------------------------------------------------------------ #
 
-    def fit_resample(self, X: Any, y: Any, **params: Any) -> tuple[Any, Any]:
+    def fit_resample(
+        self, X: object, y: object, **params: object
+    ) -> tuple[object, object]:
         """Perform resampling while bypassing _check_X_y (validate_data).
 
         The parent ``BaseSampler.fit_resample`` -> ``SamplerMixin.fit_resample``
@@ -190,12 +197,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     # ------------------------------------------------------------------ #
 
     def _restore_dtypes(
-        self, df: pd.DataFrame, original_dtypes: pd.Series
+        self, df: pd.DataFrame, original_dtypes: Series
     ) -> pd.DataFrame:
         """Restore the original data types (see ``columns``)."""
         return _restore_dtypes(df, original_dtypes, add_noise=self.add_noise)
 
-    def _fit_resample(self, X: Any, y: Any) -> tuple[Any, np.ndarray]:
+    def _fit_resample(self, X: object, y: object) -> tuple[object, Array]:
         """Resample the data according to the selected algorithm.
 
         The engine is regression-only: by default (``task="regression"``)
@@ -266,8 +273,8 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return self.multiplier_, self.target_bins, algo_local
 
     def _resample(
-        self, X: Any, y: Any, algo: str, multiplier: float, target_bins: int
-    ) -> tuple[Any, np.ndarray]:
+        self, X: object, y: object, algo: str, multiplier: float, target_bins: int
+    ) -> tuple[object, Array]:
         """Bin the target and dispatch to the resampling path of ``algo``."""
         # Regression mode (default): the engine never treats the target
         # as a class label. ANY numeric target (float or integer) is
@@ -288,7 +295,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         if hasattr(X, "tocsr"):
             if algo == "random":
                 return self._resample_sparse(
-                    X, target, self._target_strategy(target, multiplier)
+                    cast(sp.spmatrix[np.float64], X),
+                    target,
+                    self._target_strategy(target, multiplier),
                 )
             # SMOTE/ADASYN mathematically require dense distance matrices,
             # so a sparse input is converted to dense here, keeping the
@@ -296,7 +305,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
             noise_nonzero_only = True
 
-        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(cast(Array, X))
         # Binary indicator columns (one-hot / hashing output, missing
         # indicators, raw 0/1 flags) are detected BEFORE resampling. Two
         # uses: (1) Gaussian noise must never touch them; (2) on the SMOTER
@@ -347,7 +356,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
     def _target_strategy(
         self, target: _BinnedTarget, multiplier: float
-    ) -> dict[Any, int]:
+    ) -> dict[object, int]:
         """The sampling strategy of ``target`` (``-1`` skipped in regression)."""
         return self._strategy(
             target.y_fit, multiplier, skip_missing_code=target.is_regression
@@ -372,8 +381,11 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return cat_idx
 
     def _resample_sparse(
-        self, X: Any, target: _BinnedTarget, strategy: dict[Any, int]
-    ) -> tuple[Any, np.ndarray]:
+        self,
+        X: sp.spmatrix[np.float64],
+        target: _BinnedTarget,
+        strategy: dict[object, int],
+    ) -> tuple[object, Array]:
         """Random oversampling of a sparse matrix (output of hashing encoding).
 
         The data is already numeric, there are no categorical columns
@@ -395,7 +407,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
     @staticmethod
     def _encode_categoricals(
-        X_df: pd.DataFrame, cat_cols: list[Any]
+        X_df: pd.DataFrame, cat_cols: list[str]
     ) -> tuple[pd.DataFrame, OrdinalEncoder | None]:
         """Ordinal-encode the categorical columns (a copy; no-op without them)."""
         if not cat_cols:
@@ -408,10 +420,10 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
     def _resample_random(
         self,
         X_df: pd.DataFrame,
-        cat_cols: list[Any],
+        cat_cols: list[str],
         target: _BinnedTarget,
-        strategy: dict[Any, int],
-    ) -> tuple[Any, Any, OrdinalEncoder | None, RandomOverSampler]:
+        strategy: dict[object, int],
+    ) -> tuple[object, Array, OrdinalEncoder | None, RandomOverSampler]:
         """Random oversampling of a dense frame.
 
         Categorical features are encoded to pass ``_check_X_y`` inside
@@ -424,7 +436,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         return X_res_raw, y_res, encoder, sampler
 
     @staticmethod
-    def _active_counts(target: _BinnedTarget) -> Counter[Any]:
+    def _active_counts(target: _BinnedTarget) -> Counter[object]:
         """Per-class counts used by SMOTE/ADASYN.
 
         "-1" (missing target in the regression mode) is a pass-through
@@ -448,12 +460,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         self,
         X_df: pd.DataFrame,
         cat_idx: list[int],
-        cat_cols: list[Any],
+        cat_cols: list[str],
         target: _BinnedTarget,
-        strategy: dict[Any, int],
+        strategy: dict[object, int],
         algo: str,
         binary_idx: list[int] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, OrdinalEncoder | None]:
+    ) -> tuple[Array, Array, OrdinalEncoder | None]:
         """SMOTER-style generation for a binned regression target.
 
         Only bins with at least two rows can produce a same-bin neighbor
@@ -472,7 +484,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         # Number of synthetic rows per bin = final - original count.
         counts_binned = Counter(target.y_fit)
         n_to_generate: dict[int, int] = {
-            int(cls): max(0, int(tgt) - counts_binned.get(cls, 0))
+            int(cast(int, cls)): max(0, int(tgt) - counts_binned.get(cls, 0))
             for cls, tgt in strategy.items()
             if cls in growth_eligible
         }
@@ -500,9 +512,9 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         X_df: pd.DataFrame,
         cat_idx: list[int],
         target: _BinnedTarget,
-        strategy: dict[Any, int],
+        strategy: dict[object, int],
         algo: str,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[object, Array]:
         """SMOTE / SMOTENC / ADASYN for a classification target.
 
         All classes stay in the strategy and k is derived from the smallest
@@ -512,7 +524,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         because the original ADASYN only works with numeric data."""
         min_samples = min(self._active_counts(target).values())
         k_neighbors = max(1, min(5, min_samples - 1))
-        sampler: Any
+        sampler: RandomOverSampler | SMOTE | SMOTENC | ADASYN
         if cat_idx:
             if algo == "adasyn":
                 # IMPORTANT: Log the substitution to avoid misleading
@@ -538,16 +550,16 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
                 n_neighbors=k_neighbors,
                 random_state=self.random_state,
             )
-        return cast(tuple[Any, Any], sampler.fit_resample(X_df, target.y_fit))
+        return cast(tuple[object, Array], sampler.fit_resample(X_df, target.y_fit))
 
     def _postprocess(
         self,
-        X_res_raw: Any,
+        X_res_raw: object,
         X_df: pd.DataFrame,
         *,
-        cat_cols: list[Any],
+        cat_cols: list[str],
         encoder: OrdinalEncoder | None,
-        binary_cols: list[Any],
+        binary_cols: list[object],
         noise_nonzero_only: bool,
         algo: str,
     ) -> pd.DataFrame:
@@ -557,13 +569,15 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         (``None`` otherwise); ``noise_nonzero_only`` noises only the non-zero
         cells of dense data that arrived as a sparse matrix."""
         # Cast to DF since SMOTE may return numpy
-        X_res_df = pd.DataFrame(X_res_raw, columns=X_df.columns)[X_df.columns]
+        X_res_df = pd.DataFrame(cast(Array, X_res_raw), columns=X_df.columns)[
+            X_df.columns
+        ]
 
         # A single point of noise application for all algorithms
         # Categorical columns are excluded from the noise so as not to break
         # the subsequent decoding via OrdinalEncoder.inverse_transform
         if self.add_noise:
-            noise_exclude = list(cat_cols) if encoder is not None else []
+            noise_exclude: list[object] = list(cat_cols) if encoder is not None else []
             noise_exclude.extend(binary_cols)
             X_res_df = self._add_gaussian_noise(
                 X_res_df,
@@ -581,12 +595,12 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
 
     def _decode_regression_y(
         self,
-        y_res: Any,
-        y_original: pd.Series,
-        y_fit: pd.Series,
+        y_res: Sequence[float] | Array | Series,
+        y_original: Series,
+        y_fit: Series,
         bin_mids: dict[int, float],
-        sampler: Any,
-    ) -> np.ndarray:
+        sampler: object,
+    ) -> FloatArray:
         """Restore real regression targets after resampling (see ``targets``)."""
         return _decode_regression_y(y_res, y_original, y_fit, bin_mids, sampler)
 
@@ -655,7 +669,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
             # 3. Call the public resampling method
             X_res_np, y_res_np = self.fit_resample(X, y)
             # 4. Assemble the final DataFrame
-            res_df = pd.DataFrame(X_res_np, columns=X.columns)
+            res_df = pd.DataFrame(cast(Array, X_res_np), columns=X.columns)
 
             # 5. Restore data types (fix for lost types)
             res_df = self._restore_dtypes(res_df, original_dtypes)

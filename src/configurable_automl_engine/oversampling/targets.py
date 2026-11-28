@@ -9,12 +9,15 @@ record. The module must not import the other oversampling modules.
 """
 
 from collections import Counter
+from collections.abc import Sequence
 from math import ceil
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_numeric_dtype
+
+from configurable_automl_engine.common.types import Array, FloatArray, Series
 
 #: Default number of quantile bins used to discretize a regression target
 #: before the sampling strategy is computed. The binned groups imitate (and
@@ -33,8 +36,8 @@ CONTINUOUS_TARGET_MIN_BINS = MIN_TARGET_BINS
 
 #: Alias of :func:`_bin_regression_target` under the continuous-target name.
 def _bin_continuous_target(
-    y: pd.Series,
-) -> tuple[bool, pd.Series, dict[int, float]]:
+    y: Series,
+) -> tuple[bool, Series, dict[int, float]]:
     """Discretize a continuous regression target into quantile bin codes.
 
     Equivalent to :func:`_bin_regression_target` with the default bin
@@ -43,8 +46,8 @@ def _bin_continuous_target(
 
 
 def _bin_regression_target(
-    y: pd.Series, target_bins: int
-) -> tuple[bool, pd.Series, dict[int, float]]:
+    y: Series, target_bins: int
+) -> tuple[bool, Series, dict[int, float]]:
     """Discretize a numeric regression target into quantile bin codes.
 
     Runs a single quantile discretization and reuses it both for the
@@ -58,7 +61,7 @@ def _bin_regression_target(
     only when the tuple's first element is ``True``).
 
     Returns:
-        tuple[bool, pd.Series, dict[int, float]]: A triple of
+        tuple[bool, Series, dict[int, float]]: A triple of
             (is_regression, codes, bin_mids). When the target is not numeric
             (or cannot be discretized into at least :data:`MIN_TARGET_BINS`
             groups), returns ``(False, y, {})`` so the caller keeps the
@@ -83,7 +86,7 @@ def _bin_regression_target(
 
     finite_mask = y.notna()
     codes = np.asarray(finite_bins.cat.codes, dtype=np.int32)
-    binned: pd.Series = pd.Series(
+    binned: Series = pd.Series(
         np.full(len(y), -1, dtype=np.int32), index=y.index, name=y.name
     )
     binned.iloc[np.asarray(finite_mask)] = codes
@@ -94,7 +97,7 @@ def _bin_regression_target(
     return True, binned, bin_mids
 
 
-def _is_continuous_target(y: pd.Series) -> bool:
+def _is_continuous_target(y: Series) -> bool:
     """Determine whether a target vector is continuous regression data.
 
     A target is treated as regression data exactly when it is numeric and
@@ -106,7 +109,7 @@ def _is_continuous_target(y: pd.Series) -> bool:
     return _bin_regression_target(y, DEFAULT_TARGET_BINS)[0]
 
 
-def _prepare_continuous_bins(y: pd.Series) -> tuple[pd.Series, dict[int, float]]:
+def _prepare_continuous_bins(y: Series) -> tuple[Series, dict[int, float]]:
     """Discretize a continuous target into quantile bins (class codes).
 
     Equivalent to :func:`_bin_regression_target` with the default bin count.
@@ -123,11 +126,11 @@ def _prepare_continuous_bins(y: pd.Series) -> tuple[pd.Series, dict[int, float]]
 
 
 def _decode_continuous_y(
-    y_binned: Any,
-    y_original: pd.Series,
-    y_orig_codes: pd.Series,
+    y_binned: Sequence[float] | Array | Series,
+    y_original: Series,
+    y_orig_codes: Series,
     bin_mids: dict[int, float],
-) -> np.ndarray:
+) -> FloatArray:
     """Decode quantile-bin codes back into continuous target values.
 
     Original rows keep their real target values; each synthetic row receives
@@ -142,7 +145,7 @@ def _decode_continuous_y(
     original target values — it fails loudly instead.
 
     Returns:
-        np.ndarray: The continuous target vector for the resampled rows
+        FloatArray: The continuous target vector for the resampled rows
             (original values followed by the synthetic ones).
 
 
@@ -187,19 +190,19 @@ class _BinnedTarget(NamedTuple):
         bin_mids (dict[int, float]): Per-bin representative values.
     """
 
-    y_s: pd.Series
+    y_s: Series
     is_regression: bool
-    y_fit: pd.Series
+    y_fit: Series
     bin_mids: dict[int, float]
 
 
 def _decode_regression_y(
-    y_res: Any,
-    y_original: pd.Series,
-    y_fit: pd.Series,
+    y_res: Sequence[float] | Array | Series,
+    y_original: Series,
+    y_fit: Series,
     bin_mids: dict[int, float],
-    sampler: Any,
-) -> np.ndarray:
+    sampler: object,
+) -> FloatArray:
     """Restore real regression targets after resampling.
 
     * ``random``: every row (original or duplicated) gets the real
@@ -212,7 +215,7 @@ def _decode_regression_y(
     the imbalanced-learn samplers); any deviation fails loudly.
 
     Returns:
-        np.ndarray: The regression target vector for the resampled rows.
+        FloatArray: The regression target vector for the resampled rows.
     """
     if sampler is not None:
         indices = getattr(sampler, "sample_indices_", None)
@@ -221,7 +224,7 @@ def _decode_regression_y(
             # not expose sample_indices_ (defensive; the current
             # imbalanced-learn RandomOverSampler always sets it).
             return _decode_continuous_y(y_res, y_original, y_fit, bin_mids)
-        restored: np.ndarray = np.asarray(y_original, dtype=float)[np.asarray(indices)]
+        restored: FloatArray = np.asarray(y_original, dtype=float)[np.asarray(indices)]
         return restored
     y_arr = np.asarray(y_res)
     if len(y_arr) < len(y_original):
@@ -242,8 +245,8 @@ def _decode_regression_y(
 
 
 def _sampling_strategy(
-    y: pd.Series, multiplier: float, *, balance: bool, skip_missing_code: bool = False
-) -> dict[Any, int]:
+    y: Series, multiplier: float, *, balance: bool, skip_missing_code: bool = False
+) -> dict[object, int]:
     """Compute the target number of instances for each class.
 
     For a classification target (or the pseudo-classes of a binned
@@ -268,7 +271,7 @@ def _sampling_strategy(
             (pass-through only).
 
     Returns:
-        Dict[Any, int]: A dictionary where keys are class labels
+        dict[object, int]: A dictionary where keys are class labels
             and values are the final number of rows.
     """
     counts = Counter(y)

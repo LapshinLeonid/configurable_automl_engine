@@ -35,11 +35,20 @@ implementation instead of breaking the package import.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Protocol, cast
 
 import numpy as np
 
+from configurable_automl_engine.common.types import MetricFn, NamesArray
+
 logger = logging.getLogger(__name__)
+
+
+class _FeatureNameStore(Protocol):
+    """An estimator that records the names of its input features."""
+
+    feature_names_in_: NamesArray
+
 
 __all__ = [
     "check_feature_names",
@@ -53,7 +62,9 @@ except ImportError:  # pragma: no cover - exercised only on future sklearn relea
     _sk_check_feature_names = None
 
 
-def scorer_raw_parts(scorer: Any) -> tuple[Any, int, dict[str, Any]]:
+def scorer_raw_parts(
+    scorer: object,
+) -> tuple[MetricFn | None, int, dict[str, object]]:
     """Extract the raw metric parts of a scikit-learn ``make_scorer`` object.
 
     The pooled out-of-fold evaluation (``metrics.pooled_scorer_value``,
@@ -69,7 +80,7 @@ def scorer_raw_parts(scorer: Any) -> tuple[Any, int, dict[str, Any]]:
             ``_CallableScorer`` adapter or any duck-typed scorer).
 
     Returns:
-        tuple[Any, int, dict[str, Any]]: ``(score_func, sign, kwargs)``;
+        tuple[MetricFn | None, int, dict[str, object]]: ``(score_func, sign, kwargs)``;
             ``score_func`` is ``None`` when the scorer does not expose a raw
             metric function — such a scorer cannot be pooled and the caller
             falls back to per-fold averaging. ``sign`` defaults to ``+1`` and
@@ -78,10 +89,14 @@ def scorer_raw_parts(scorer: Any) -> tuple[Any, int, dict[str, Any]]:
     score_func = getattr(scorer, "_score_func", None)
     sign = getattr(scorer, "_sign", 1)
     kwargs = getattr(scorer, "_kwargs", None)
-    return score_func, int(sign), dict(kwargs) if kwargs else {}
+    return (
+        cast(MetricFn | None, score_func),
+        int(sign),
+        dict(kwargs) if kwargs else {},
+    )
 
 
-def scorer_sign(scorer: Any) -> int | None:
+def scorer_sign(scorer: object) -> int | None:
     """Return the direction flag of a scorer (``None`` when not exposed).
 
     ``+1`` — "higher is better" (score metrics), ``-1`` — an inverted error
@@ -100,7 +115,7 @@ def scorer_sign(scorer: Any) -> int | None:
     return None if sign is None else int(sign)
 
 
-def _record_feature_names(estimator: Any, X: Any) -> None:
+def _record_feature_names(estimator: object, X: object) -> None:
     """Record ``feature_names_in_`` on ``estimator`` from ``X`` (public fallback).
 
     The own implementation of the ``reset=True`` branch of scikit-learn's
@@ -120,10 +135,12 @@ def _record_feature_names(estimator: Any, X: Any) -> None:
         if hasattr(estimator, "feature_names_in_"):
             delattr(estimator, "feature_names_in_")
         return
-    estimator.feature_names_in_ = np.asarray(list(columns), dtype=object)
+    cast(_FeatureNameStore, estimator).feature_names_in_ = np.asarray(
+        list(columns), dtype=object
+    )
 
 
-def check_feature_names(estimator: Any, X: Any) -> None:
+def check_feature_names(estimator: object, X: object) -> None:
     """Record the input feature names on ``estimator`` (the ``fit`` convention).
 
     The ``reset=True`` half of scikit-learn's private

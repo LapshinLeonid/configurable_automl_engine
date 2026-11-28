@@ -32,8 +32,9 @@ import math
 import time
 import uuid
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import pandas as pd
 from optuna.trial import TrialState
@@ -42,6 +43,7 @@ from configurable_automl_engine.common.datetime_features import (
     datetime_expansion_columns,
 )
 from configurable_automl_engine.common.metrics import register_custom_metrics
+from configurable_automl_engine.common.types import JSONDict
 from configurable_automl_engine.oversampling import experimental as _oversampling
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
@@ -75,6 +77,7 @@ from .state import (
     SelectOutcome,
     WorkerOutcome,
     _HpoPhaseSpec,
+    _HPOWorkerResult,
 )
 from .thread_pool import TaskOutcome, run_parallel_outcomes
 
@@ -83,7 +86,7 @@ __all__ = ["execute_phases", "train_best_model"]
 _LOG = logging.getLogger(__name__)
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> object:
     """Return the latest result through the deprecated compatibility alias."""
     if name == "last_experiment_result":
         warnings.warn(
@@ -441,7 +444,7 @@ def _build_phase_spec(
         collect_oof: Whether the OOF predictions are kept for BBC-CV.
     """
     ovr = cfg.oversampling
-    pruning_cfg: dict[str, Any] | None = None
+    pruning_cfg: dict[str, object] | None = None
     if cfg.general.pruning.enable:
         pruning_cfg = {
             "enable": cfg.general.pruning.enable,
@@ -540,7 +543,9 @@ def _run_phase_workers(
         ctx.disqualified_algorithms.update(
             _lost_worker_reasons(list(current_candidates), outcomes)
         )
-        results = [o.value if o.ok else None for o in outcomes]
+        results: list[_HPOWorkerResult | None] = [
+            cast(_HPOWorkerResult, o.value) if o.ok else None for o in outcomes
+        ]
         _apply_worker_outcome(ctx, phase_results, _consume_worker_results(results))
     else:
         for n, a in current_candidates.items():
@@ -632,13 +637,13 @@ def _valid_phase_results(
 
 
 def train_best_model(
-    config: str | Path | Config | dict[str, Any],
+    config: str | Path | Config | Mapping[str, object],
     df: pd.DataFrame,
     target: str | None = None,
     model_path_override: str | Path | None = None,
     *,
     run_token: uuid.UUID | None = None,
-) -> dict[str, Any]:
+) -> JSONDict:
     """Main interface for training the best model.
 
     Orchestrates the decomposed pipeline (``load_config → prepare_dataset →
@@ -690,7 +695,7 @@ def train_best_model(
             with it for owner recognition. The dict result return
             value is not affected.
     Returns:
-        Dict[str, Any]: A dict with the results: the algorithm name, ``score``
+        JSONDict: A dict with the results: the algorithm name, ``score``
             — the metric value in user semantics (positive RMSE/MAE, plain R²;
             for neg_-scorers the value is inverted back), ``metric`` — the
             user-facing comparison metric name, the parameters, and the file
@@ -799,7 +804,7 @@ def _run_after_phases(
     model_path_override: str | Path | None,
     run_finished: _RunFinish,
     run_token: uuid.UUID | None = None,
-) -> dict[str, Any]:
+) -> JSONDict:
     """Finish the run after ``execute_phases``: winner checks, the final
     artifact, and the ``ExperimentResult`` assembly.
 
@@ -897,7 +902,7 @@ def _build_and_attach_ensemble(
     cfg: Config,
     prepared: PreparedData,
     ctx: PhaseContext,
-    result: dict[str, Any],
+    result: JSONDict,
 ) -> None:
     """Build the experimental ensemble and attach its report to the result.
 

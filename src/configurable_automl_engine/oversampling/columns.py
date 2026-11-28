@@ -10,16 +10,19 @@ modules.
 """
 
 import logging
-from typing import Any
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
+from scipy import sparse as sp
+
+from configurable_automl_engine.common.types import Series
 
 logger = logging.getLogger(__name__)
 
 
-def _is_categorical_col(s: pd.Series) -> bool:
+def _is_categorical_col(s: Series) -> bool:
     """Determine whether a column should be considered categorical.
 
     Detection rule:
@@ -38,7 +41,7 @@ def _is_categorical_col(s: pd.Series) -> bool:
     return bool(converted.isna().any())
 
 
-def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
+def _binary_indicator_columns(df: pd.DataFrame) -> list[object]:
     """Find the binary indicator columns of a DataFrame.
 
     A column is an indicator when its non-missing values take at most two
@@ -54,7 +57,7 @@ def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
     levels, so the oversampler excludes them from the noise. Boolean columns
     are not returned: the noise step never touches them anyway."""
     numeric = df.select_dtypes(include=[np.number])
-    binary: list[Any] = []
+    binary: list[object] = []
     if not numeric.empty:
         n_distinct = numeric.nunique(dropna=True).to_numpy()
         mask = (n_distinct >= 1) & (n_distinct <= 2)
@@ -70,7 +73,7 @@ def _binary_indicator_columns(df: pd.DataFrame) -> list[Any]:
 
 def _add_gaussian_noise(
     df: pd.DataFrame,
-    exclude_cols: list[str] | None = None,
+    exclude_cols: Sequence[object] | None = None,
     *,
     noise_level: float,
     random_state: int | None,
@@ -108,7 +111,7 @@ def _add_gaussian_noise(
 
     # Exclude columns that must not be noised (e.g. ordinal-encoded)
     if exclude_cols:
-        numeric_cols = numeric_cols.difference(exclude_cols)
+        numeric_cols = numeric_cols.difference(list(exclude_cols))
 
     if not numeric_cols.empty:
         # Vectorized noise addition for all numeric columns at once
@@ -125,8 +128,11 @@ def _add_gaussian_noise(
 
 
 def _add_sparse_gaussian_noise(
-    X: Any, *, noise_level: float, random_state: int | None
-) -> Any:
+    X: sp.csr_matrix[np.float64] | sp.csc_matrix[np.float64],
+    *,
+    noise_level: float,
+    random_state: int | None,
+) -> sp.csr_matrix[np.float64]:
     """Add Gaussian noise to the stored non-zero elements of a sparse matrix.
 
     Noising every cell would turn each zero into a non-zero value and
@@ -186,7 +192,7 @@ def _add_sparse_gaussian_noise(
 
 
 def _restore_dtypes(
-    df: pd.DataFrame, original_dtypes: pd.Series, *, add_noise: bool
+    df: pd.DataFrame, original_dtypes: Series, *, add_noise: bool
 ) -> pd.DataFrame:
     """Restore data types with adaptation to the changes made.
 

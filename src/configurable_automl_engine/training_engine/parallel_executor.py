@@ -14,11 +14,11 @@ import logging
 import multiprocessing
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
-from typing import Any
+from typing import Protocol, cast
 
 __all__ = ["create_process_pool", "force_shutdown", "resolve_context"]
 
@@ -26,6 +26,27 @@ logger = logging.getLogger(__name__)
 
 #: Python 3.14 added ProcessPoolExecutor.terminate_workers / kill_workers.
 _HAS_PUBLIC_TERMINATE = hasattr(ProcessPoolExecutor, "terminate_workers")
+
+
+class _Initializer(Protocol):
+    """Worker initializer callable of a process pool."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        """Run in a worker before its first task."""
+        ...  # pragma: no cover - protocol definition
+
+
+class _PublicTerminatePool(Protocol):
+    """The Python 3.14 forced-shutdown methods of a process pool."""
+
+    def terminate_workers(self) -> None:
+        """Terminate the live workers with SIGTERM."""
+        ...  # pragma: no cover - protocol definition
+
+    def kill_workers(self) -> None:
+        """Kill the live workers with SIGKILL."""
+        ...  # pragma: no cover - protocol definition
+
 
 #: How often a forced shutdown checks whether the workers have exited.
 _EXIT_POLL = 0.05
@@ -80,8 +101,8 @@ def resolve_context(
 def create_process_pool(
     max_workers: int | None,
     mp_context: BaseContext | None,
-    initializer: Callable[..., object] | None = None,
-    initargs: tuple[Any, ...] = (),
+    initializer: _Initializer | None = None,
+    initargs: tuple[object, ...] = (),
 ) -> ProcessPoolExecutor:
     """Create a process pool (the workers start lazily, on submit).
 
@@ -93,7 +114,10 @@ def create_process_pool(
         initargs: The initializer arguments.
     """
     return ProcessPoolExecutor(
-        max_workers, mp_context=mp_context, initializer=initializer, initargs=initargs
+        max_workers,
+        mp_context=mp_context,
+        initializer=initializer,
+        initargs=cast(tuple[()], initargs),
     )
 
 
@@ -138,7 +162,7 @@ def force_shutdown(
         ``-SIGTERM`` (or ``-SIGKILL``).
     """
     workers, manager = _pool_internals(pool)
-    public: Any = pool  # terminate_workers / kill_workers: Python 3.14+
+    public = cast(_PublicTerminatePool, pool)
     if _HAS_PUBLIC_TERMINATE and grace_period <= 0:
         public.kill_workers()
     elif _HAS_PUBLIC_TERMINATE:

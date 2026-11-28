@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import cast
 
 import numpy as np
 
@@ -162,7 +162,7 @@ def _describe_entry(entry: SearchSpaceEntry) -> str:
     return f"[{config.low}, {config.high}]"
 
 
-def _target_min(y: Any) -> float | None:
+def _target_min(y: object) -> float | None:
     """Return the minimum of the finite target values."""
     try:
         arr = np.asarray(y, dtype=float).ravel()
@@ -176,8 +176,8 @@ def _target_min(y: Any) -> float | None:
 
 def check_target_domain(
     algo_name: str,
-    search_space: dict[str, Any],
-    y: Any,
+    search_space: dict[str, object],
+    y: object,
 ) -> TargetDomainCheck:
     """Check that an algorithm's loss domain fits the target before HPO.
 
@@ -224,7 +224,7 @@ def check_target_domain(
     if not isinstance(power, SearchSpaceEntry):
         # A fixed value (not searched): either valid or not.
         try:
-            power_value = float(power)
+            power_value = float(cast(float | int | str, power))
         except (TypeError, ValueError):
             return TargetDomainCheck()
         if tweedie_power_is_valid(power_value, y_min):

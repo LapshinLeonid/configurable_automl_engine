@@ -10,7 +10,6 @@ the preprocessor builder.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import pandas as pd
 
@@ -175,7 +174,7 @@ def _clean_uninformative_features(
 
 
 def estimate_n_features_after_preprocessing(
-    X: Any,
+    X: object,
     *,
     categorical_features: list[str],
     numerical_features: list[str],

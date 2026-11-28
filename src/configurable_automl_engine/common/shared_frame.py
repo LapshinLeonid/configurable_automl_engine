@@ -12,9 +12,9 @@ The process-pool machinery that uses it (``run_parallel``) lives in
 
 import os
 from multiprocessing import shared_memory
-from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 __all__ = ["SharedDataFrame"]
@@ -35,7 +35,9 @@ __all__ = ["SharedDataFrame"]
 _SHM_FREE_SPACE_MARGIN = 0.3  # 30% of a segment's size must remain free
 
 
-def _numpy_result_dtype(df: pd.DataFrame) -> np.dtype | None:
+def _numpy_result_dtype(
+    df: pd.DataFrame,
+) -> np.dtype[np.object_] | np.dtype[np.float64] | np.dtype[np.bool_] | None:
     """Return the dtype of an array that ``df.to_numpy()`` would produce.
 
     Computed WITHOUT materializing the array itself: for a frame with mixed
@@ -206,7 +208,7 @@ class SharedDataFrame:
         df: pd.DataFrame | None = None,
         name: str | None = None,
         shape: tuple[int, ...] | None = None,
-        dtype: np.dtype | Any = None,
+        dtype: npt.DTypeLike | None = None,
         columns: list[str] | None = None,
     ) -> None:
         """Initialize a shared memory object for a DataFrame.
@@ -290,7 +292,7 @@ class SharedDataFrame:
             self.columns = columns
 
     @staticmethod
-    def is_shared_array(X: Any) -> bool:
+    def is_shared_array(X: object) -> bool:
         """
         Check whether an object is a numpy array backed by SharedMemory.
         This is critical for avoiding repeated copying in ModelTrainer.
@@ -302,7 +304,7 @@ class SharedDataFrame:
         return hasattr(X, "base") and isinstance(X.base, memoryview)
 
     @staticmethod
-    def get_data_info(X: Any) -> tuple[int, list[str] | list[int]]:
+    def get_data_info(X: object) -> tuple[int, list[str] | list[int]]:
         """
         Extract the number of features and their names (or indices) without copying.
         """
@@ -321,7 +323,7 @@ class SharedDataFrame:
         return 0, []
 
     @staticmethod
-    def is_compatible(df: Any) -> bool:
+    def is_compatible(df: object) -> bool:
         """Check whether a DF can be placed into SHM.
 
         A DataFrame is compatible when its data can be copied into shared

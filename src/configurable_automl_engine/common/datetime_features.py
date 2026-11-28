@@ -12,10 +12,11 @@ module must not import :mod:`.validation_utils`.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from configurable_automl_engine.common.types import Series
 
 
 def _format_column_list(columns: list[str]) -> str:
@@ -47,7 +48,7 @@ _TIMEDELTA_COMPONENTS: dict[str, str] = {
 }
 
 
-def _datetime_parts(series: pd.Series) -> dict[str, pd.Series]:
+def _datetime_parts(series: Series) -> dict[str, Series]:
     """Derive numeric components from a datetime/timedelta column.
 
     For datetime columns the components are ``year``, ``month``, ``day``,
@@ -59,7 +60,7 @@ def _datetime_parts(series: pd.Series) -> dict[str, pd.Series]:
             part: getattr(series.dt, attr)
             for part, attr in _TIMEDELTA_COMPONENTS.items()
         }
-    parts: dict[str, pd.Series] = {
+    parts: dict[str, Series] = {
         part: getattr(series.dt, attr)
         for part, attr in _DATETIME_COMPONENTS.items()
         if part != "hour"
@@ -70,7 +71,7 @@ def _datetime_parts(series: pd.Series) -> dict[str, pd.Series]:
     return parts
 
 
-def _is_datetime_like(series: pd.Series) -> bool:
+def _is_datetime_like(series: Series) -> bool:
     """Whether a column has a datetime64 or timedelta64 dtype."""
     return bool(
         pd.api.types.is_datetime64_any_dtype(series.dtype)
@@ -136,7 +137,7 @@ def datetime_expansion_columns(expansion: dict[str, list[str]]) -> list[str]:
     return [name for names in expansion.values() for name in names]
 
 
-def generated_datetime_columns(X_raw: Any, X_validated: Any) -> list[str]:
+def generated_datetime_columns(X_raw: object, X_validated: object) -> list[str]:
     """Datetime-derived component columns of a validated feature matrix.
 
     The default ``winsorizer_exclude`` of a direct ``tuner.optimize()``

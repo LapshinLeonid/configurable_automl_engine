@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, cast
+from collections.abc import Iterable
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ from sklearn.preprocessing import (
 from sklearn.utils.validation import check_is_fitted
 
 from configurable_automl_engine.common.definitions import EncodingStrategy
+from configurable_automl_engine.common.types import FloatArray, IntArray, NamesArray
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ _VALID_ENCODING_STRATEGIES = (
 )
 
 
-def _to_string_array(X: Any) -> np.ndarray:
+def _to_string_array(X: object) -> NamesArray:
     """Convert a categorical matrix to a string object array, keeping missing values.
 
     ``np.ndarray.astype(str)`` produces fixed-width unicode (``<U``), while
@@ -64,7 +66,7 @@ def _to_string_array(X: Any) -> np.ndarray:
     return string_arr
 
 
-def _as_2d(X: Any) -> np.ndarray:
+def _as_2d(X: object) -> NamesArray:
     """Reduce the transformer input to a two-dimensional array (n_samples, n_cols)."""
     arr = np.asarray(X)
     if arr.ndim == 1:
@@ -72,7 +74,7 @@ def _as_2d(X: Any) -> np.ndarray:
     return arr
 
 
-def _validate_target(X: Any, y: Any) -> tuple[np.ndarray, np.ndarray]:
+def _validate_target(X: object, y: object) -> tuple[NamesArray, FloatArray]:
     """Prepare (X, y) for target encoding.
 
     Returns a two-dimensional categorical array ``X_arr`` and a numeric
@@ -163,7 +165,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         self.cv = cv
         self.random_state = random_state
 
-    def fit(self, X: Any, y: Any = None) -> TargetEncodingTransformer:
+    def fit(self, X: object, y: object = None) -> TargetEncodingTransformer:
         """Compute target statistics from the training data.
 
         The statistics are computed over the whole provided sample; the
@@ -177,7 +179,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
 
         Returns:
             Fitted transformer. Statistics for each column are stored in
-            ``statistics_`` as ``dict[Any, float]``: keys mirror the original
+            ``statistics_`` as ``dict[object, float]``: keys mirror the original
             category values (types are not normalized to strings).
 
         Raises:
@@ -189,7 +191,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
         self.fallback_ = (
             self.global_mean_ if self.fallback is None else float(self.fallback)
         )
-        self.statistics_: list[dict[Any, float]] = []
+        self.statistics_: list[dict[object, float]] = []
         for col in range(X_arr.shape[1]):
             group = pd.DataFrame(
                 {"cat": pd.Series(X_arr[:, col]), "target": y_float}
@@ -203,7 +205,9 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
             )
         return self
 
-    def fit_transform(self, X: Any, y: Any = None, **fit_params: Any) -> np.ndarray:
+    def fit_transform(
+        self, X: object, y: object = None, **fit_params: object
+    ) -> FloatArray:
         """Encode training rows with cross-fitting.
 
         Each row is encoded with statistics computed on the fold it is **not**
@@ -260,7 +264,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
             out[val_idx] = fold.transform(X_arr[val_idx])
         return out
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: object) -> FloatArray:
         """Replace categories with their target values.
 
         Args:
@@ -280,7 +284,7 @@ class TargetEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ignor
             out[:, col] = mapped.fillna(self.fallback_).to_numpy(dtype=np.float64)
         return out
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Return output feature names (1 column per input column)."""
         check_is_fitted(self, attributes=["statistics_"])
         names = _feature_names(input_features, len(self.statistics_))
@@ -295,7 +299,7 @@ class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ig
     are computed only from the training part in :meth:`fit`.
     """
 
-    def fit(self, X: Any, y: Any = None) -> FrequencyEncodingTransformer:
+    def fit(self, X: object, y: object = None) -> FrequencyEncodingTransformer:
         """Compute category frequencies from the training data.
 
         Args:
@@ -307,14 +311,14 @@ class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ig
         """
         X_arr = _as_2d(X)
         n_rows = X_arr.shape[0]
-        self.frequencies_: list[dict[str, float]] = []
+        self.frequencies_: list[dict[object, float]] = []
         self.n_columns_ = X_arr.shape[1]
         for col in range(X_arr.shape[1]):
             counts = pd.Series(X_arr[:, col]).value_counts(dropna=False)
             self.frequencies_.append((counts / n_rows).to_dict())
         return self
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: object) -> FloatArray:
         """Replace categories with their frequencies.
 
         Args:
@@ -331,7 +335,7 @@ class FrequencyEncodingTransformer(BaseEstimator, TransformerMixin):  # type: ig
             out[:, col] = mapped.fillna(0.0).to_numpy(dtype=np.float64)
         return out
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Return output feature names (1 column per input column)."""
         check_is_fitted(self, attributes=["frequencies_"])
         names = _feature_names(input_features, self.n_columns_)
@@ -367,7 +371,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         self.n_components = n_components
         self.random_state = random_state
 
-    def _hash_token(self, token: Any, salt: str) -> int:
+    def _hash_token(self, token: object, salt: str) -> int:
         """Deterministically hash a category into ``[0, n_components)``.
 
         The salt is prepended to the message (rather than passed as the blake2b
@@ -381,7 +385,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         digest.update(str(token).encode("utf-8", errors="replace"))
         return int.from_bytes(digest.digest(), byteorder="little") % self.n_components
 
-    def fit(self, X: Any, y: Any = None) -> HashingEncodingTransformer:
+    def fit(self, X: object, y: object = None) -> HashingEncodingTransformer:
         """Prepare salts for each column.
 
         Args:
@@ -398,7 +402,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         ]
         return self
 
-    def transform(self, X: Any) -> sp.csr_matrix:
+    def transform(self, X: object) -> sp.csr_matrix[np.float64]:
         """Encode categories as binary hash columns.
 
         Returns a sparse matrix ``scipy.sparse.csr_matrix``
@@ -422,7 +426,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         # so nnz = n_rows * n_cols. Hash collisions within a single column are
         # impossible for one row (one category per row), so no duplicates arise
         # in COO, and the sum over rows is always n_cols (binarity).
-        col_blocks: list[np.ndarray] = []
+        col_blocks: list[IntArray] = []
         for col in range(n_cols):
             uniq, inverse = np.unique(X_arr[:, col], return_inverse=True)
             hashed = np.array(
@@ -440,7 +444,7 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         )
         return out.tocsr()
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Return output feature names (``n_components`` per input column)."""
         check_is_fitted(self, attributes=["salts_"])
         base = _feature_names(input_features, self.n_columns_)
@@ -452,11 +456,11 @@ class HashingEncodingTransformer(BaseEstimator, TransformerMixin):  # type: igno
         return np.asarray(names, dtype=object)
 
 
-def _feature_names(input_features: Any, n_columns: int) -> list[str]:
+def _feature_names(input_features: object, n_columns: int) -> list[str]:
     """Build a list of names for ``n_columns`` input features."""
     if input_features is None:
         return [f"cat_{i}" for i in range(n_columns)]
-    features = list(input_features)
+    features = cast(list[str], list(cast(Iterable[object], input_features)))
     if len(features) != n_columns:
         raise ValueError(
             f"input_features has {len(features)} elements, expected {n_columns}."
@@ -555,7 +559,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             f"expected one of {_VALID_ENCODING_STRATEGIES}."
         )
 
-    def _prepare(self, X: Any) -> np.ndarray:
+    def _prepare(self, X: object) -> NamesArray:
         """Validate parameters, split columns, and create the encoders.
 
         The shared part of :meth:`fit` and :meth:`fit_transform`: strategy
@@ -628,8 +632,8 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
 
     @staticmethod
     def _concat_parts(
-        parts: list[np.ndarray | sp.spmatrix], n_rows: int
-    ) -> np.ndarray | sp.spmatrix:
+        parts: list[FloatArray | sp.csr_matrix[np.float64]], n_rows: int
+    ) -> FloatArray | sp.csr_matrix[np.float64]:
         """Concatenate the default- and HC-encoder outputs into one matrix.
 
         If at least one part is sparse (sparse one-hot or hashing encoding),
@@ -645,13 +649,13 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         if any(sp.issparse(part) for part in parts):
             # scipy-stubs do not describe heterogeneous sequences
             # (ndarray | spmatrix) for hstack: cast the blocks to a common type.
-            sparse_blocks = cast(list[sp.spmatrix], parts)
+            sparse_blocks = cast(list[sp.csr_matrix[np.float64]], parts)
             return sp.hstack(sparse_blocks).tocsr()
         # All parts are dense (the sparse branch above) — a plain np.hstack.
-        dense_blocks = cast(list[np.ndarray], parts)
-        return np.hstack(dense_blocks)
+        dense_blocks = cast(list[FloatArray], parts)
+        return cast(FloatArray, np.hstack(dense_blocks))
 
-    def fit(self, X: Any, y: Any = None) -> SplitCategoricalEncoder:
+    def fit(self, X: object, y: object = None) -> SplitCategoricalEncoder:
         """Split columns by cardinality and fit the encoders.
 
         The internal encoders (``default_encoder_``/``hc_encoder_``) are created
@@ -684,8 +688,8 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         return self
 
     def fit_transform(
-        self, X: Any, y: Any = None, **fit_params: Any
-    ) -> np.ndarray | sp.spmatrix:
+        self, X: object, y: object = None, **fit_params: object
+    ) -> FloatArray | sp.csr_matrix[np.float64]:
         """Encode columns through the ``fit_transform`` of the internal encoders.
 
         Delegates to :meth:`TargetEncodingTransformer.fit_transform`
@@ -715,7 +719,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         # the encoders.
         if not self.default_columns_ and not self.hc_columns_:
             return np.empty((X_arr.shape[0], 0), dtype=np.float64)
-        parts: list[np.ndarray | sp.spmatrix] = []
+        parts: list[FloatArray | sp.csr_matrix[np.float64]] = []
         if self.default_columns_:
             parts.append(
                 self.default_encoder_.fit_transform(X_arr[:, self.default_columns_], y)
@@ -728,7 +732,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             parts.append(self.hc_encoder_.fit_transform(X_arr[:, self.hc_columns_], y))
         return self._concat_parts(parts, X_arr.shape[0])
 
-    def transform(self, X: Any) -> np.ndarray | sp.spmatrix:
+    def transform(self, X: object) -> FloatArray | sp.csr_matrix[np.float64]:
         """Encode columns with the selected strategies and concatenate the result.
 
         Uses the statistics stored on the internal encoders during
@@ -744,7 +748,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         """
         check_is_fitted(self, attributes=["default_columns_"])
         X_arr = _as_2d(X)
-        parts: list[np.ndarray | sp.spmatrix] = []
+        parts: list[FloatArray | sp.csr_matrix[np.float64]] = []
         if self.default_columns_:
             parts.append(
                 self.default_encoder_.transform(X_arr[:, self.default_columns_])
@@ -753,7 +757,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
             parts.append(self.hc_encoder_.transform(X_arr[:, self.hc_columns_]))
         return self._concat_parts(parts, X_arr.shape[0])
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Return output feature names in concatenation order."""
         check_is_fitted(self, attributes=["default_columns_"])
         n_columns = len(self.default_columns_) + len(self.hc_columns_)

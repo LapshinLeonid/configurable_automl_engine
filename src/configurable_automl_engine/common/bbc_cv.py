@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import cast
 
 import numpy as np
 from sklearn.metrics import (
@@ -36,6 +36,7 @@ from .scorer_primitives import (
     rmse,
 )
 from .sklearn_compat import scorer_raw_parts
+from .types import FloatArray, Scorer
 
 _LOG = logging.getLogger(__name__)
 
@@ -57,8 +58,8 @@ BBC_TIME_BUDGET_SECONDS = 60.0
 
 
 def _columnwise_raw_values(
-    scorer: Any, y_true: np.ndarray, preds: np.ndarray
-) -> np.ndarray:
+    scorer: object, y_true: FloatArray, preds: FloatArray
+) -> FloatArray:
     """Compute the raw (sign-applied) scorer value for every prediction column.
 
     The comparison metrics of the engine (RMSE, MSE, MAE, R², NRMSE) are
@@ -78,7 +79,7 @@ def _columnwise_raw_values(
 
 
     Returns:
-        np.ndarray: The raw value of every column, shape ``(n_columns,)``.
+        FloatArray: The raw value of every column, shape ``(n_columns,)``.
     """
     score_func, raw_sign, kwargs = scorer_raw_parts(scorer)
     sign = float(raw_sign)
@@ -120,16 +121,16 @@ def _columnwise_raw_values(
     out = np.full(preds.shape[1], np.nan, dtype=float)
     for col in range(preds.shape[1]):
         try:
-            out[col] = pooled_scorer_value(scorer, y_true, preds[:, col])
+            out[col] = pooled_scorer_value(cast(Scorer, scorer), y_true, preds[:, col])
         except (ValueError, TypeError):
             continue
     return out
 
 
 def bbc_cv_score(
-    scorer: Any,
-    y_true: Any,
-    oof_matrix: Any,
+    scorer: object,
+    y_true: object,
+    oof_matrix: object,
     *,
     n_bootstrap: int = BBC_N_BOOTSTRAP,
     random_state: int | None = None,
@@ -270,9 +271,9 @@ def bbc_cv_score(
 
 
 def _bbc_mean_oob(
-    scorer: Any,
-    y: np.ndarray,
-    preds: np.ndarray,
+    scorer: object,
+    y: FloatArray,
+    preds: FloatArray,
     n_bootstrap: int,
     random_state: int | None,
     time_budget: float | None = None,

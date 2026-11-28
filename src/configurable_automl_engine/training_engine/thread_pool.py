@@ -35,7 +35,11 @@ from multiprocessing.context import BaseContext
 from typing import ParamSpec, Protocol, cast
 
 from .parallel_deadlines import POLL_INTERVAL
-from .parallel_executor import create_process_pool, resolve_context
+from .parallel_executor import (
+    _Initializer as _ExecutorInitializer,
+    create_process_pool,
+    resolve_context,
+)
 from .parallel_logging import WorkerLogForwarding
 from .parallel_outcome import TaskError, TaskOutcome
 from .parallel_supervisor import (
@@ -44,6 +48,7 @@ from .parallel_supervisor import (
     is_infrastructure_error,
 )
 from .parallel_transport import DiskPersistenceManager, PayloadTransport
+from .parallel_worker import _TaskFunc
 
 _P = ParamSpec("_P")
 
@@ -214,7 +219,7 @@ def _run_processes(
                 WorkerLogForwarding(ctx, _importable_module(func))
             )
             supervisor = ProcessPoolSupervisor(
-                func,
+                cast(_TaskFunc, func),
                 payloads,
                 max_workers=max_workers,
                 mp_context=ctx,
@@ -223,7 +228,7 @@ def _run_processes(
                 shutdown_grace_period=shutdown_grace_period,
                 pool_factory=partial(
                     create_process_pool,
-                    initializer=forwarding.initializer,
+                    initializer=cast(_ExecutorInitializer, forwarding.initializer),
                     initargs=forwarding.initargs,
                 ),
             )

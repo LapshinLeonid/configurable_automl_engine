@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Any
 
 from pydantic import ValidationError
+from sklearn.base import TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -218,7 +218,7 @@ def build_preprocessor(
         )
         return _passthrough_transformer(force_dense_output)
 
-    transformers: list[tuple[str, Any, ColumnNameSelector]] = []
+    transformers: list[tuple[str, TransformerMixin, ColumnNameSelector]] = []
     if categorical_features:
         # Name-based selector: for pd.DataFrame the columns are selected by
         # name on each fit/transform (column order does not matter); for
@@ -466,7 +466,7 @@ def _build_numerical_pipeline(
     Returns:
         The pipeline that winsorizes, imputes and scales numerical columns.
     """
-    num_steps: list[tuple[str, Any]] = []
+    num_steps: list[tuple[str, TransformerMixin]] = []
     if winsorizer is not None:
         num_steps.append(("winsorizer", winsorizer))
     num_steps.append(
@@ -498,7 +498,7 @@ def _passthrough_transformer(force_dense_output: bool) -> ColumnTransformer:
 
 
 def _build_column_transformer(
-    transformers: list[tuple[str, Any, ColumnNameSelector]],
+    transformers: list[tuple[str, TransformerMixin, ColumnNameSelector]],
     force_dense_output: bool,
 ) -> ColumnTransformer:
     """Assemble the final ``ColumnTransformer``.

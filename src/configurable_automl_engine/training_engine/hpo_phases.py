@@ -13,10 +13,9 @@ only and must not import ``data_prep``, ``finalists``, ``select_steps``,
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable
-from typing import Any, cast
+from collections.abc import Collection, Iterable, Mapping
+from typing import Protocol, cast
 
-import numpy as np
 import pandas as pd
 from optuna.trial import FrozenTrial
 
@@ -32,6 +31,7 @@ from configurable_automl_engine.common.settings import (
     InputPolicies,
     OversamplingSettings,
 )
+from configurable_automl_engine.common.types import Array, Series
 from configurable_automl_engine.hpo.request import (
     HpoRequest,
     SplitAggregation,
@@ -68,14 +68,21 @@ from .state import (
 _LOG = logging.getLogger(__name__)
 
 
-def _algorithms_as_dict(algorithms_cfg: Any) -> dict[str, AlgoCfg]:
+class _PydanticModelClass(Protocol):
+    """A Pydantic model class exposing its declared fields."""
+
+    model_fields: Mapping[str, object]
+
+
+def _algorithms_as_dict(algorithms_cfg: object) -> dict[str, AlgoCfg]:
     """Convert an AlgorithmsConfig into a plain dictionary {name: AlgoCfg}."""
     # model_fields via an instance also works, but it is deprecated
     # (PydanticDeprecatedSince211, removal in V3.0) — use the class
+    fields = cast(type[_PydanticModelClass], type(algorithms_cfg)).model_fields
     return {
         name: algo_cfg
-        for name in type(algorithms_cfg).model_fields
-        if (algo_cfg := getattr(algorithms_cfg, name)) is not None
+        for name in fields
+        if (algo_cfg := cast(AlgoCfg, getattr(algorithms_cfg, name))) is not None
     }
 
 
@@ -87,7 +94,7 @@ def _build_hpo_request(
     algo_cfg: AlgoCfg,
     spec: _HpoPhaseSpec,
     *,
-    initial_params: dict[str, Any] | None = None,
+    initial_params: dict[str, object] | None = None,
     previous_trials: list[FrozenTrial] | None = None,
 ) -> HpoRequest:
     """Build the HPO request of one algorithm in one phase.
@@ -175,7 +182,7 @@ def _build_hpo_request(
 def _run_hpo(
     *,
     X: pd.DataFrame,
-    y: pd.Series,
+    y: Series,
     request: HpoRequest,
 ) -> PhaseResult | None:
     """Run the hyperparameter search of one algorithm and map the outcome."""
@@ -236,7 +243,7 @@ def _to_phase_result(
 
 def _execute_hpo_phase(
     X: pd.DataFrame,
-    y: pd.Series,
+    y: Series,
     request: HpoRequest,
 ) -> PhaseResult | None:
     """Run a specific HPO phase for an algorithm (module-level function).
@@ -381,7 +388,7 @@ def _consume_worker_results(
     """
     phase_results: dict[str, PhaseResult] = {}
     disqualified: dict[str, str] = {}
-    oof_pool: list[np.ndarray] = []
+    oof_pool: list[Array] = []
     for res in results:
         if res is None:
             continue
@@ -413,7 +420,7 @@ def _consume_worker_results(
 
 def _apply_target_domain_guard(
     all_algorithms: dict[str, AlgoCfg],
-    y: pd.Series,
+    y: Series,
     disqualified: Collection[str] = (),
     target_transform: TargetTransform = TargetTransform.none,
 ) -> TargetDomainOutcome:
@@ -464,7 +471,7 @@ def _apply_target_domain_guard(
         TargetDomainOutcome: The guarded algorithms and the up-front
             disqualifications.
     """
-    y_eff: pd.Series | np.ndarray = y
+    y_eff: Series | Array = y
     if target_transform is not TargetTransform.auto and (
         target_transform is not TargetTransform.none
     ):
@@ -572,8 +579,8 @@ def _bbc_enabled(
 
 
 def _merge_complexity_guard_records(
-    records: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
     """Merge per-(algo, param, level) guard records into one record per parameter.
 
     The guard applies several rules to the same parameter (level A then
@@ -589,9 +596,9 @@ def _merge_complexity_guard_records(
     * the ``levels`` field lists all applied rule levels (e.g. ``["A", "B"]``);
     * a record produced in an earlier phase is not duplicated by a later one
       (identical (algo, param, before, after) collapses)."""
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    merged: dict[tuple[str, str], dict[str, object]] = {}
     for rec in records:
-        key = (rec.get("algo", "?"), rec.get("param", "?"))
+        key = (str(rec.get("algo", "?")), str(rec.get("param", "?")))
         cur = merged.get(key)
         if cur is None:
             merged[key] = dict(rec)
@@ -601,8 +608,9 @@ def _merge_complexity_guard_records(
         # Same parameter in a later phase or a later rule of the same phase:
         # the final range of the parameter is the latest ``after``.
         cur["after"] = rec["after"]
-        if rec.get("level") and rec["level"] not in cur["levels"]:
-            cur["levels"].append(rec["level"])
+        levels = cast(list[object], cur["levels"])
+        if rec.get("level") and rec["level"] not in levels:
+            levels.append(rec["level"])
         # The aggregate "before" is the earliest one (the starting range
         # before any rule of the guard was applied).
         if cur.get("before") == cur.get("after") and rec.get("before") != rec.get(

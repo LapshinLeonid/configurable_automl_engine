@@ -16,7 +16,7 @@ import threading
 import warnings
 from collections.abc import Sequence
 from numbers import Real
-from typing import Any, Literal
+from typing import Literal, cast
 
 import numpy as np
 from scipy import sparse as sp
@@ -24,6 +24,12 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 
 from configurable_automl_engine.common.sklearn_compat import check_feature_names
+from configurable_automl_engine.common.types import (
+    BoolArray,
+    FloatArray,
+    IntArray,
+    NamesArray,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +139,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         # copy or modify its parameters); resolved lazily in _exclude_mask.
         self.exclude = exclude
 
-    def __sklearn_tags__(self) -> Any:
+    def __sklearn_tags__(self) -> object:
         """Declare estimator tags; NaN input is supported by design."""
         tags = super().__sklearn_tags__()
         tags.input_tags.allow_nan = True
@@ -183,7 +189,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             )
 
     @staticmethod
-    def _validate_real_param(name: str, value: Any) -> None:
+    def _validate_real_param(name: str, value: object) -> None:
         """Reject non-numeric and NaN values for a numeric parameter.
 
         Args:
@@ -205,7 +211,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         if math.isnan(float(value)):
             raise ValueError(f"Winsorizer: {name} must not be NaN, got {value}.")
 
-    def _to_2d_float(self, X: Any) -> np.ndarray:
+    def _to_2d_float(self, X: object) -> FloatArray:
         """Reduce the input to a 2D float ndarray (n_samples, n_features).
 
         Raises:
@@ -260,7 +266,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             )
         return arr
 
-    def _validate_X_for_transform(self, X: Any) -> np.ndarray:
+    def _validate_X_for_transform(self, X: object) -> FloatArray:
         """Validate a fitted-state input and reduce it to a 2D float ndarray.
 
         Shared by :meth:`transform` and :meth:`get_last_clip_counts` so the
@@ -287,11 +293,11 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             )
         return arr
 
-    def _input_names(self) -> np.ndarray | None:
+    def _input_names(self) -> NamesArray | None:
         """Return the input feature names recorded by ``fit``, or ``None``."""
-        return getattr(self, "feature_names_in_", None)
+        return cast(NamesArray | None, getattr(self, "feature_names_in_", None))
 
-    def fit(self, X: Any, y: Any = None) -> Winsorizer:
+    def fit(self, X: object, y: object = None) -> Winsorizer:
         """Learn the per-column clipping bounds.
 
         Args:
@@ -428,7 +434,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             n_rows,
         )
 
-    def _exclude_mask(self) -> np.ndarray:
+    def _exclude_mask(self) -> BoolArray:
         """Resolve the ``exclude`` entries into a per-column boolean mask.
 
         A string entry matches a column name (DataFrame input or the names
@@ -482,7 +488,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
                 )
         return mask
 
-    def _column_labels(self, mask: np.ndarray) -> list[str]:
+    def _column_labels(self, mask: BoolArray) -> list[str]:
         """Return the names (or positional labels) of the masked columns.
 
         Args:
@@ -498,7 +504,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             for col in np.flatnonzero(mask)
         ]
 
-    def transform(self, X: Any) -> np.ndarray:
+    def transform(self, X: object) -> FloatArray:
         """Clip the values to the bounds learned in ``fit``; NaN passes through.
 
         Args:
@@ -514,7 +520,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             NotFittedError: If the transformer has not been fitted yet.
         """
         arr = self._validate_X_for_transform(X)
-        clipped: np.ndarray = np.clip(arr, self.lower_bounds_, self.upper_bounds_)
+        clipped = np.clip(arr, self.lower_bounds_, self.upper_bounds_)
         # np.clip already keeps NaN, but do not rely on that: restore the
         # missing mask explicitly so NaN passes through for any dtype path.
         clipped[np.isnan(arr)] = np.nan
@@ -527,7 +533,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         )
         return clipped
 
-    def _clip_counts(self, X: np.ndarray, clipped: np.ndarray) -> np.ndarray:
+    def _clip_counts(self, X: FloatArray, clipped: FloatArray) -> IntArray:
         """Count the values that ``clip`` changed, per column.
 
         Args:
@@ -540,10 +546,12 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
         """
         # A value is counted when it differs from its clipped version and is
         # not NaN (NaN passes through unchanged).
-        counts: np.ndarray = np.sum((X != clipped) & ~np.isnan(X), axis=0).astype(int)
+        counts = cast(
+            IntArray, np.sum((X != clipped) & ~np.isnan(X), axis=0).astype(int)
+        )
         return counts
 
-    def get_last_clip_counts(self, X: Any) -> dict[str, int]:
+    def get_last_clip_counts(self, X: object) -> dict[str, int]:
         """Per-column number of values that ``transform`` clips for ``X``.
 
         Kept out of the estimator state on purpose: ``transform`` must not
@@ -573,7 +581,7 @@ class Winsorizer(TransformerMixin, BaseEstimator):  # type: ignore[misc]
             for col in range(len(counts))
         }
 
-    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+    def get_feature_names_out(self, input_features: object = None) -> NamesArray:
         """Map one input feature to one output feature, in order.
 
         Args:

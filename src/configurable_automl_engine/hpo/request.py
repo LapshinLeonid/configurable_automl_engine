@@ -13,10 +13,12 @@ must not import any other module of the ``hpo`` package. The setting groups
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 from automl_contracts.config.general import SplitAggregation as SplitAggregation
+from sklearn.base import TransformerMixin
 
 from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.settings import (
@@ -126,33 +128,33 @@ class HpoRequest:
     train_test_split_test_size: float = 0.2
     random_state: int | None = 42
     sampler_seed: int | None = None
-    space_overrides: dict[str, Any] | None = None
+    space_overrides: Mapping[str, object] | None = None
     user_hyperparameter_keys: list[str] | None = None
     limit_hyperparameters: bool = False
     complexity_guard: ComplexityGuardConfig = field(
         default_factory=ComplexityGuardConfig
     )
-    initial_params: dict[str, Any] | None = None
+    initial_params: dict[str, object] | None = None
     previous_trials: list[FrozenTrial] | None = field(default=None, compare=False)
-    preprocessor: Any | None = field(default=None, compare=False)
+    preprocessor: TransformerMixin | None = field(default=None, compare=False)
     categorical_features: list[str] | None = None
     numerical_features: list[str] | None = None
     encoding: EncodingSettings = field(default_factory=EncodingSettings)
-    preprocessing_override: PreprocessingOverride | dict[str, Any] | None = None
-    preprocessing_default: PreprocessingOverride | dict[str, Any] | None = None
+    preprocessing_override: PreprocessingOverride | Mapping[str, object] | None = None
+    preprocessing_default: PreprocessingOverride | Mapping[str, object] | None = None
     winsorizer_exclude: list[str] | None = None
     target_transform: TargetTransform = TargetTransform.none
     target_transform_skew_threshold: float | None = None
-    feature_selection_cfg: FeatureSelectionCfg | dict[str, Any] | None = None
+    feature_selection_cfg: FeatureSelectionCfg | Mapping[str, object] | None = None
     oversampling: OversamplingSettings = field(default_factory=OversamplingSettings)
-    pruning: dict[str, Any] | None = None
+    pruning: Mapping[str, object] | None = None
     policies: InputPolicies = field(default_factory=InputPolicies)
     fit_best_model: bool = True
     phase_name: str | None = None
     collect_oof: bool = False
 
 
-def as_complexity_guard_config(value: Any) -> ComplexityGuardConfig:
+def as_complexity_guard_config(value: object) -> ComplexityGuardConfig:
     """Normalize a complexity guard setting into a ``ComplexityGuardConfig``.
 
     Args:
@@ -167,4 +169,4 @@ def as_complexity_guard_config(value: Any) -> ComplexityGuardConfig:
         return ComplexityGuardConfig()
     if isinstance(value, ComplexityGuardConfig):
         return value
-    return ComplexityGuardConfig.from_dict(value)
+    return ComplexityGuardConfig.from_dict(cast(dict[str, object], value))

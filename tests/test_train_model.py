@@ -782,6 +782,11 @@ class TestIsotonicDataTransformer:
         # 5. Cover the empty list
         assert transformer._get_dimensions([]) == (0, 1)
 
+        # 6. A list of NumPy rows is a 2D matrix (the row is an ndarray)
+        rows = [np.array([1.0, 2.0]), np.array([3.0, 4.0])]
+        assert transformer._get_dimensions(rows) == (2, 2)
+        assert transformer._get_dimensions([(1.0, 2.0), (3.0, 4.0)]) == (2, 2)
+
     def test_fit_logic_and_median(self):
         """Cover the fit method logic, including median calculation and different X types."""
         # 1. Test for DataFrame and median calculation
@@ -838,6 +843,11 @@ class TestIsotonicDataTransformer:
         t3 = IsotonicDataTransformer(feature_index=1).fit(lst)
         res_lst = t3.transform(lst)
         assert np.array_equal(res_lst, np.array([[20], [40]]))
+        # 4. List of NumPy rows branch
+        rows = [np.array([10.0, 20.0]), np.array([30.0, 40.0])]
+        t4 = IsotonicDataTransformer(feature_index=1).fit(rows)
+        res_rows = t4.transform(rows)
+        assert np.array_equal(res_rows, np.array([[20.0], [40.0]]))
 
     def test_exception_unification(self):
         """Cover the except Exception block and error unification."""

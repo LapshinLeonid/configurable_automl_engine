@@ -12,22 +12,27 @@ import ``hpo.runner`` or ``configurable_automl_engine.tuner``.
 from __future__ import annotations
 
 import logging as _logging
-from typing import Any, cast
+from typing import TypedDict, cast
 
 import numpy as np
 import optuna
 from optuna.trial import FrozenTrial, Trial
 from sklearn import model_selection
 from sklearn.base import clone
-from sklearn.model_selection import (
-    train_test_split,
-)
+from sklearn.model_selection import BaseCrossValidator, train_test_split
 from sklearn.utils import _safe_indexing
 
 from configurable_automl_engine.common.bbc_cv import BBC_MAX_OOF_CELLS
 from configurable_automl_engine.common.errors import InvalidPredictionError
 from configurable_automl_engine.common.metrics import get_scorer_object
 from configurable_automl_engine.common.sklearn_compat import scorer_raw_parts
+from configurable_automl_engine.common.types import (
+    Array,
+    Estimator,
+    Frame,
+    Scorer,
+    Target,
+)
 from configurable_automl_engine.validation import iter_splits
 
 from .fold_eval import (
@@ -54,17 +59,32 @@ from .types import (
 log = _logging.getLogger(__name__)
 
 
-def _build_scorer(name: str) -> Any:
+class _RepeatOptions(TypedDict, total=False):
+    """Keyword arguments of a multi-repeat evaluator."""
+
+    n_repeats: int
+    split_aggregation: str
+    scores_out: list[float]
+    mask_out: list[bool]
+
+
+class _FoldOptions(_RepeatOptions, total=False):
+    """Repeat options plus the resolved validation plan."""
+
+    validation: ValidationPlan
+
+
+def _build_scorer(name: str) -> Scorer:
     """Create a scorer object from a metric name."""
     try:
         # get_scorer_object returns a scorer callable (a make_scorer or
         # sklearn scorer object)
-        return get_scorer_object(name)
+        return cast(Scorer, get_scorer_object(name))
     except Exception as err:
         raise HyperoptError(f"Unknown metric name: '{name}'") from err
 
 
-def _can_stratify(y: Any) -> bool:
+def _can_stratify(y: object) -> bool:
     """Determine whether stratification is possible for the y vector."""
     # np.asarray guarantees a plain np.ndarray and np.dtype for mypy (no ExtensionArray/Dtype)
     arr = np.asarray(y)
@@ -79,8 +99,8 @@ def _can_stratify(y: Any) -> bool:
 
 
 def _split_train_test(
-    X: Any, y: Any, *, test_size: float = 0.2, random_state: int | None = 42
-) -> tuple[Any, Any, Any, Any]:
+    X: Frame, y: Target, *, test_size: float = 0.2, random_state: int | None = 42
+) -> tuple[Frame, Frame, Target, Target]:
     """Split data into train and test sets with automatic stratification.
 
     Args:
@@ -91,7 +111,7 @@ def _split_train_test(
     strat = y if _can_stratify(y) else None
     try:
         return cast(
-            tuple[Any, Any, Any, Any],
+            tuple[Frame, Frame, Target, Target],
             train_test_split(
                 X,
                 y,
@@ -103,7 +123,7 @@ def _split_train_test(
         )
     except ValueError:
         return cast(
-            tuple[Any, Any, Any, Any],
+            tuple[Frame, Frame, Target, Target],
             train_test_split(
                 X, y, test_size=test_size, shuffle=True, random_state=random_state
             ),
@@ -112,19 +132,19 @@ def _split_train_test(
 
 def _evaluate_with_intermediate_reports(
     trial: Trial,
-    estimator: Any,
-    X: Any,
-    y: Any,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
     *,
     method: str,
     n_folds: int,
     test_size: float,
     random_state: int | None,
-    scorer: Any,
+    scorer: Scorer,
     pool_metric: bool = False,
     algo_name: str = "",
     phase_name: str = "",
-    oof_out: np.ndarray | None = None,
+    oof_out: Array | None = None,
     n_repeats: int = 1,
     split_aggregation: str = "median",
     step_offset: int = 0,
@@ -337,18 +357,18 @@ def _evaluate_with_intermediate_reports(
 
 
 def _evaluate_pooled_cv(
-    estimator: Any,
-    X: Any,
-    y: Any,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
     *,
     method: str,
     n_folds: int,
     test_size: float,
     random_state: int | None,
-    scorer: Any,
+    scorer: Scorer,
     algo_name: str = "",
     phase_name: str = "",
-    oof_out: np.ndarray | None = None,
+    oof_out: Array | None = None,
     n_repeats: int = 1,
     split_aggregation: str = "median",
     validation: ValidationPlan | None = None,
@@ -468,7 +488,7 @@ def _evaluate_pooled_cv(
     # Per-fold (true, pred) pairs are retained so that the per-fold fallback
     # (used when the pooled value is impossible) can be scored WITHOUT
     # re-iterating the splits or re-training the folds.
-    fold_pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    fold_pairs: list[tuple[Array, Array]] = []
     n_folds_total = 0
     n_failed_folds = 0
     for X_tr, X_te, y_tr, y_te, test_idx in iter_splits(
@@ -549,8 +569,8 @@ def _evaluate_pooled_cv(
 
 
 def _phase_oof_matrix(
-    phase_trials: list[FrozenTrial], trial_oof: dict[int, np.ndarray]
-) -> np.ndarray | None:
+    phase_trials: list[FrozenTrial], trial_oof: dict[int, Array]
+) -> Array | None:
     """Stack the kept OOF vectors of the phase's own COMPLETED trials.
 
     A multi-split trial stores one OOF vector per repeat — the repeats are
@@ -568,13 +588,13 @@ def _phase_oof_matrix(
 
 
 def score_trial(
-    estimator: Any,
-    X: Any,
-    y: Any,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
     *,
     trial: Trial,
     validation: ValidationPlan,
-    scorer: Any,
+    scorer: Scorer,
     pruning_active: bool,
     pool_metric: bool,
     random_state: int | None,
@@ -648,8 +668,8 @@ def score_trial(
     # The repeat-specific keyword arguments are passed only for a real
     # multi-split run: with one repeat the evaluator is called without them,
     # through the same monkeypatchable signature.
-    repeat_options: dict[str, Any] = {}
-    fold_options: dict[str, Any] = {}
+    repeat_options: _RepeatOptions = {}
+    fold_options: _FoldOptions = {}
     if n_repeats > 1:
         repeat_options = {
             "n_repeats": n_repeats,
@@ -711,10 +731,15 @@ def score_trial(
             **fold_options,
         )
     else:
-        if n_repeats > 1:
-            repeat_options["random_state"] = random_state
         value = _score_fold_mean(
-            estimator, X, y, validation, scorer, oof, **repeat_options
+            estimator,
+            X,
+            y,
+            validation,
+            scorer,
+            oof,
+            random_state=random_state if n_repeats > 1 else None,
+            **repeat_options,
         )
     # If we got +inf (an nrmse error) or NaN, return the worst float
     # (analog of the float32 minimum or float('-inf')).
@@ -729,13 +754,13 @@ def score_trial(
 
 
 def _score_holdout(
-    estimator: Any,
-    X: Any,
-    y: Any,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
     validation: ValidationPlan,
-    scorer: Any,
+    scorer: Scorer,
     random_state: int | None,
-    oof_out: np.ndarray | None,
+    oof_out: Array | None,
     *,
     n_repeats: int = 1,
     split_aggregation: str = "median",
@@ -825,7 +850,7 @@ def _score_holdout(
     return float(scorer(model, X_te, y_te))
 
 
-def _check_holdout_predictions_finite(model: Any, X_te: Any) -> None:
+def _check_holdout_predictions_finite(model: Estimator, X_te: Frame) -> None:
     """Raise ``InvalidPredictionError`` on non-finite hold-out predictions."""
     pred = np.asarray(model.predict(X_te), dtype=float).reshape(-1)
     if not np.isfinite(pred).all():
@@ -836,12 +861,12 @@ def _check_holdout_predictions_finite(model: Any, X_te: Any) -> None:
 
 
 def _score_fold_mean(
-    estimator: Any,
-    X: Any,
-    y: Any,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
     validation: ValidationPlan,
-    scorer: Any,
-    oof_out: np.ndarray | None,
+    scorer: Scorer,
+    oof_out: Array | None,
     *,
     n_repeats: int = 1,
     split_aggregation: str = "median",
@@ -883,12 +908,12 @@ def _score_fold_mean(
 
 
 def _score_fold_mean_once(
-    estimator: Any,
-    X: Any,
-    y: Any,
-    cv: Any,
-    scorer: Any,
-    oof_out: np.ndarray | None,
+    estimator: Estimator,
+    X: Frame,
+    y: Target,
+    cv: BaseCrossValidator,
+    scorer: Scorer,
+    oof_out: Array | None,
 ) -> float:
     """The fold-average score of one repeat."""
     if oof_out is None:

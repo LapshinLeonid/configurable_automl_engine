@@ -12,14 +12,15 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from multiprocessing import shared_memory
-from typing import Any
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
 
 from configurable_automl_engine.common.shared_frame import SharedDataFrame
+from configurable_automl_engine.training_engine.parallel_transport import ShmMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +121,22 @@ def _mark_worker_start(start_signal_name: str) -> None:
         logger.debug(f"Start-signal write failed: {e}")
 
 
+class _TaskFunc(Protocol):
+    """A task callable accepting arbitrary positional and keyword arguments."""
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        """Run the task."""
+        ...  # pragma: no cover - protocol definition
+
+
 def _worker_proxy(
-    func: Callable[..., Any],
-    args: Sequence[Any],
-    kwargs: Mapping[str, Any],
+    func: _TaskFunc,
+    args: Sequence[object],
+    kwargs: Mapping[str, object],
     disk_indices: list[int] | None,
-    shm_info: dict[int, tuple[Any, ...]],
+    shm_info: dict[int, ShmMetadata],
     start_signal_name: str | None = None,
-) -> Any:
+) -> object:
     """Deserialize data and run the target function inside a worker.
     Execution logic:
     1. Shared Memory: finds SharedDataFrame objects by index and

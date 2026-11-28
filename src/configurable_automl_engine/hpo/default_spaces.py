@@ -8,7 +8,7 @@ the engine's default spaces, clipping and type-inference helpers.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 from automl_contracts.search_space import (
@@ -277,7 +277,7 @@ SVR_EPSILON_MIN_LOW = 1e-8
 
 
 def compute_svr_epsilon_bounds(
-    y: Any,
+    y: object,
     *,
     rel_min: float = SVR_EPSILON_REL_MIN,
     rel_max: float = SVR_EPSILON_REL_MAX,
@@ -356,7 +356,7 @@ def compute_svr_epsilon_bounds(
     return float(low), float(high)
 
 
-def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
+def clip_search_space(space: dict[str, object], n_samples: int) -> dict[str, object]:
     """
     Adjust the search space bounds based on the sample size.
 
@@ -373,7 +373,7 @@ def clip_search_space(space: dict[str, Any], n_samples: int) -> dict[str, Any]:
         raise ValueError(f"n_samples must be positive. Got {n_samples}")
 
     # Create a new dict so the original space is not mutated
-    clipped_space = {}
+    clipped_space: dict[str, object] = {}
 
     for param, entry in space.items():
         strategy = DATA_DEPENDENT_CONSTRAINTS.get(param)

@@ -13,14 +13,13 @@ module holds definitions only and must not import any other module of the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
-import numpy as np
 from optuna.trial import FrozenTrial
 
 from configurable_automl_engine.common.definitions import (
     WORST_SCORE_THRESHOLD as WORST_SCORE_THRESHOLD,
 )
+from configurable_automl_engine.common.types import Array, Estimator
 
 
 # ═════════════════════════════════════ exceptions ════════════════════════════
@@ -149,13 +148,13 @@ class OptimizeResult:
             ``TrialStats``. Always present on a non-``None`` result.
     """
 
-    model: Any | None
-    params: dict[str, Any] | None
+    model: Estimator | None
+    params: dict[str, object] | None
     score: float | None
     trials: list[FrozenTrial]
-    complexity_guard: list[dict[str, Any]] | None = None
+    complexity_guard: list[dict[str, object]] | None = None
     n_trials_evaluated: int = 0
-    oof_predictions: np.ndarray | None = None
+    oof_predictions: Array | None = None
     trial_stats: TrialStats = field(default_factory=TrialStats)
 
 

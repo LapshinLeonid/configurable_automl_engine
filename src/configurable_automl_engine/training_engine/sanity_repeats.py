@@ -15,10 +15,10 @@ import the gate.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
 
 import numpy as np
 
+from configurable_automl_engine.common.types import Array
 from configurable_automl_engine.training_engine.sanity_circuits import (
     _ZERO_VAR_EPS,
     _diversity_fails,
@@ -33,7 +33,7 @@ from configurable_automl_engine.training_engine.sanity_result import (
 )
 
 
-def _repeat_vectors(y: np.ndarray, vectors: Sequence[Any]) -> list[np.ndarray]:
+def _repeat_vectors(y: Array, vectors: Sequence[object]) -> list[Array]:
     """Convert the per-repeat vectors to validated 1-D float arrays."""
     prepared = [
         _to_float_vector(vector, f"y_pred_oof_by_repeat[{index}]")
@@ -49,8 +49,8 @@ def _repeat_vectors(y: np.ndarray, vectors: Sequence[Any]) -> list[np.ndarray]:
 
 
 def check_diversity_repeats(
-    y: np.ndarray,
-    y_pred_oof_by_repeat: Sequence[Any],
+    y: Array,
+    y_pred_oof_by_repeat: Sequence[object],
     *,
     adaptive: bool,
     min_prediction_diversity: float,
@@ -157,8 +157,8 @@ def check_diversity_repeats(
 
 
 def check_unique_repeats(
-    y: np.ndarray,
-    y_pred_oof_by_repeat: Sequence[Any],
+    y: Array,
+    y_pred_oof_by_repeat: Sequence[object],
     *,
     min_unique_count: int,
     min_unique_ratio: float,

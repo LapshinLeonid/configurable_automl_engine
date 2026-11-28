@@ -15,8 +15,9 @@ pipeline step modules (``hpo_phases``, ``finalists``, ``select_steps``,
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ from configurable_automl_engine.common.datetime_features import (
 from configurable_automl_engine.common.definitions import TargetTransform
 from configurable_automl_engine.common.log_setup import setup_logging
 from configurable_automl_engine.common.metrics import to_sklearn_name
+from configurable_automl_engine.common.types import Series
 from configurable_automl_engine.common.validation_utils import (
     check_target_constant,
     check_target_exists,
@@ -78,7 +80,7 @@ def _register_datetime_expansion(
 
 
 def load_config(
-    config: str | Path | Config | dict[str, Any],
+    config: str | Path | Config | Mapping[str, object],
     df: pd.DataFrame,
     target: str | None = None,
 ) -> tuple[Config, str]:
@@ -169,7 +171,7 @@ def _resolve_holdout_fraction(
     return None
 
 
-def _resolve_auto_target_transform(cfg: Config, y: pd.Series, *, holdout: bool) -> bool:
+def _resolve_auto_target_transform(cfg: Config, y: Series, *, holdout: bool) -> bool:
     """Resolve ``general.target_transform: 'auto'`` into a concrete method.
 
     Runs once in ``prepare_dataset`` — after the outer hold-out is split off
@@ -243,7 +245,7 @@ def _resolve_auto_target_transform(cfg: Config, y: pd.Series, *, holdout: bool) 
 
 
 def _fallback_transform_for_full_y(
-    resolved: TargetTransform, full_y: pd.Series
+    resolved: TargetTransform, full_y: Series
 ) -> TargetTransform:
     """Guard the resolved transform against the FULL data domain.
 
@@ -408,7 +410,7 @@ def prepare_dataset(cfg: Config, df: pd.DataFrame, target_col: str) -> PreparedD
     # random split is used.
     holdout_fraction = _resolve_holdout_fraction(cfg.general.holdout_fraction, len(X))
     holdout_X: pd.DataFrame | None = None
-    holdout_y: pd.Series | None = None
+    holdout_y: Series | None = None
     if holdout_fraction is not None:
         if len(X) < 2:
             raise ValueError(

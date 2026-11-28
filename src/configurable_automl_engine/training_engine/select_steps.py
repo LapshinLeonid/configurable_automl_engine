@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable, Mapping
-from typing import Any
 
 import numpy as np
 
@@ -90,7 +89,7 @@ def _rank_sanity_candidates(
 
 def _serialize_audit_result(
     audit: SanityCheckResult, generalization_gap_mode: str
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Serialize a ``SanityCheckResult`` into a JSON-compatible dict.
 
     NaN statistics of disabled/non-computable circuits are replaced with
@@ -304,7 +303,7 @@ def _sanity_gate_section(
     n_repeats: int = 1,
     split_aggregation: str = "median",
     candidates: Mapping[str, FinalistCandidate] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Build the report section of a ``sanity_gate`` select step.
 
     The applied circuit D mode is included in the report together with the
@@ -330,7 +329,7 @@ def _sanity_gate_section(
         candidates: The trained finalists (the source of the per-repeat
             ``RMSE_oof`` spread).
     """
-    section: dict[str, Any] = {
+    section: dict[str, object] = {
         "strategy": "sanity_gate",
         "generalization_gap_mode": generalization_gap_mode,
         "n_repeats": int(n_repeats),

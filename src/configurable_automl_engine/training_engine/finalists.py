@@ -16,7 +16,7 @@ import logging
 import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
@@ -28,7 +28,7 @@ from configurable_automl_engine.common.metrics import (
     to_user_value,
     user_direction,
 )
-from configurable_automl_engine.common.types import Params
+from configurable_automl_engine.common.types import Array, Params, Series
 from configurable_automl_engine.training_engine.config_parser import (
     AlgoCfg,
     Config,
@@ -48,7 +48,7 @@ from .thread_pool import run_parallel_outcomes
 _LOG = logging.getLogger(__name__)
 
 
-def is_valid_winner_score(score: Any) -> bool:
+def is_valid_winner_score(score: object) -> bool:
     """Check that a "raw" score value can qualify as a winning score.
 
     A valid winner score must be:
@@ -456,8 +456,8 @@ def _fit_finalist(
     algo_name: str,
     algo_cfg: AlgoCfg,
     X: pd.DataFrame,
-    y: pd.Series,
-    best_params: dict[str, Any],
+    y: Series,
+    best_params: dict[str, object],
     cfg: Config,
     metric_name_sklearn: str,
     *,
@@ -467,7 +467,7 @@ def _fit_finalist(
     random_state: int | None,
     target_transform: TargetTransform = TargetTransform.none,
     datetime_expansion: dict[str, list[str]] | None = None,
-) -> Any:
+) -> ModelTrainer:
     """Train a finalist on 100% of the data and return its ``ModelTrainer``.
 
     Performs exactly one training pass (``ModelTrainer.fit``): validation
@@ -524,7 +524,7 @@ def _to_candidate(
     params: Params,
     cv_score: float,
     X: pd.DataFrame,
-    y: pd.Series,
+    y: Series,
 ) -> FinalistCandidate:
     """Assemble a ``FinalistCandidate`` from a trained ``ModelTrainer``.
 
@@ -544,7 +544,7 @@ def _to_candidate(
         rmse_full = None
     vectors_by_repeat = getattr(trainer, "oof_predictions_by_repeat_", None)
     repeat_scores = getattr(trainer, "oof_repeat_scores_", None)
-    y_pred_oof_by_repeat: list[np.ndarray | pd.Series] | None = None
+    y_pred_oof_by_repeat: list[Array | Series] | None = None
     has_valid_oof = True
     n_repeats = 1
     if isinstance(vectors_by_repeat, (list, tuple)) and vectors_by_repeat:
@@ -592,7 +592,7 @@ class _FinalistSpec:
     Attributes:
         algo_name (str): The algorithm name.
         algo_cfg (AlgoCfg): The algorithm configuration.
-        params (dict[str, Any]): The best hyperparameters from HPO.
+        params (dict[str, object]): The best hyperparameters from HPO.
         cv_score (float): The raw HPO score of the candidate.
         cfg (Config): The root config (trainer assembly settings).
         metric_name_sklearn (str): The metric in sklearn semantics.
@@ -611,7 +611,7 @@ class _FinalistSpec:
 
     algo_name: str
     algo_cfg: AlgoCfg
-    params: dict[str, Any]
+    params: dict[str, object]
     cv_score: float
     cfg: Config
     metric_name_sklearn: str
@@ -621,7 +621,7 @@ class _FinalistSpec:
     random_state: int | None
     target_transform: TargetTransform
     datetime_expansion: dict[str, list[str]] | None
-    y: pd.Series
+    y: Series
 
 
 @dataclass(frozen=True)
@@ -637,14 +637,14 @@ class _TrainedFinalist:
     ``FinalistCandidate``.
 
     Attributes:
-        trainer (Any): The fitted ``ModelTrainer``.
-        oof_predictions_by_repeat (list[Any] | None): The per-repeat OOF
+        trainer (ModelTrainer): The fitted ``ModelTrainer``.
+        oof_predictions_by_repeat (list[Array | Series] | None): The per-repeat OOF
             vectors (``None`` when the trainer keeps no such diagnostic, e.g.
             ``n_repeats = 1``).
     """
 
-    trainer: Any
-    oof_predictions_by_repeat: list[Any] | None
+    trainer: ModelTrainer
+    oof_predictions_by_repeat: list[Array | Series] | None
 
 
 def _train_finalist_worker(
@@ -802,7 +802,9 @@ def _train_finalists(
                     spec.algo_name,
                     outcome.reason(),
                 )
-            trained_tasks.append(outcome.value if outcome.ok else None)
+            trained_tasks.append(
+                cast(_TrainedFinalist, outcome.value) if outcome.ok else None
+            )
     else:
         trained_tasks = [_train_finalist_worker(spec, prepared.X) for spec in specs]
 

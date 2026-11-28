@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging as _logging
 import time
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, NoReturn, cast
+from typing import NoReturn, cast
 
 import numpy as np
 import optuna
@@ -27,6 +28,15 @@ from configurable_automl_engine.common.datetime_features import (
 from configurable_automl_engine.common.metrics import (
     is_non_additive_metric,
     register_custom_metrics,
+)
+from configurable_automl_engine.common.types import (
+    Array,
+    Estimator,
+    Frame,
+    FrameInput,
+    Scorer,
+    Target,
+    TargetInput,
 )
 from configurable_automl_engine.common.validation_utils import (
     check_target_numeric,
@@ -87,13 +97,13 @@ log = _logging.getLogger(__name__)
 
 
 def _validate_data(
-    X: Any,
-    y: Any,
+    X: FrameInput,
+    y: TargetInput,
     *,
     inf_policy: str = "as_missing",
     datetime_policy: str = "expand",
     drop_id_like_columns: bool = False,
-) -> Any:
+) -> Frame:
     """Validate the types and sizes of the input data X and y.
 
     The target ``y`` is additionally required to be a NUMERIC vector
@@ -164,7 +174,7 @@ def _validate_data(
     return X
 
 
-def _get_estimator(algo: str) -> Any:
+def _get_estimator(algo: str) -> bool:
     """Check the availability and validity of the given algorithm."""
     try:
         # Try to create a model with minimal parameters to check existence.
@@ -217,13 +227,13 @@ class _OptimizeRunner:
     preprocessing: PreprocessingPlan
     search: SearchSpacePlan
     pruning: PruningPlan
-    scorer: Any
+    scorer: Scorer
     study: optuna.Study
     best: BestTrial
-    best_model: Any
+    best_model: Estimator
     trial_stats: TrialStats
 
-    def __init__(self, X: Any, y: Any, request: HpoRequest) -> None:
+    def __init__(self, X: Frame, y: TargetInput, request: HpoRequest) -> None:
         """Store the data and the settings of a single optimisation run.
 
         Args:
@@ -252,7 +262,7 @@ class _OptimizeRunner:
         self.consecutive_fatal_failures = 0
         # The out-of-fold predictions of every completed trial with a valid
         # score (the BBC-CV input): trial number -> OOF vector of len(X).
-        self.trial_oof: dict[int, np.ndarray] = {}
+        self.trial_oof: dict[int, Array] = {}
         # The aggregated statistics of the current phase's own trials: the
         # counters are filled in run() after the Optuna loop (and also on the
         # "no valid result" path) and returned with the OptimizeResult.
@@ -440,10 +450,10 @@ class _OptimizeRunner:
 
     def assemble_estimator(
         self,
-        model_impl: Any,
+        model_impl: Estimator,
         apply_fs: bool = False,
         feature_index: int | None = None,
-    ) -> Any:
+    ) -> Estimator:
         """Assemble the trial pipeline; see ``trial_pipeline.assemble_estimator``."""
         return assemble_estimator(
             model_impl,
@@ -460,7 +470,7 @@ class _OptimizeRunner:
             ),
         )
 
-    def evaluate_trial(self, trial: Trial, current_estimator: Any) -> float:
+    def evaluate_trial(self, trial: Trial, current_estimator: Estimator) -> float:
         """Evaluate the assembled trial pipeline and return the target metric.
 
         Delegates to ``score_trial``. With ``collect_oof`` the OOF
@@ -482,7 +492,7 @@ class _OptimizeRunner:
         result = score_trial(
             current_estimator,
             self.X,
-            self.y,
+            cast(Target, self.y),
             trial=trial,
             validation=self.validation,
             scorer=self.scorer,
@@ -717,7 +727,9 @@ class _OptimizeRunner:
         )
         return True
 
-    def _isotonic_best_params(self, best_params: dict[str, Any]) -> dict[str, Any]:
+    def _isotonic_best_params(
+        self, best_params: dict[str, object]
+    ) -> dict[str, object]:
         """The reported best params of ``isotonic_regression``.
 
         The auxiliary ``use_feature_selection`` key is excluded (a guard
@@ -733,8 +745,8 @@ class _OptimizeRunner:
                 preprocessor,
                 self.preprocessing.n_numeric_eff,
                 self.X,
-                self.y,
-                params.get("feature_index", 0),
+                cast(Target, self.y),
+                cast(int, params.get("feature_index", 0)),
             )
             if feature_name is not None:
                 params["isotonic_feature"] = feature_name
@@ -750,7 +762,7 @@ class _OptimizeRunner:
             self.best.params,
         )
 
-    def _fit_best_model(self) -> Any:
+    def _fit_best_model(self) -> Estimator:
         """Train the final model on all provided data.
 
         Assembles the pipeline with the best parameters (taking the feature
@@ -767,7 +779,7 @@ class _OptimizeRunner:
             apply_fs=self.best.apply_fs,
             feature_index=cast(int | None, self.best.model_params.get("feature_index")),
         )
-        best_model.fit(self.X, self.y)
+        best_model.fit(self.X, cast(Target, self.y))
 
         self.best_model = best_model
         # Observability: the dimensionality and the storage format of the
@@ -819,7 +831,7 @@ class _OptimizeRunner:
         return True
 
 
-def _normalize_feature_selection_cfg(value: Any) -> FeatureSelectionCfg:
+def _normalize_feature_selection_cfg(value: object) -> FeatureSelectionCfg:
     """Normalize the feature selection configuration of a run.
 
     ``None`` -> default (mode='disabled'), dict -> ``FeatureSelectionCfg``
@@ -828,7 +840,7 @@ def _normalize_feature_selection_cfg(value: Any) -> FeatureSelectionCfg:
         return FeatureSelectionCfg()
     if isinstance(value, FeatureSelectionCfg):
         return value
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         try:
             return FeatureSelectionCfg.model_validate(value)
         except Exception as err:
@@ -839,7 +851,7 @@ def _normalize_feature_selection_cfg(value: Any) -> FeatureSelectionCfg:
     )
 
 
-def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
+def plan_validation(X: Frame, y: TargetInput, request: HpoRequest) -> ValidationPlan:
     """Validate the input and resolve the validation strategy.
 
     Performs the data and algorithm availability checks, normalizes the
@@ -860,6 +872,7 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     """
     algo = request.algo_name.lower()
     policies = request.policies
+    y_array = cast(Target, y)
     # Target transformation domain check: raised ONCE, before the first
     # trial (a per-trial check would spend the whole HPO budget on a
     # domain violation — e.g. ``boxcox`` on a target with zeros — and
@@ -867,7 +880,7 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     # ``ModelTrainer.fit`` validates the same way (the contract is shared);
     # 'auto' (no-hold-out mode) is a no-op — the fold-local resolution
     # validates the resolved domain per fit.
-    validate_target_for_transform(y, request.target_transform, allow_auto=True)
+    validate_target_for_transform(y_array, request.target_transform, allow_auto=True)
     # _validate_data returns a repaired feature matrix (e.g. datetime
     # columns expanded); the isinstance guard tolerates mocks that return
     # None.
@@ -896,7 +909,7 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
 
     # Determine how many rows the model actually "sees" during training
     # inside CV/Split, and resolve the validation strategy (incl. 'auto').
-    n_samples = len(y)
+    n_samples = len(y_array)
     n_features = X.shape[1]
     n_samples_eff = get_effective_train_size(
         n_total=n_samples,
@@ -971,7 +984,9 @@ def plan_validation(X: Any, y: Any, request: HpoRequest) -> ValidationPlan:
     )
 
 
-def run_optimization(X: Any, y: Any, request: HpoRequest) -> OptimizeResult | None:
+def run_optimization(
+    X: Frame, y: TargetInput, request: HpoRequest
+) -> OptimizeResult | None:
     """Run the hyperparameter search of one algorithm.
 
     The single entry point behind ``tuner.optimize`` and the training

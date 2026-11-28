@@ -31,8 +31,10 @@ __all__ = [
     "DataFrame",
     "Estimator",
     "EstimatorFactory",
+    "FloatArray",
     "Frame",
     "FrameInput",
+    "IntArray",
     "JSONDict",
     "MetricFn",
     "NamesArray",
@@ -48,6 +50,12 @@ __all__ = [
 
 #: A NumPy array with any element type.
 Array: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.number]]
+
+#: A NumPy array of float64 values (predictions, metrics, targets).
+FloatArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.float64]]
+
+#: A NumPy array of integer values (bins, codes, indices).
+IntArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.intp]]
 
 #: A boolean NumPy array (row masks and support masks).
 BoolArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.bool_]]

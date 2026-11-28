@@ -25,11 +25,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 from automl_contracts.config.sanity_gate import GeneralizationGapMode
 
+from configurable_automl_engine.common.types import Array, Frame, Predictor
 from configurable_automl_engine.training_engine.sanity_circuits import (
     DeadFeatureSettings,
     check_dead_features,
@@ -263,13 +263,13 @@ class ModelSanityGate:
     def check(
         self,
         *,
-        y: Any,
-        y_pred_oof: Any,
-        y_pred_full: Any | None = None,
-        X: Any | None = None,
-        model: Any = None,
+        y: object,
+        y_pred_oof: object,
+        y_pred_full: object | None = None,
+        X: Frame | None = None,
+        model: Predictor | None = None,
         candidate_name: str | None = None,
-        y_pred_oof_by_repeat: Sequence[Any] | None = None,
+        y_pred_oof_by_repeat: Sequence[object] | None = None,
     ) -> SanityCheckResult:
         """Run the model through every enabled audit circuit.
 
@@ -345,12 +345,12 @@ class ModelSanityGate:
     def _run_circuits(
         self,
         *,
-        y_arr: np.ndarray,
-        oof_arr: np.ndarray,
-        repeat_vectors: list[np.ndarray] | None,
-        y_pred_full: Any | None,
-        X: Any | None,
-        model: Any,
+        y_arr: Array,
+        oof_arr: Array,
+        repeat_vectors: list[Array] | None,
+        y_pred_full: object | None,
+        X: Frame | None,
+        model: Predictor | None,
     ) -> _CircuitsOutcome:
         """Run every enabled circuit and collect the metrics and messages.
 

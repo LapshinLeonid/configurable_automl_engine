@@ -11,9 +11,8 @@ import :mod:`.complexity_guard`, which applies the rules.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from configurable_automl_engine.hpo.default_spaces import (
     FloatSpace,
@@ -453,7 +452,7 @@ def _boost_n_estimators_cap(lr_high: float | None) -> float:
     return max(1.0, _BOOST_N_ESTIMATORS_BUDGET / effective_lr_high)
 
 
-def _learning_rate_high(space: dict[str, Any]) -> float | None:
+def _learning_rate_high(space: Mapping[str, object]) -> float | None:
     """Upper bound of ``learning_rate`` in a space, or ``None``.
 
     ``learning_rate`` of GradientBoosting/XGBoost is a positive float range;

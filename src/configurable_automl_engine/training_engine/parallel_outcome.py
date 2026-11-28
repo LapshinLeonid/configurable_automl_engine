@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 __all__ = ["TaskError", "TaskOutcome", "TaskStatus"]
 
@@ -41,7 +41,8 @@ class TaskOutcome:
 
     Attributes:
         status (TaskStatus): How the task ended.
-        value (Any): The returned value (``None`` unless ``status == "ok"``).
+        value (object | None): The returned value (``None`` unless
+            ``status == "ok"``).
         error (TaskError | None): Why the task has no value (``None`` for
             ``ok``).
         attempts (int): How many times the task was submitted (a pool
@@ -52,7 +53,7 @@ class TaskOutcome:
     """
 
     status: TaskStatus
-    value: Any = None
+    value: object | None = None
     error: TaskError | None = None
     attempts: int = 1
     duration: float | None = None

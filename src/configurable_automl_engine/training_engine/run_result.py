@@ -37,7 +37,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
-from typing import Any
+from collections.abc import Mapping
+from typing import cast
 
 from configurable_automl_engine.common.definitions import (
     MetricDirection,
@@ -74,7 +75,7 @@ def build_experiment_result(
     cfg: Config,
     prepared: PreparedData,
     ctx: PhaseContext,
-    result: dict[str, Any],
+    result: dict[str, object],
     run_started_at: dt.datetime,
     run_finished_at: dt.datetime,
     run_duration_seconds: float,
@@ -133,9 +134,11 @@ def build_experiment_result(
             else None
         ),
         score_std=_opt_float(result.get("score_std")),
-        winner_params=result.get("params", {}),
-        model_path=result.get("model_path"),
-        additional_metrics=dict(result.get("additional_metrics", {})),
+        winner_params=cast(dict[str, object], result.get("params", {})),
+        model_path=cast(str | None, result.get("model_path")),
+        additional_metrics=dict(
+            cast(Mapping[str, float], result.get("additional_metrics", {}))
+        ),
         disqualified_algorithms=dict(ctx.disqualified_algorithms),
         sanity_gate=(
             {name: dict(section) for name, section in ctx.sanity_gate_sections.items()}
@@ -148,7 +151,7 @@ def build_experiment_result(
             else None
         ),
         ensemble=(
-            dict(result["ensemble"])
+            dict(cast(Mapping[str, object], result["ensemble"]))
             if isinstance(result.get("ensemble"), dict)
             else None
         ),
@@ -157,10 +160,12 @@ def build_experiment_result(
         holdout_score=_opt_float(result.get("holdout_score")),
         bbc_score=_opt_float(result.get("bbc_score")),
         n_repeats=(
-            int(result["n_repeats"]) if result.get("n_repeats") is not None else None
+            int(cast(int, result["n_repeats"]))
+            if result.get("n_repeats") is not None
+            else None
         ),
         n_trials_evaluated=(
-            int(result["n_trials_evaluated"])
+            int(cast(int, result["n_trials_evaluated"]))
             if result.get("n_trials_evaluated")
             else None
         ),
@@ -389,11 +394,11 @@ def _algorithm_run_from_phase_result(
     )
 
 
-def _opt_float(value: Any) -> float | None:
+def _opt_float(value: object) -> float | None:
     """Normalize an optional dict-report float to a plain ``float``."""
     if value is None:
         return None
-    return float(value)
+    return float(cast(float, value))
 
 
 def _engine_version() -> str:

@@ -12,12 +12,12 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, groupby
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
-import pandas as pd
 from imblearn.pipeline import Pipeline
 
+from configurable_automl_engine import validation as _val
 from configurable_automl_engine.common.errors import (
     InvalidPredictionError,
     TrainingError,
@@ -31,25 +31,29 @@ from configurable_automl_engine.common.metrics import (
     to_user_value,
     warn_pooled_fallback_once,
 )
-from configurable_automl_engine.validation import (
-    aggregate_split_scores,
-    iter_splits,
-    make_cv,
-    repeat_index_of,
+from configurable_automl_engine.common.types import (
+    Array,
+    Estimator,
+    FloatArray,
+    Frame,
+    Scorer,
+    Target,
 )
+from configurable_automl_engine.validation import iter_splits
 
+from .trainer_data import _align_oof_vector, _count_valid_pairs
 from .trainer_state import ValidationScores
 
 #: Builds fresh pipeline steps (clones of the preprocessor and the model):
 #: ``make_steps(feature_selection_active, X_for_estimate)``.
-StepsFactory = Callable[[bool, Any], list[tuple[str, Any]]]
+StepsFactory = Callable[[bool, Frame | None], list[tuple[str, object]]]
 
 _LOG = logging.getLogger(__name__)
 
 
 #: The worst possible ``RMSE_oof`` of a repeat. A repeat whose OOF channel
 #: contains non-finite predictions is excluded from the aggregate by the
-#: finite-value filter of ``aggregate_split_scores`` (an RMSE is a "lower is
+#: finite-value filter of ``validation.aggregate_split_scores`` (an RMSE is a "lower is
 #: better" error, so +inf is its worst outcome).
 _WORST_OOF_SCORE = float("inf")
 
@@ -60,8 +64,8 @@ class _RepeatScoring:
 
     fold_raw: list[float]
     add_raw: dict[str, list[float]]
-    oof_pred: np.ndarray
-    oof_y: np.ndarray
+    oof_pred: FloatArray
+    oof_y: FloatArray
     fold_errors: list[str]
     oof_failed: bool
     repeat_index: int
@@ -72,12 +76,12 @@ class ScoringPlan:
     """Inputs that define how repeated validation outcomes are aggregated."""
 
     outcomes: list[_RepeatScoring]
-    X: Any
+    X: Frame
     n_samples: int
     method: str
     metric: str
-    scorer: Callable[..., Any]
-    add_scorers: dict[str, Callable[..., Any]]
+    scorer: Scorer
+    add_scorers: dict[str, Scorer]
     pool_primary: bool
     pool_additive: dict[str, bool]
     algorithm: str
@@ -91,13 +95,13 @@ class _RepeatAggregate:
     repeat_score: float
     add_scores: dict[str, float]
     oof_score: float
-    oof_vector: pd.Series | np.ndarray
+    oof_vector: Target
     n_valid_pairs: int
 
 
 def score_on_validation_splits(
-    X: Any,
-    y: Any,
+    X: Frame,
+    y: Target,
     make_steps: StepsFactory,
     *,
     feature_selection_active: bool,
@@ -156,9 +160,9 @@ def score_on_validation_splits(
 
     Note (strategy interface): building the OOF channel does not depend on
     a particular strategy — only the positional ``test_idx`` provided by
-    ``iter_splits`` for any strategy is used. Order-aware strategies
+    ``validation.iter_splits`` for any strategy is used. Order-aware strategies
     (``TimeSeriesSplit`` and similar) registered through
-    ``validation.SUPPORTED_VALIDATION_METHODS``/``make_cv`` will work
+    ``validation.SUPPORTED_VALIDATION_METHODS``/``validation.make_cv`` will work
     without rewriting this method.
 
     Args:
@@ -176,7 +180,7 @@ def score_on_validation_splits(
             seed 42). Repeat r uses ``random_state + r``.
         algorithm: The algorithm name (fallback WARNING deduplication).
         n_repeats: The number of repeated validation splits (``None`` → 1).
-            The effective count is resolved by ``iter_splits`` (LOO repeats
+            The effective count is resolved by ``validation.iter_splits`` (LOO repeats
             are ignored with a WARNING).
         split_aggregation: How the per-repeat values are combined: 'median'
             (default) or 'mean'. Used only when more than one repeat is
@@ -237,7 +241,7 @@ def score_on_validation_splits(
     if first_split is not None:
         try:
             repeat_groups = groupby(
-                chain((first_split,), split_iterator), key=repeat_index_of
+                chain((first_split,), split_iterator), key=_val.repeat_index_of
             )
             for repeat_index, repeat_splits in repeat_groups:
                 outcomes.append(
@@ -303,14 +307,14 @@ def _empty_repeat_outcome(n_samples: int) -> _RepeatScoring:
 
 
 def _score_repeat(
-    splits: list[Any],
+    splits: list[_val.SplitWithIndices],
     repeat_index: int,
     n_samples: int,
     make_steps: StepsFactory,
     *,
     feature_selection_active: bool,
-    scorer: Callable[..., Any],
-    add_scorers: dict[str, Callable[..., Any]],
+    scorer: Scorer,
+    add_scorers: dict[str, Scorer],
     pool_primary: bool,
     pool_additive: dict[str, bool],
 ) -> _RepeatScoring:
@@ -353,10 +357,20 @@ def _score_repeat(
                 fold_raw.append(float(raw))
 
             _score_additional_metrics_on_fold(
-                fold_pipe, X_te, y_te, add_scorers, pool_additive, add_raw
+                fold_pipe,
+                X_te,
+                cast(Target, y_te),
+                add_scorers,
+                pool_additive,
+                add_raw,
             )
             if not _collect_fold_oof(
-                fold_pipe, X_te, y_te, test_idx, oof_pred_buffer, oof_y_buffer
+                fold_pipe,
+                X_te,
+                cast(Target, y_te),
+                test_idx,
+                oof_pred_buffer,
+                oof_y_buffer,
             ):
                 oof_failed = True
         except Exception as err:  # noqa: BLE001
@@ -380,13 +394,13 @@ def _raise_all_folds_failed(outcome: _RepeatScoring) -> None:
 
 def _single_repeat_scores(
     outcome: _RepeatScoring,
-    X: Any,
+    X: Frame,
     n_samples: int,
     *,
     method: str,
     metric: str,
-    scorer: Callable[..., Any],
-    add_scorers: dict[str, Callable[..., Any]],
+    scorer: Scorer,
+    add_scorers: dict[str, Scorer],
     pool_primary: bool,
     pool_additive: dict[str, bool],
     algorithm: str,
@@ -495,7 +509,7 @@ def _multi_repeat_scores(plan: ScoringPlan) -> ValidationScores:
     repeat_scores: list[float] = []
     add_repeat: dict[str, list[float]] = {m: [] for m in plan.add_scorers}
     oof_repeat_scores: list[float] = []
-    oof_vectors: list[pd.Series | np.ndarray] = []
+    oof_vectors: list[Target] = []
     n_valid_pairs = 0
 
     for outcome in outcomes:
@@ -510,7 +524,7 @@ def _multi_repeat_scores(plan: ScoringPlan) -> ValidationScores:
         oof_vectors.append(aggregate.oof_vector)
         n_valid_pairs += aggregate.n_valid_pairs
 
-    val_score = aggregate_split_scores(repeat_scores, plan.split_aggregation)
+    val_score = _val.aggregate_split_scores(repeat_scores, plan.split_aggregation)
     finite_scores = [s for s in repeat_scores if np.isfinite(s)]
     score_mean = float(np.mean(finite_scores)) if finite_scores else None
     score_median = float(np.median(finite_scores)) if finite_scores else None
@@ -518,7 +532,7 @@ def _multi_repeat_scores(plan: ScoringPlan) -> ValidationScores:
 
     finite_oof_scores = [s for s in oof_repeat_scores if np.isfinite(s)]
     oof_score = (
-        float(aggregate_split_scores(finite_oof_scores, plan.split_aggregation))
+        float(_val.aggregate_split_scores(finite_oof_scores, plan.split_aggregation))
         if finite_oof_scores
         else None
     )
@@ -538,7 +552,7 @@ def _multi_repeat_scores(plan: ScoringPlan) -> ValidationScores:
         if not finite_values:
             continue
         additional_scores[mname] = float(
-            aggregate_split_scores(values, plan.split_aggregation)
+            _val.aggregate_split_scores(values, plan.split_aggregation)
         )
 
     total_cells = plan.n_samples * len(outcomes)
@@ -678,19 +692,6 @@ def _successful_repeat_aggregate(
     )
 
 
-def _count_valid_pairs(oof_pred: np.ndarray, oof_y: np.ndarray) -> int:
-    """Count the rows with finite OOF predictions and finite targets.
-
-    Args:
-        oof_pred: OOF prediction buffer.
-        oof_y: OOF target buffer.
-
-    Returns:
-        int: The number of finite ``(y_true, y_pred)`` pairs.
-    """
-    return int((np.isfinite(oof_pred) & np.isfinite(oof_y)).sum())
-
-
 def _log_multi_repeat_oof(
     n_valid_pairs: int,
     n_samples: int,
@@ -748,22 +749,22 @@ def _log_multi_repeat_oof(
 
 
 def _build_validation_scorers(
-    metric: str, additional_metrics: list[str], y: Any
-) -> tuple[Callable[..., Any], dict[str, Callable[..., Any]]]:
+    metric: str, additional_metrics: list[str], y: Target
+) -> tuple[Scorer, dict[str, Scorer]]:
     """Build the primary scorer and the additional-metric scorers.
 
     global_y=y: the global NRMSE is normalized by the full target (the range
     does not depend on a given fold). An additional metric whose scorer
     cannot be built is skipped with a WARNING."""
     try:
-        scorer = cast(Callable[..., Any], get_scorer_object(metric, global_y=y))
+        scorer = cast(Scorer, get_scorer_object(metric, global_y=np.asarray(y)))
     except Exception as err:
         raise TrainingError(f"Error calculating metrics on validation: {err}") from err
-    add_scorers: dict[str, Callable[..., Any]] = {}
+    add_scorers: dict[str, Scorer] = {}
     for mname in additional_metrics:
         try:
             add_scorers[mname] = cast(
-                Callable[..., Any], get_scorer_object(mname, global_y=y)
+                Scorer, get_scorer_object(mname, global_y=np.asarray(y))
             )
         except Exception as err:  # noqa: BLE001
             _LOG.warning(
@@ -776,7 +777,7 @@ def _build_validation_scorers(
 
 
 def _effective_validation_method(
-    X: Any,
+    X: Frame,
     n_samples: int,
     *,
     method: str,
@@ -784,16 +785,16 @@ def _effective_validation_method(
     test_size: float,
     random_state: int,
 ) -> str:
-    """Resolve the validation method actually applied by ``iter_splits``.
+    """Resolve the validation method actually applied by ``validation.iter_splits``.
 
     The method actually applied after a possible fallback (k_fold ->
     train_test_split for small N): OOF channel warnings must rely on the
     splits actually used rather than the requested strategy. Resolved via the
-    same make_cv that iter_splits calls internally — the values are
+    same ``validation.make_cv`` that ``validation.iter_splits`` calls internally — the values are
     guaranteed to match."""
     n_features = X.shape[1] if method == "auto" else None
     try:
-        effective_method, _, _ = make_cv(
+        effective_method, _, _ = _val.make_cv(
             n_samples,
             val_method=method,
             n_folds=n_folds,
@@ -809,10 +810,10 @@ def _effective_validation_method(
 
 
 def _score_additional_metrics_on_fold(
-    fold_pipe: Any,
-    X_te: Any,
-    y_te: Any,
-    add_scorers: dict[str, Callable[..., Any]],
+    fold_pipe: Estimator,
+    X_te: Frame,
+    y_te: Target,
+    add_scorers: dict[str, Scorer],
     pool_additive: dict[str, bool],
     add_raw: dict[str, list[float]],
 ) -> None:
@@ -838,12 +839,12 @@ def _score_additional_metrics_on_fold(
 
 
 def _collect_fold_oof(
-    fold_pipe: Any,
-    X_te: Any,
-    y_te: Any,
-    test_idx: Any,
-    oof_pred_buffer: np.ndarray,
-    oof_y_buffer: np.ndarray,
+    fold_pipe: Estimator,
+    X_te: Frame,
+    y_te: Target,
+    test_idx: Array,
+    oof_pred_buffer: FloatArray,
+    oof_y_buffer: FloatArray,
 ) -> bool:
     """Collect the out-of-fold predictions of a validation fold.
 
@@ -899,12 +900,12 @@ def _collect_fold_oof(
 
 
 def _aggregate_raw_values(
-    scorer: Callable[..., Any],
+    scorer: Scorer,
     raw_values: list[float],
     *,
     pooled: bool,
-    oof_y: np.ndarray,
-    oof_pred: np.ndarray,
+    oof_y: FloatArray,
+    oof_pred: FloatArray,
     algorithm: str,
     phase_name: str,
     failure_reason: str,
@@ -934,14 +935,14 @@ def _aggregate_raw_values(
 
 
 def _finalize_oof(
-    oof_pred: np.ndarray,
-    oof_y: np.ndarray,
-    X: Any,
+    oof_pred: FloatArray,
+    oof_y: FloatArray,
+    X: Frame,
     n_samples: int,
     *,
     method: str,
     emit_warnings: bool = True,
-) -> tuple[pd.Series | np.ndarray, float | None, float]:
+) -> tuple[Target, float | None, float]:
     """Finalize the OOF evaluation channel.
 
     Based on the prediction/target buffers collected on validation folds
@@ -1032,38 +1033,3 @@ def _finalize_oof(
             coverage,
         )
     return oof_vector, oof_score, coverage
-
-
-def _align_oof_vector(
-    oof_pred: np.ndarray,
-    X: Any,
-) -> pd.Series | np.ndarray:
-    """Align the OOF vector ``y_pred_oof`` to the original row order.
-
-    For pandas inputs (``DataFrame``/``Series``) with a unique index, a
-    ``pd.Series`` with preserved row labels is returned, including
-    MultiIndex. For numpy inputs and data with an unrecoverable index
-    (duplicate labels), an ``np.ndarray`` aligned by position is returned:
-    no sorting by index value is performed.
-
-    Note: the ``Index.hasnans`` property is not defined for ``MultiIndex``
-    (``NotImplementedError``), so the check is wrapped in try/except —
-    otherwise ``fit()`` would fail on data with a MultiIndex even though
-    such input worked on main.
-
-    Args:
-        oof_pred: OOF prediction buffer (NaN for uncovered rows), aligned
-            by position to the original data.
-        X: Original feature matrix.
-    """
-    if isinstance(X, (pd.DataFrame, pd.Series)) and X.index.is_unique:
-        try:
-            has_nan_labels = bool(X.index.hasnans)
-        except (NotImplementedError, TypeError):
-            # MultiIndex and other indexes without hasnans support: NaN
-            # labels cannot be checked, but uniqueness guarantees unambiguous
-            # positional alignment — keep the row labels.
-            has_nan_labels = False
-        if not has_nan_labels:
-            return pd.Series(oof_pred, index=X.index, name="y_pred_oof")
-    return oof_pred

@@ -19,6 +19,7 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 
+from configurable_automl_engine.common.types import Series
 from configurable_automl_engine.training_engine.config_parser import (
     SanityGateMode,
 )
@@ -223,7 +224,7 @@ def _is_audit_budget_skip(reasons: list[str]) -> bool:
 def select_robust_winner(
     candidate_models: Mapping[str, FinalistCandidate],
     X: pd.DataFrame,
-    y: pd.Series,
+    y: Series,
     sanity_gate: ModelSanityGate,
     *,
     mode: SanityGateMode = "off",

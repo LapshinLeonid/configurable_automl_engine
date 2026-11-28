@@ -8,6 +8,8 @@ density-weighted. The module must not import the other oversampling modules.
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 
+from configurable_automl_engine.common.types import Array
+
 
 class _SMOTERGenerator:
     """SMOTER-style synthetic sample generator for regression targets.
@@ -74,11 +76,11 @@ class _SMOTERGenerator:
 
     def fit_resample(
         self,
-        X: np.ndarray,
-        y: np.ndarray,
-        y_binned: np.ndarray,
+        X: Array,
+        y: Array,
+        y_binned: Array,
         n_to_generate: dict[int, int],
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[Array, Array]:
         """Generate ``n_to_generate[bin]`` synthetic rows per quantile bin.
 
         Args:
@@ -94,18 +96,18 @@ class _SMOTERGenerator:
                 create per bin code.
 
         Returns:
-            tuple[np.ndarray, np.ndarray]: A pair of the stacked synthetic
+            tuple[Array, Array]: A pair of the stacked synthetic
                 feature rows and the interpolated synthetic target values.
         """
         rng = np.random.RandomState(self.random_state)
-        X_synth: list[np.ndarray] = []
-        y_synth: list[np.ndarray] = []
+        X_synth: list[Array] = []
+        y_synth: list[Array] = []
 
         # ADASYN-style density: for every row, the share of its k-NN
         # neighbors (over the whole dataset) that belong to OTHER bins.
         # Rows whose neighborhood is dominated by other bins are "harder"
         # and receive proportionally more synthetic clones.
-        density: np.ndarray | None = None
+        density: Array | None = None
         if self.density_weighted and len(X) >= 2:
             k_global = min(5, len(X) - 1)
             nn_global = NearestNeighbors(n_neighbors=k_global + 1).fit(X)

@@ -43,9 +43,11 @@ so that the module stays decoupled from the Pydantic config schema
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TypedDict, cast
+
+from pydantic import BaseModel
 
 from configurable_automl_engine.hpo.complexity_rules import (
     _RULE_TABLE,
@@ -67,6 +69,20 @@ from configurable_automl_engine.hpo.default_spaces import (
 from configurable_automl_engine.models import resolve_algorithm_name
 
 # ─────────────────────────────── configuration ─────────────────────────────── #
+
+
+class _ConfigKwargs(TypedDict, total=False):
+    """Typed keyword arguments accepted by :class:`ComplexityGuardConfig`."""
+
+    mode: str
+    lossless: bool
+    regularize: bool
+    user_range_policy: str
+    small_n_threshold: int
+    small_np_ratio_threshold: float
+    medium_n_threshold: int
+    medium_np_ratio_threshold: float
+    size_basis: str
 
 
 @dataclass
@@ -107,7 +123,9 @@ class ComplexityGuardConfig:
     size_basis: str = "rows"
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> ComplexityGuardConfig:
+    def from_dict(
+        cls, data: Mapping[str, object] | BaseModel | None
+    ) -> ComplexityGuardConfig:
         """Build a config from a plain dict (e.g. ``model_dump`` of the schema).
 
         Accepts either a mapping or a Pydantic model exposing ``model_dump``
@@ -124,10 +142,11 @@ class ComplexityGuardConfig:
         """
         if not data:
             return cls()
-        if hasattr(data, "model_dump"):
+        if isinstance(data, BaseModel):
             data = data.model_dump(mode="json")
         allowed = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in data.items() if k in allowed})
+        values = {k: v for k, v in data.items() if k in allowed}
+        return cls(**cast(_ConfigKwargs, values))
 
 
 # ─────────────────────────────── size mode ─────────────────────────────────── #
@@ -175,7 +194,7 @@ def _ratio(n: int, p: int) -> float:
 # ─────────────────────────────── application ───────────────────────────────── #
 
 
-def _leaf_size_param(space: dict[str, Any], is_boosting: bool) -> str:
+def _leaf_size_param(space: Mapping[str, object], is_boosting: bool) -> str:
     """Name of the parameter that defines the leaf size for ``max_depth``.
 
     For boosting families the leaf size comes from ``min_child_weight``
@@ -291,7 +310,7 @@ def _apply_rule_to_entry(
     leaf_min: float,
     user_key: bool,
     cfg: ComplexityGuardConfig,
-) -> tuple[SearchSpaceEntry, dict[str, Any] | None]:
+) -> tuple[SearchSpaceEntry, dict[str, object] | None]:
     """Apply a single rule to one search-space entry.
 
     The rule computes a target range that tightens the parameter. For a
@@ -416,7 +435,7 @@ def _apply_rule_to_entry(
 
 
 def apply_complexity_guard(
-    space: dict[str, Any],
+    space: dict[str, object],
     algo: str,
     *,
     n: int,
@@ -424,7 +443,7 @@ def apply_complexity_guard(
     config: ComplexityGuardConfig | None = None,
     user_space_keys: Iterable[str] | None = None,
     p_size: int | None = None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     """Apply the adaptive complexity guard to a search space.
 
     Extends ``clip_search_space``: physical restrictions stay there, this
@@ -454,7 +473,7 @@ def apply_complexity_guard(
             back to ``p``.
 
     Returns:
-        tuple[dict[str, Any], list[dict[str, Any]]]: The (possibly adjusted)
+        tuple[dict[str, object], list[dict[str, object]]]: The (possibly adjusted)
             space and the list of log records. In ``warn`` mode the space is
             returned unchanged while the records describe the would-be
             changes; in ``off`` mode both are empty.
@@ -479,7 +498,7 @@ def apply_complexity_guard(
         rules = _small_boosting_rules(_learning_rate_high(space))
     user_keys = set(user_space_keys or ())
     result = dict(space)
-    logs: list[dict[str, Any]] = []
+    logs: list[dict[str, object]] = []
     # Would-be computed entries (even of an unapplied warn run) so that the
     # resolved leaf range is readable after the rules.
     computed_entries: dict[str, SearchSpaceEntry] = {}
@@ -536,7 +555,10 @@ def apply_complexity_guard(
     leaf_param = _leaf_size_param(result, is_boosting)
     if leaf_param:
         _run_rules({leaf_param}, leaf_min=1.0)
-    leaf_entry = computed_entries.get(leaf_param, result.get(leaf_param))
+    raw_leaf_entry = computed_entries.get(leaf_param, result.get(leaf_param))
+    leaf_entry = (
+        raw_leaf_entry if isinstance(raw_leaf_entry, SearchSpaceEntry) else None
+    )
     leaf_min = _effective_leaf_min(leaf_param, leaf_entry, n)
     # Invariant of the two-pass scheme: the second pass runs only with the
     # resolved leaf size (in rows, at least 1), never with a raw user value;
