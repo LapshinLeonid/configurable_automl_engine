@@ -29,8 +29,9 @@ PACKAGE_ROOT = Path(configurable_automl_engine.__file__).parent
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 #: Code lines (comments and docstrings excluded) allowed per module.
-#: Calibrated from the current maximum: ``trainer_scoring.py`` has 682 code
-#: lines, so the limit leaves a small headroom without forcing a split.
+#: Calibrated from the current maximum: ``experiment/reporting/markdown_reporter.py``
+#: has 652 code lines, so the limit leaves a small headroom without forcing a
+#: split.
 MAX_MODULE_LINES = 700
 
 #: Modules exempt from ``MAX_MODULE_LINES``. Empty: the limit has no

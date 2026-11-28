@@ -1306,7 +1306,8 @@ def test_coverage_feature_names_from_numerical_fallback():
         ),
         patch("configurable_automl_engine.trainer_scoring.get_scorer_object") as mock_scorer_factory,
         patch(
-            "configurable_automl_engine.trainer_scoring.direction_label", return_value="min better"
+            "configurable_automl_engine.trainer_scoring_aggregate.direction_label",
+            return_value="min better",
         ),
     ):
         # Configure the training environment

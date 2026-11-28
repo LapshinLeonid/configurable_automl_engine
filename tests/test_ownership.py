@@ -308,6 +308,7 @@ PURE_MODULES = (
     "hpo/pruning.py",
     "trainer_data.py",
     "trainer_scoring.py",
+    "trainer_scoring_aggregate.py",
     "trainer_feature_selection.py",
 )
 

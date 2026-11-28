@@ -113,6 +113,7 @@ extend-select = ["C901", "B904", "B905", "RUF100"]
 "src/configurable_automl_engine/hpo/request.py" = ["PLC0414"]
 "src/configurable_automl_engine/hpo/types.py" = ["PLC0414"]
 "src/configurable_automl_engine/training_engine/config_parser.py" = ["PLC0414"]
+"src/configurable_automl_engine/trainer_scoring.py" = ["PLC0414"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
@@ -178,7 +179,7 @@ layers = [
     # 3 — orchestration
     "training_engine",
     # 2 — engines
-    "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_quick : trainer_scoring : trainer_state : explain",
+    "tuner : hpo : trainer : trainer_artifact : trainer_data : trainer_feature_selection : trainer_params : trainer_quick : trainer_scoring : trainer_scoring_aggregate : trainer_state : explain",
     # 1 — ML building blocks
     "models : outliers_presets : preprocessing_presets : preprocessing : oversampling : validation : feature_selection : isotonic : experiment",
     # 0 — shared utilities
@@ -200,6 +201,7 @@ forbidden_modules = [
     "configurable_automl_engine.trainer_params",
     "configurable_automl_engine.trainer_quick",
     "configurable_automl_engine.trainer_scoring",
+    "configurable_automl_engine.trainer_scoring_aggregate",
     "configurable_automl_engine.trainer_state",
 ]
 
@@ -215,6 +217,7 @@ source_modules = [
     "configurable_automl_engine.trainer_params",
     "configurable_automl_engine.trainer_quick",
     "configurable_automl_engine.trainer_scoring",
+    "configurable_automl_engine.trainer_scoring_aggregate",
     "configurable_automl_engine.trainer_state",
 ]
 forbidden_modules = [
