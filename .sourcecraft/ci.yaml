@@ -470,6 +470,33 @@ workflows:
                 )
                 echo "✅ Engine works with the built contract wheel and legacy public imports"
 
+      # Mandatory security scan of the shipped packages. It runs as its own
+      # task so that a failing lint or test task cannot skip it. The full
+      # report is printed for visibility; the baseline gate fails the task
+      # only for new MEDIUM/HIGH findings. Baseline matching is per
+      # (file, check, text), so a new occurrence of an already-baselined
+      # check in the same file is not detected.
+      - name: security-scan
+        cubes:
+          - name: bandit-security
+            script:
+              - |
+                set -e
+                bash scripts/setup_python311.sh
+                python3.11 --version
+                python3.11 -m pip install --upgrade pip
+                python3.11 -m pip install --ignore-installed blinker
+                python3.11 -m pip install "bandit==1.9.4"
+              - |
+                set -e
+                echo ""
+                echo "═══════════════════════════════════════════════════════════════"
+                echo "  SECURITY SCAN (Bandit)"
+                echo "═══════════════════════════════════════════════════════════════"
+                python3.11 -m bandit -r src configurable-automl-contracts/src -f txt --exit-zero
+                python3.11 -m bandit -r src configurable-automl-contracts/src -ll -b .bandit-baseline.json
+                echo "✅ Bandit: no new MEDIUM/HIGH security issues found"
+
       # Independent contract gates: the contract is installed and tested
       # without the engine, built as its own distribution, and installed
       # into a clean virtual environment that must not contain the engine

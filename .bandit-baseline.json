@@ -1,0 +1,106 @@
+{
+  "results": [
+    {
+      "filename": "src/configurable_automl_engine/common/serialization_utils.py",
+      "test_name": "blacklist",
+      "test_id": "B301",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 502,
+        "link": "https://cwe.mitre.org/data/definitions/502.html"
+      },
+      "issue_confidence": "HIGH",
+      "issue_text": "Pickle and modules that wrap it can be unsafe when used to deserialize untrusted data, possible security issue.",
+      "line_number": 105,
+      "line_range": [
+        105
+      ],
+      "code": "104         with open(path, \"rb\") as f:\n105             return cast(object, pickle.load(f))\n"
+    },
+    {
+      "filename": "src/configurable_automl_engine/common/shared_frame.py",
+      "test_name": "hardcoded_tmp_directory",
+      "test_id": "B108",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 377,
+        "link": "https://cwe.mitre.org/data/definitions/377.html"
+      },
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Probable insecure usage of temp file/directory.",
+      "line_number": 133,
+      "line_range": [
+        133
+      ],
+      "code": "132     # for the check.\n133     if os.path.exists(\"/dev/shm\"):\n134         return \"/dev/shm\"\n"
+    },
+    {
+      "filename": "src/configurable_automl_engine/common/shared_frame.py",
+      "test_name": "hardcoded_tmp_directory",
+      "test_id": "B108",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 377,
+        "link": "https://cwe.mitre.org/data/definitions/377.html"
+      },
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Probable insecure usage of temp file/directory.",
+      "line_number": 134,
+      "line_range": [
+        134
+      ],
+      "code": "133     if os.path.exists(\"/dev/shm\"):\n134         return \"/dev/shm\"\n135     return None\n"
+    },
+    {
+      "filename": "src/configurable_automl_engine/training_engine/parallel_transport.py",
+      "test_name": "hardcoded_tmp_directory",
+      "test_id": "B108",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 377,
+        "link": "https://cwe.mitre.org/data/definitions/377.html"
+      },
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Probable insecure usage of temp file/directory.",
+      "line_number": 65,
+      "line_range": [
+        65
+      ],
+      "code": "64         # write; save_df then falls back to the system temp directory).\n65         self.tmp_dir = \"/dev/shm\" if use_shm and os.path.exists(\"/dev/shm\") else None\n66         self.created_files: list[str] = []\n"
+    },
+    {
+      "filename": "src/configurable_automl_engine/training_engine/parallel_transport.py",
+      "test_name": "hardcoded_tmp_directory",
+      "test_id": "B108",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 377,
+        "link": "https://cwe.mitre.org/data/definitions/377.html"
+      },
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Probable insecure usage of temp file/directory.",
+      "line_number": 65,
+      "line_range": [
+        65
+      ],
+      "code": "64         # write; save_df then falls back to the system temp directory).\n65         self.tmp_dir = \"/dev/shm\" if use_shm and os.path.exists(\"/dev/shm\") else None\n66         self.created_files: list[str] = []\n"
+    },
+    {
+      "filename": "src/configurable_automl_engine/training_engine/parallel_transport.py",
+      "test_name": "hardcoded_tmp_directory",
+      "test_id": "B108",
+      "issue_severity": "MEDIUM",
+      "issue_cwe": {
+        "id": 377,
+        "link": "https://cwe.mitre.org/data/definitions/377.html"
+      },
+      "issue_confidence": "MEDIUM",
+      "issue_text": "Probable insecure usage of temp file/directory.",
+      "line_number": 115,
+      "line_range": [
+        115
+      ],
+      "code": "114         # the process with SIGBUS.\n115         if self.tmp_dir == \"/dev/shm\":\n116             approx = int(df.memory_usage(deep=True).sum()) + 1024\n"
+    }
+  ]
+}

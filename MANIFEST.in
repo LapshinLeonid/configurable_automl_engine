@@ -3,6 +3,7 @@ exclude agents.md
 exclude .gitignore
 exclude requirements.txt
 exclude schema_generator.py
+exclude .bandit-baseline.json
 prune .github
 prune .sourcecraft
 prune scripts

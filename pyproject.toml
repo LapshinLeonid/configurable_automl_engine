@@ -63,6 +63,7 @@ test = [
     "jsonschema>=4.18",
     "mypy>=1.13",
     "ruff>=0.6.0",
+    "bandit==1.9.4",
     "types-PyYAML>=6.0.12",
     "pandas-stubs>=3.0.0",
     "scipy-stubs>=1.17.0",

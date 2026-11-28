@@ -119,6 +119,33 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # Mandatory security scan of the shipped packages. The full report is
+  # printed for visibility and the baseline gate fails the job only for new
+  # MEDIUM/HIGH findings that are not recorded in .bandit-baseline.json.
+  # Baseline matching is per (file, check, text), so a new occurrence of an
+  # already-baselined check in the same file is not detected.
+  security:
+    name: Bandit security scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: |
+          python -m pip install --upgrade pip
+          pip install "bandit==1.9.4"
+
+      - name: Run Bandit
+        run: |
+          bandit -r src configurable-automl-contracts/src -f txt --exit-zero
+          bandit -r src configurable-automl-contracts/src -ll -b .bandit-baseline.json
+
   # The published package declares Python 3.11-3.14. Every push and pull
   # request runs the fast subset on each supported interpreter on Linux,
   # Windows and macOS; a release tag runs the full suite on the Linux
