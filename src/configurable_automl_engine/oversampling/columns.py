@@ -9,6 +9,8 @@ pass its settings). The module must not import the other oversampling
 modules.
 """
 
+from __future__ import annotations
+
 import logging
 from collections.abc import Sequence
 

@@ -649,7 +649,7 @@ class SplitCategoricalEncoder(BaseEstimator, TransformerMixin):  # type: ignore[
         if any(sp.issparse(part) for part in parts):
             # scipy-stubs do not describe heterogeneous sequences
             # (ndarray | spmatrix) for hstack: cast the blocks to a common type.
-            sparse_blocks = cast(list[sp.csr_matrix[np.float64]], parts)
+            sparse_blocks = cast("list[sp.csr_matrix[np.float64]]", parts)
             return sp.hstack(sparse_blocks).tocsr()
         # All parts are dense (the sparse branch above) — a plain np.hstack.
         dense_blocks = cast(list[FloatArray], parts)

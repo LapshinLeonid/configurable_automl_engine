@@ -9,6 +9,8 @@ format (``trainer_state.ARTIFACT_FORMAT_VERSION``). It builds on the other
 oversampling modules; none of them may import it.
 """
 
+from __future__ import annotations
+
 import logging
 import threading
 from collections import Counter
@@ -295,7 +297,7 @@ class DataOversampler(BaseSampler):  # type: ignore[misc]
         if hasattr(X, "tocsr"):
             if algo == "random":
                 return self._resample_sparse(
-                    cast(sp.spmatrix[np.float64], X),
+                    cast("sp.spmatrix[np.float64]", X),
                     target,
                     self._target_strategy(target, multiplier),
                 )
