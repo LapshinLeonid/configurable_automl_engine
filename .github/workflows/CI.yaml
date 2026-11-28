@@ -120,14 +120,16 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   # The published package declares Python 3.11-3.14. Every push and pull
-  # request runs the fast subset on each supported interpreter; a release
-  # tag runs the full suite on all of them before the release can publish.
+  # request runs the fast subset on each supported interpreter on Linux,
+  # Windows and macOS; a release tag runs the full suite on the Linux
+  # interpreters before the release can publish.
   versions:
-    name: Python ${{ matrix.python-version }} tests
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }} tests
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: ["ubuntu-latest", "windows-latest", "macos-latest"]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout
@@ -139,6 +141,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
+        # On a release tag the fast subset is skipped and the full suite runs
+        # only on Linux, so the Windows/macOS entries would only install
+        # dependencies and could block the release without adding coverage.
+        if: github.ref_type != 'tag' || runner.os == 'Linux'
         run: |
           python -m pip install --upgrade pip
           pip install -e configurable-automl-contracts
@@ -159,7 +165,10 @@ jobs:
           tests/engine/test_contract_compatibility.py
 
       - name: Run the full test suite for a release
-        if: github.ref_type == 'tag'
+        # The full suite stays on Linux: it covers the benchmark gates and
+        # Linux-only facilities, while the fast subset above already runs on
+        # every declared platform.
+        if: github.ref_type == 'tag' && runner.os == 'Linux'
         env:
           PYTHONPATH: .
           AUTOML_RUN_NETWORK_TESTS: "1"
@@ -272,12 +281,17 @@ jobs:
   # changed the default POSIX start method and added the public
   # ProcessPoolExecutor.terminate_workers() / kill_workers(). The parallel
   # and safety-net tests run on the oldest and the newest supported version.
+  # They also run on Windows and macOS: the process start methods differ
+  # there (spawn only on Windows; spawn/forkserver on macOS) and the Linux
+  # /dev/shm tmpfs is absent, so the transport and cleanup paths that the
+  # Linux fork-based runs cannot reach are covered.
   parallel:
-    name: Parallel tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Parallel tests (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: ["ubuntu-latest", "windows-latest", "macos-latest"]
         python-version: ["3.11", "3.14"]
     steps:
       - name: Checkout

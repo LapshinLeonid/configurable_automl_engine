@@ -440,16 +440,18 @@ def test_run_parallel_with_disk_persistence():
     assert results == [60]
 
 
+def failing_df_task(df):
+    """A worker task that always fails; used to check cleanup on errors."""
+    raise ValueError("Intentional error")
+
+
 def test_run_parallel_shm_cleanup_on_error():
     """Check that resource cleanup is called even when a task fails."""
     df = pd.DataFrame({"a": [1]})
 
-    def error_task(df):
-        raise ValueError("Intentional error")
-
     # Call and ignore the error (it will be logged as Task Failed)
     results = run_parallel(
-        error_task, args_seq=[(df,)], mode="processes", shared_args_indices=[0]
+        failing_df_task, args_seq=[(df,)], mode="processes", shared_args_indices=[0]
     )
     assert results == [None]
     # If nothing crashed here and no memory leaked (checked manually or with monitoring tools),
@@ -1130,6 +1132,7 @@ def hang_task(seconds):
     return "hung-ended"
 
 
+@skip_timing_on_windows
 def test_run_parallel_processes_queued_tasks_get_full_budget():
     """In processes mode the queue does not "consume" a task's execution budget.
 
@@ -2555,6 +2558,7 @@ def test_disk_persistence_manager_free_parquet_space_no_tmp_dir():
 
 
 @requires_statvfs
+@requires_dev_shm
 def test_disk_persistence_manager_free_parquet_space_dev_shm(monkeypatch):
     """free_parquet_space reads os.statvfs on /dev/shm."""
     st = MagicMock()
@@ -2562,6 +2566,9 @@ def test_disk_persistence_manager_free_parquet_space_dev_shm(monkeypatch):
     st.f_frsize = 4096
     monkeypatch.setattr(os, "statvfs", lambda path: st)
     manager = DiskPersistenceManager(use_shm=True)
+    # The manager only picks /dev/shm up when the mount exists (Linux); the
+    # check itself must work with any POSIX statvfs, so pin the path.
+    manager.tmp_dir = "/dev/shm"
     assert manager.tmp_dir == "/dev/shm"
     assert manager.free_parquet_space() == 409600
 
@@ -2573,6 +2580,7 @@ def test_disk_persistence_manager_free_parquet_space_statvfs_error(monkeypatch):
         os, "statvfs", lambda path: (_ for _ in ()).throw(OSError("broken"))
     )
     manager = DiskPersistenceManager(use_shm=True)
+    manager.tmp_dir = "/dev/shm"
     assert manager.free_parquet_space() == 0
 
 
@@ -2583,6 +2591,7 @@ def test_disk_persistence_manager_free_parquet_space_statvfs_valueerror(monkeypa
         os, "statvfs", lambda path: (_ for _ in ()).throw(ValueError("invalid"))
     )
     manager = DiskPersistenceManager(use_shm=True)
+    manager.tmp_dir = "/dev/shm"
     assert manager.free_parquet_space() == 0
 
 
